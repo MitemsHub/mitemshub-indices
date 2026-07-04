@@ -88,12 +88,29 @@ class BacktestEngine:
                 higher_timeframe_candles=histories[higher_timeframe],
             )
             if report.signal is None:
+                if self.journal is not None:
+                    self.journal.record_event(
+                        "decision_skip",
+                        {
+                            "symbol": symbol,
+                            "epoch": primary.open_time + primary.timeframe_sec,
+                            "reasons": list(report.reasons),
+                        },
+                    )
                 continue
 
             signals += 1
             risk_decision = risk_engine.evaluate(report.signal)
             if not risk_decision.approved or risk_decision.intent is None:
                 rejected += 1
+                if self.journal is not None:
+                    self.journal.record_rejection(
+                        symbol=symbol,
+                        epoch=report.signal.snapshot.epoch,
+                        reasons=risk_decision.reasons,
+                        model_version=report.signal.model_version,
+                        confidence=report.signal.confidence,
+                    )
                 continue
 
             broker.submit(risk_decision.intent)

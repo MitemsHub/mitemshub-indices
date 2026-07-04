@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+from synthetic_trader.domain import TradeOutcome, TradeSignal
+from synthetic_trader.models.online import OnlineLogisticModel
+
+
+@dataclass(frozen=True)
+class JournalMetrics:
+    trades: int
+    win_rate: float
+    profit_factor: float
+    expectancy_r: float
+    net_pnl: float
+
+
+class TradeJournal:
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def record_signal(self, signal: TradeSignal) -> None:
+        self._append(
+            {
+                "type": "signal",
+                "symbol": signal.symbol,
+                "direction": signal.direction.value,
+                "confidence": signal.confidence,
+                "entry": signal.entry,
+                "stop_loss": signal.stop_loss,
+                "take_profit": signal.take_profit,
+                "reward_risk": signal.reward_risk,
+                "epoch": signal.snapshot.epoch,
+                "regime": signal.snapshot.regime.value,
+                "rationale": list(signal.rationale),
+                "model_version": signal.model_version,
+            }
+        )
+
+    def record_outcome(self, outcome: TradeOutcome) -> None:
+        payload = asdict(outcome)
+        payload["direction"] = outcome.direction.value
+        payload["type"] = "outcome"
+        self._append(payload)
+
+    def record_rejection(
+        self,
+        *,
+        symbol: str,
+        epoch: float,
+        reasons: tuple[str, ...],
+        model_version: str,
+        confidence: float | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        self._append(
+            {
+                "type": "rejection",
+                "symbol": symbol,
+                "epoch": epoch,
+                "reasons": list(reasons),
+                "model_version": model_version,
+                "confidence": confidence,
+                "metadata": metadata or {},
+            }
+        )
+
+    def record_event(self, event_type: str, payload: dict[str, object]) -> None:
+        self._append({"type": event_type, **payload})
+
+    def outcomes(self) -> list[TradeOutcome]:
+        outcomes: list[TradeOutcome] = []
+        if not self.path.exists():
+            return outcomes
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            payload = json.loads(line)
+            if payload.get("type") != "outcome":
+                continue
+            from synthetic_trader.domain import Direction
+
+            payload = dict(payload)
+            payload.pop("type", None)
+            payload["direction"] = Direction(payload["direction"])
+            outcomes.append(TradeOutcome(**payload))
+        return outcomes
+
+    def metrics(self) -> JournalMetrics:
+        outcomes = self.outcomes()
+        return metrics_from_outcomes(outcomes)
+
+    def teach(self, model: OnlineLogisticModel, outcome: TradeOutcome) -> float:
+        label = 1 if outcome.exit > outcome.entry else 0
+        return model.update(dict(outcome.features), label=label, sample_weight=min(2.0, max(0.25, abs(outcome.return_r))))
+
+    def _append(self, payload: dict[str, object]) -> None:
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def metrics_from_outcomes(outcomes: list[TradeOutcome]) -> JournalMetrics:
+    if not outcomes:
+        return JournalMetrics(trades=0, win_rate=0.0, profit_factor=0.0, expectancy_r=0.0, net_pnl=0.0)
+
+    wins = [outcome for outcome in outcomes if outcome.pnl > 0]
+    gross_profit = sum(outcome.pnl for outcome in outcomes if outcome.pnl > 0)
+    gross_loss = abs(sum(outcome.pnl for outcome in outcomes if outcome.pnl < 0))
+    expectancy_r = sum(outcome.return_r for outcome in outcomes) / len(outcomes)
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+    return JournalMetrics(
+        trades=len(outcomes),
+        win_rate=len(wins) / len(outcomes),
+        profit_factor=profit_factor,
+        expectancy_r=expectancy_r,
+        net_pnl=sum(outcome.pnl for outcome in outcomes),
+    )
