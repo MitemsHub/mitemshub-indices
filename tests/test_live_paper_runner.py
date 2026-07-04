@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from synthetic_trader.cli import main
 from synthetic_trader.domain import Direction, FeatureSnapshot, Regime, Tick, TradeSignal
-from synthetic_trader.live.paper_runner import run_live_paper
+from synthetic_trader.live.paper_runner import LivePaperSummary, run_live_paper
 from synthetic_trader.strategy.decision_engine import DecisionReport
 
 
@@ -67,6 +70,37 @@ def _journal_entries(path: Path) -> list[dict[str, object]]:
 
 
 class LivePaperRunnerTests(unittest.TestCase):
+    def test_paper_live_summary_prints_shutdown_fields(self) -> None:
+        summary = LivePaperSummary(
+            symbol="R_75",
+            live_ticks=50,
+            warmup_ticks=100,
+            signals=4,
+            approved_signals=2,
+            rejected_signals=2,
+            closed_trades=2,
+            shutdown_closed_trades=1,
+            open_positions_before_shutdown=1,
+            unresolved_positions=0,
+            finalized=True,
+            session_resets=1,
+            final_equity=1002.5,
+            model_version="unit-test",
+        )
+
+        with patch("synthetic_trader.cli.run_live_paper", return_value=summary):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = main(["paper-live", "--symbol", "R_75", "--duration-sec", "1"])
+
+        rendered = output.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("shutdown_closed_trades=1", rendered)
+        self.assertIn("open_positions_before_shutdown=1", rendered)
+        self.assertIn("unresolved_positions=0", rendered)
+        self.assertIn("session_resets=1", rendered)
+        self.assertIn("finalized=True", rendered)
+
     def test_run_live_paper_finalizes_open_positions_on_shutdown(self) -> None:
         warmup: list[Tick] = []
         live_ticks = [

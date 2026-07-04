@@ -181,6 +181,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"approved_signals={summary.approved_signals}")
         print(f"rejected_signals={summary.rejected_signals}")
         print(f"closed_trades={summary.closed_trades}")
+        print(f"shutdown_closed_trades={summary.shutdown_closed_trades}")
+        print(f"open_positions_before_shutdown={summary.open_positions_before_shutdown}")
+        print(f"unresolved_positions={summary.unresolved_positions}")
+        print(f"session_resets={summary.session_resets}")
+        print(f"finalized={summary.finalized}")
         print(f"final_equity={summary.final_equity:.2f}")
         print(f"model_version={summary.model_version}")
         return 0
