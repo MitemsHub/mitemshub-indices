@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from synthetic_trader.config import PaperExecutionConfig
 from synthetic_trader.domain import Candle, Direction, FeatureSnapshot, OrderIntent, Regime, TradeSignal
 from synthetic_trader.execution.paper import PaperBroker
 
@@ -123,6 +124,80 @@ class PaperBrokerTests(unittest.TestCase):
         self.assertEqual(outcomes[0].exit, 100.2)
         self.assertNotIn(outcomes[0].position_id, broker.positions)
         self.assertIn(other_position.id, broker.positions)
+
+    def test_exit_slippage_reduces_long_take_profit_exit_price(self) -> None:
+        broker = PaperBroker(PaperExecutionConfig(exit_slippage_ticks=0.5))
+        broker.submit(make_intent(make_signal(Direction.LONG)))
+
+        outcomes = broker.on_candle(
+            Candle(
+                symbol="R_75",
+                timeframe_sec=60,
+                open_time=120,
+                open=100.0,
+                high=103.0,
+                low=99.5,
+                close=102.5,
+            )
+        )
+
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].exit, 101.5)
+        self.assertEqual(outcomes[0].return_r, 1.5)
+        self.assertEqual(outcomes[0].pnl, 15.0)
+
+    def test_exit_slippage_applies_to_expiry_close(self) -> None:
+        broker = PaperBroker(PaperExecutionConfig(exit_slippage_ticks=0.25))
+        broker.submit(make_intent(make_signal(Direction.LONG, horizon_sec=120)))
+
+        broker.on_candle(
+            Candle(
+                symbol="R_75",
+                timeframe_sec=60,
+                open_time=120,
+                open=100.0,
+                high=100.6,
+                low=99.4,
+                close=100.3,
+            )
+        )
+        outcomes = broker.on_candle(
+            Candle(
+                symbol="R_75",
+                timeframe_sec=60,
+                open_time=180,
+                open=100.3,
+                high=100.9,
+                low=99.6,
+                close=100.8,
+            )
+        )
+
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].exit, 100.55)
+        self.assertEqual(outcomes[0].closed_at, 240)
+
+    def test_execution_penalty_reduces_realized_pnl_without_changing_r_multiple(self) -> None:
+        broker = PaperBroker(PaperExecutionConfig(execution_penalty_per_trade=0.2))
+        broker.submit(make_intent(make_signal(Direction.LONG)))
+
+        outcomes = broker.on_candle(
+            Candle(
+                symbol="R_75",
+                timeframe_sec=60,
+                open_time=120,
+                open=100.0,
+                high=103.0,
+                low=99.5,
+                close=102.5,
+            )
+        )
+
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].exit, 102.0)
+        self.assertEqual(outcomes[0].return_r, 2.0)
+        self.assertEqual(outcomes[0].pnl, 19.8)
+        self.assertTrue(outcomes[0].won)
 
 
 if __name__ == "__main__":
