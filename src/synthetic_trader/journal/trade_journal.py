@@ -125,10 +125,13 @@ def summarize_run_diagnostics(
     rejected_signals: int,
     shutdown_closed_trades: int,
     session_resets: int,
-) -> dict[str, float]:
+) -> dict[str, float | int]:
     approved_signals = max(0, signals - rejected_signals)
     total_signals = max(signals, 1)
     return {
+        "signals": signals,
+        "approved_signals": approved_signals,
+        "rejected_signals": rejected_signals,
         "trades": metrics.trades,
         "approval_rate": approved_signals / total_signals,
         "rejection_rate": rejected_signals / total_signals,

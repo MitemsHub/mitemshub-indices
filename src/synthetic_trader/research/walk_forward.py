@@ -7,7 +7,7 @@ from pathlib import Path
 from synthetic_trader.backtest.engine import BacktestEngine
 from synthetic_trader.config import TraderConfig
 from synthetic_trader.domain import Tick
-from synthetic_trader.journal.trade_journal import JournalMetrics
+from synthetic_trader.journal.trade_journal import JournalMetrics, summarize_run_diagnostics
 from synthetic_trader.models.online import OnlineLogisticModel
 from synthetic_trader.reporting.serializers import dump_json_file
 
@@ -39,6 +39,7 @@ class WalkForwardReport:
     worst_expectancy_r: float
     total_signals: int
     total_rejected_signals: int
+    diagnostics: dict[str, float | int]
 
 
 def run_walk_forward(
@@ -123,6 +124,13 @@ def run_walk_forward(
         index += 1
 
     aggregate = _aggregate_folds(folds)
+    diagnostics = summarize_run_diagnostics(
+        metrics=aggregate,
+        signals=total_signals,
+        rejected_signals=total_rejected,
+        shutdown_closed_trades=0,
+        session_resets=0,
+    )
     finite_pfs = [fold.test_profit_factor for fold in folds if not math.isinf(fold.test_profit_factor)]
     mean_pf = sum(finite_pfs) / len(finite_pfs) if finite_pfs else float("inf")
     worst_expectancy = min((fold.test_expectancy_r for fold in folds), default=0.0)
@@ -136,6 +144,7 @@ def run_walk_forward(
         worst_expectancy_r=worst_expectancy,
         total_signals=total_signals,
         total_rejected_signals=total_rejected,
+        diagnostics=diagnostics,
     )
 
 

@@ -47,6 +47,8 @@ class ReportingTests(unittest.TestCase):
 
         self.assertEqual(payload["final_equity"], result.final_equity)
         self.assertIn("metrics", payload)
+        self.assertIn("diagnostics", payload)
+        self.assertEqual(payload["diagnostics"]["signals"], result.signals)
 
     def test_save_walk_forward_report_writes_json_artifact(self) -> None:
         report = run_walk_forward(
@@ -66,6 +68,8 @@ class ReportingTests(unittest.TestCase):
 
         self.assertEqual(payload["symbol"], "R_75")
         self.assertEqual(len(payload["folds"]), len(report.folds))
+        self.assertIn("diagnostics", payload)
+        self.assertEqual(payload["diagnostics"]["rejected_signals"], report.total_rejected_signals)
 
     def test_backtest_command_writes_json_artifact_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -8,7 +8,12 @@ from synthetic_trader.config import TraderConfig
 from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
 from synthetic_trader.domain import Candle, Tick, TradeOutcome
 from synthetic_trader.execution.paper import PaperBroker
-from synthetic_trader.journal.trade_journal import JournalMetrics, TradeJournal, metrics_from_outcomes
+from synthetic_trader.journal.trade_journal import (
+    JournalMetrics,
+    TradeJournal,
+    metrics_from_outcomes,
+    summarize_run_diagnostics,
+)
 from synthetic_trader.models.online import OnlineLogisticModel
 from synthetic_trader.reporting.serializers import dump_json_file
 from synthetic_trader.risk.engine import RiskEngine
@@ -21,6 +26,7 @@ class BacktestResult:
     final_equity: float
     signals: int
     rejected_signals: int
+    diagnostics: dict[str, float | int]
     model_version: str
 
 
@@ -131,11 +137,19 @@ class BacktestEngine:
                 self._record_and_learn(outcome, learn=learn)
 
         metrics = metrics_from_outcomes(outcomes)
+        diagnostics = summarize_run_diagnostics(
+            metrics=metrics,
+            signals=signals,
+            rejected_signals=rejected,
+            shutdown_closed_trades=0,
+            session_resets=0,
+        )
         result = BacktestResult(
             metrics=metrics,
             final_equity=risk_engine.state.equity,
             signals=signals,
             rejected_signals=rejected,
+            diagnostics=diagnostics,
             model_version=self.model.version,
         )
         if artifact_output_path is not None:
