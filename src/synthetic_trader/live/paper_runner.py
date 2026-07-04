@@ -197,8 +197,11 @@ async def run_live_paper(
             "symbol": symbol,
             "live_ticks": live_ticks,
             "shutdown_closed_trades": shutdown_closed_trades,
+            "open_positions_before_shutdown": open_positions_before_shutdown,
             "unresolved_positions": unresolved_positions,
             "session_resets": session_resets,
+            "finalized": finalized,
+            "final_equity": risk_engine.state.equity,
         },
     )
 

@@ -188,6 +188,12 @@ class LivePaperRunnerTests(unittest.TestCase):
         self.assertEqual(summary_events[0]["shutdown_closed_trades"], summary.shutdown_closed_trades)
         self.assertEqual(summary_events[0]["unresolved_positions"], summary.unresolved_positions)
         self.assertEqual(summary_events[0]["session_resets"], summary.session_resets)
+        self.assertEqual(
+            summary_events[0]["open_positions_before_shutdown"],
+            summary.open_positions_before_shutdown,
+        )
+        self.assertEqual(summary_events[0]["finalized"], summary.finalized)
+        self.assertEqual(summary_events[0]["final_equity"], summary.final_equity)
 
     def test_run_live_paper_reports_session_reset_when_ticks_cross_day_boundary(self) -> None:
         warmup: list[Tick] = []
