@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 
 
 DEFAULT_DERIV_APP_ID = "116450"
+
+
+class LiveMode(str, Enum):
+    PAPER = "paper"
+    DRY_RUN_LIVE = "dry-run-live"
+    ARMED_LIVE = "armed-live"
 
 
 @dataclass(frozen=True)
