@@ -116,3 +116,24 @@ def metrics_from_outcomes(outcomes: list[TradeOutcome]) -> JournalMetrics:
         expectancy_r=expectancy_r,
         net_pnl=sum(outcome.pnl for outcome in outcomes),
     )
+
+
+def summarize_run_diagnostics(
+    *,
+    metrics: JournalMetrics,
+    signals: int,
+    rejected_signals: int,
+    shutdown_closed_trades: int,
+    session_resets: int,
+) -> dict[str, float]:
+    approved_signals = max(0, signals - rejected_signals)
+    total_signals = max(signals, 1)
+    return {
+        "trades": metrics.trades,
+        "approval_rate": approved_signals / total_signals,
+        "rejection_rate": rejected_signals / total_signals,
+        "shutdown_closed_trades": shutdown_closed_trades,
+        "session_resets": session_resets,
+        "net_pnl": metrics.net_pnl,
+        "expectancy_r": metrics.expectancy_r,
+    }
