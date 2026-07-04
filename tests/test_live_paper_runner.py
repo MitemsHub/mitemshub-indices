@@ -102,6 +102,34 @@ class LivePaperRunnerTests(unittest.TestCase):
         self.assertEqual(summary.unresolved_positions, 0)
         self.assertTrue(summary.finalized)
 
+    def test_run_live_paper_reports_session_reset_when_ticks_cross_day_boundary(self) -> None:
+        warmup: list[Tick] = []
+        live_ticks = [
+            Tick(symbol="R_75", epoch=86341, price=100.0),
+            Tick(symbol="R_75", epoch=86360, price=100.1),
+            Tick(symbol="R_75", epoch=86420, price=100.3),
+            Tick(symbol="R_75", epoch=86459, price=100.5),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "synthetic_trader.live.paper_runner.DerivWebSocketClient",
+                return_value=_FakeClient(warmup, live_ticks),
+            ):
+                summary = asyncio.run(
+                    run_live_paper(
+                        symbol="R_75",
+                        duration_sec=0,
+                        max_live_ticks=len(live_ticks),
+                        warmup_count=0,
+                        timeframe_sec=60,
+                        higher_timeframe_sec=300,
+                        journal_path=Path(tmpdir) / "live_paper.jsonl",
+                    )
+                )
+
+        self.assertEqual(summary.session_resets, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

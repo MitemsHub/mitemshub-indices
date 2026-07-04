@@ -44,6 +44,26 @@ class RiskEngineTests(unittest.TestCase):
         self.assertEqual(engine.state.consecutive_losses, 0)
         self.assertEqual(engine.state.trades_today, 0)
 
+    def test_sync_session_day_resets_limits_once_per_new_day(self) -> None:
+        engine = RiskEngine(RiskConfig(starting_equity=1000.0))
+        engine.state.equity = 975.0
+        engine.state.consecutive_losses = 2
+        engine.state.trades_today = 3
+
+        self.assertFalse(engine.sync_session_day(0))
+        self.assertFalse(engine.sync_session_day(0))
+
+        self.assertEqual(engine.state.day_start_equity, 1000.0)
+        self.assertEqual(engine.state.consecutive_losses, 2)
+        self.assertEqual(engine.state.trades_today, 3)
+
+        self.assertTrue(engine.sync_session_day(1))
+        self.assertFalse(engine.sync_session_day(1))
+
+        self.assertEqual(engine.state.day_start_equity, 975.0)
+        self.assertEqual(engine.state.consecutive_losses, 0)
+        self.assertEqual(engine.state.trades_today, 0)
+
     def test_register_outcome_updates_state_and_resets_loss_streak_after_win(self) -> None:
         engine = RiskEngine(RiskConfig(starting_equity=1000.0))
         engine.register_open()

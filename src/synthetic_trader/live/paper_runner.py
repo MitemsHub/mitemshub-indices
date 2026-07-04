@@ -30,6 +30,7 @@ class LivePaperSummary:
     open_positions_before_shutdown: int
     unresolved_positions: int
     finalized: bool
+    session_resets: int
     final_equity: float
     model_version: str
 
@@ -72,6 +73,7 @@ async def run_live_paper(
     approved = 0
     rejected = 0
     closed_trades = 0
+    session_resets = 0
 
     async with DerivWebSocketClient(credentials) as client:
         if warmup_count > 0:
@@ -80,6 +82,7 @@ async def run_live_paper(
             if ticks_output_path is not None:
                 append_ticks_csv(ticks_output_path, warmup)
             for tick in warmup:
+                risk_engine.sync_session_day(_day_bucket(tick.epoch))
                 closed = builders.update(tick)
                 _store_closed_candles(closed, histories)
 
@@ -88,6 +91,8 @@ async def run_live_paper(
             if duration_sec > 0 and time.monotonic() - started >= duration_sec:
                 break
             live_ticks += 1
+            if risk_engine.sync_session_day(_day_bucket(tick.epoch)):
+                session_resets += 1
             if ticks_output_path is not None:
                 append_ticks_csv(ticks_output_path, [tick])
 
@@ -191,6 +196,7 @@ async def run_live_paper(
         open_positions_before_shutdown=open_positions_before_shutdown,
         unresolved_positions=unresolved_positions,
         finalized=finalized,
+        session_resets=session_resets,
         final_equity=risk_engine.state.equity,
         model_version=model.version,
     )
@@ -199,3 +205,7 @@ async def run_live_paper(
 def _store_closed_candles(closed: dict[int, Candle], histories: dict[int, list[Candle]]) -> None:
     for timeframe, candle in closed.items():
         histories.setdefault(timeframe, []).append(candle)
+
+
+def _day_bucket(epoch: float) -> int:
+    return int(epoch // 86400)
