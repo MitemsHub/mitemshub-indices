@@ -50,6 +50,9 @@ def run_walk_forward(
     timeframe_sec: int = 60,
     higher_timeframe_sec: int = 300,
     config: TraderConfig | None = None,
+    model: OnlineLogisticModel | None = None,
+    model_output_path: str | Path | None = None,
+    model_metadata: dict[str, str] | None = None,
 ) -> WalkForwardReport:
     if train_ticks <= 0 or test_ticks <= 0:
         raise ValueError("train_ticks and test_ticks must be positive")
@@ -65,19 +68,20 @@ def run_walk_forward(
     total_rejected = 0
     start = 0
     index = 1
+    final_model: OnlineLogisticModel | None = None
     while start + train_ticks + test_ticks <= len(ordered):
         train_slice = ordered[start : start + train_ticks]
         test_slice = ordered[start + train_ticks : start + train_ticks + test_ticks]
-        model = OnlineLogisticModel(cfg.model)
+        fold_model = model.clone() if model is not None else OnlineLogisticModel(cfg.model)
 
-        train_result = BacktestEngine(config=cfg, model=model).run_ticks(
+        train_result = BacktestEngine(config=cfg, model=fold_model).run_ticks(
             train_slice,
             symbol=symbol,
             timeframe_sec=timeframe_sec,
             higher_timeframe_sec=higher_timeframe_sec,
             learn=True,
         )
-        test_result = BacktestEngine(config=cfg, model=model).run_ticks(
+        test_result = BacktestEngine(config=cfg, model=fold_model).run_ticks(
             test_slice,
             symbol=symbol,
             timeframe_sec=timeframe_sec,
@@ -102,9 +106,10 @@ def run_walk_forward(
                 test_profit_factor=test_result.metrics.profit_factor,
                 test_expectancy_r=test_result.metrics.expectancy_r,
                 test_net_pnl=test_result.metrics.net_pnl,
-                model_version=model.version,
+                model_version=fold_model.version,
             )
         )
+        final_model = fold_model
         start += step
         index += 1
 
@@ -112,6 +117,8 @@ def run_walk_forward(
     finite_pfs = [fold.test_profit_factor for fold in folds if not math.isinf(fold.test_profit_factor)]
     mean_pf = sum(finite_pfs) / len(finite_pfs) if finite_pfs else float("inf")
     worst_expectancy = min((fold.test_expectancy_r for fold in folds), default=0.0)
+    if model_output_path is not None and final_model is not None:
+        final_model.save(model_output_path, metadata=model_metadata)
     return WalkForwardReport(
         symbol=symbol,
         folds=tuple(folds),
