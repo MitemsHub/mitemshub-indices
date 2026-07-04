@@ -26,6 +26,10 @@ class LivePaperSummary:
     approved_signals: int
     rejected_signals: int
     closed_trades: int
+    shutdown_closed_trades: int
+    open_positions_before_shutdown: int
+    unresolved_positions: int
+    finalized: bool
     final_equity: float
     model_version: str
 
@@ -132,6 +136,49 @@ async def run_live_paper(
             if max_live_ticks is not None and live_ticks >= max_live_ticks:
                 break
 
+    shutdown_closed_trades = 0
+    open_positions_before_shutdown = len(broker.positions)
+    unresolved_positions = open_positions_before_shutdown
+    finalized = False
+
+    # Finalize any in-progress candle state so the end-of-run accounting is explicit.
+    flushed = builders.flush()
+    final_primary = flushed.get(timeframe_sec)
+    _store_closed_candles(flushed, histories)
+    if final_primary is not None:
+        for outcome in broker.on_candle(final_primary):
+            closed_trades += 1
+            shutdown_closed_trades += 1
+            risk_engine.register_outcome(outcome)
+            journal.record_outcome(outcome)
+            journal.record_event(
+                "shutdown_flush_close",
+                {
+                    "symbol": outcome.symbol,
+                    "position_id": outcome.position_id,
+                    "epoch": final_primary.open_time + final_primary.timeframe_sec,
+                },
+            )
+            journal.teach(model, outcome)
+
+        for outcome in broker.close_all(final_primary):
+            closed_trades += 1
+            shutdown_closed_trades += 1
+            risk_engine.register_outcome(outcome)
+            journal.record_outcome(outcome)
+            journal.record_event(
+                "shutdown_forced_close",
+                {
+                    "symbol": outcome.symbol,
+                    "position_id": outcome.position_id,
+                    "epoch": final_primary.open_time + final_primary.timeframe_sec,
+                },
+            )
+            journal.teach(model, outcome)
+
+    unresolved_positions = len(broker.positions)
+    finalized = True
+
     return LivePaperSummary(
         symbol=symbol,
         live_ticks=live_ticks,
@@ -140,6 +187,10 @@ async def run_live_paper(
         approved_signals=approved,
         rejected_signals=rejected,
         closed_trades=closed_trades,
+        shutdown_closed_trades=shutdown_closed_trades,
+        open_positions_before_shutdown=open_positions_before_shutdown,
+        unresolved_positions=unresolved_positions,
+        finalized=finalized,
         final_equity=risk_engine.state.equity,
         model_version=model.version,
     )
