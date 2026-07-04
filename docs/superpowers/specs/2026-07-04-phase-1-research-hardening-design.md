@@ -112,6 +112,17 @@ Lower-priority additions, only if they provide strong value during implementatio
 1. Feature-level invariants for regime or structure outputs.
 2. CLI tests for new persistence and output options.
 
+## Priority Order
+
+Work inside Phase 1 should be executed in this order:
+
+1. Strengthen research artifacts and reporting so results become reviewable and comparable.
+2. Add model load and save support to the intended workflows.
+3. Record approved and rejected decisions in a durable and structured way.
+4. Add targeted tests around the highest-risk behaviors.
+
+This order is deliberate. The first objective is to make the system's claims inspectable. The second is to make experimentation reproducible. The third is to make decisions explainable. The fourth is to lock the improved behavior in place.
+
 ## Proposed Changes By Module
 
 ### `src/synthetic_trader/backtest/engine.py`
@@ -178,6 +189,10 @@ Phase 1 is complete when all of the following are true:
 3. Approved and rejected decisions are both auditable after a run.
 4. The added tests protect the highest-risk research and execution edge cases.
 5. The existing full test suite still passes.
+
+## Execution Cadence
+
+This project is being handed over for active development rather than passive review. After the implementation plan is written and Phase 1 is completed, the next work should begin automatically with the highest-value follow-on priority rather than waiting for a fresh re-scoping cycle, unless a new constraint or direction is provided.
 
 ## Follow-On Phase
 
