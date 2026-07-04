@@ -3,10 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
+from dataclasses import replace
 from pathlib import Path
 
 from synthetic_trader.backtest.engine import BacktestEngine, load_ticks_csv
-from synthetic_trader.config import TraderConfig
+from synthetic_trader.config import PaperExecutionConfig, TraderConfig
 from synthetic_trader.data.collector import collect_history
 from synthetic_trader.data.tick_store import TickDatasetReport, inspect_ticks
 from synthetic_trader.journal.trade_journal import TradeJournal
@@ -54,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional path to save the updated model after the run",
     )
     backtest.add_argument("--artifact-output", help="optional path to save the backtest report as JSON")
+    backtest.add_argument("--exit-slippage-ticks", type=float, default=0.0)
+    backtest.add_argument("--execution-penalty", type=float, default=0.0)
 
     walk_forward = subparsers.add_parser("walk-forward", help="run chronological train/test validation")
     walk_forward.add_argument("--csv", required=True, help="CSV path with epoch,price columns")
@@ -80,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     paper_live.add_argument("--journal", default="journals/live_paper.jsonl")
     paper_live.add_argument("--ticks-output", help="optional CSV path to store warmup and live ticks")
     paper_live.add_argument("--app-id", help="Deriv app id; defaults to 116450 or DERIV_APP_ID")
+    paper_live.add_argument("--exit-slippage-ticks", type=float, default=0.0)
+    paper_live.add_argument("--execution-penalty", type=float, default=0.0)
     return parser
 
 
@@ -111,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "backtest":
-        config = TraderConfig.default()
+        config = _build_runtime_config(args)
         journal = TradeJournal(Path(args.journal)) if args.journal else None
         model = OnlineLogisticModel.load(args.model_load) if args.model_load else None
         ticks = load_ticks_csv(args.csv, default_symbol=args.symbol)
@@ -161,6 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "paper-live":
+        config = _build_runtime_config(args)
         summary = asyncio.run(
             run_live_paper(
                 symbol=args.symbol,
@@ -172,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
                 higher_timeframe_sec=args.higher_timeframe,
                 journal_path=args.journal,
                 ticks_output_path=args.ticks_output,
+                config=config,
             )
         )
         print(f"symbol={summary.symbol}")
@@ -210,6 +217,18 @@ def _print_dataset_report(report: TickDatasetReport) -> None:
 
 def _format_float(value: float) -> str:
     return "inf" if math.isinf(value) else f"{value:.2f}"
+
+
+def _build_runtime_config(args: argparse.Namespace) -> TraderConfig:
+    config = TraderConfig.default()
+    return replace(
+        config,
+        paper=PaperExecutionConfig(
+            entry_slippage_ticks=0.0,
+            exit_slippage_ticks=getattr(args, "exit_slippage_ticks", 0.0),
+            execution_penalty_per_trade=getattr(args, "execution_penalty", 0.0),
+        ),
+    )
 
 
 if __name__ == "__main__":

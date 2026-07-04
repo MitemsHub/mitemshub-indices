@@ -95,6 +95,38 @@ class ReportingTests(unittest.TestCase):
         self.assertTrue(payload["model_version"].startswith("online-logistic-v1."))
         self.assertIn("final_equity", payload)
 
+    def test_backtest_command_artifact_includes_paper_realism_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "ticks.csv"
+            output_path = Path(tmpdir) / "backtest.json"
+            _write_ticks_csv(csv_path, candles=130)
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "backtest",
+                        "--csv",
+                        str(csv_path),
+                        "--symbol",
+                        "R_75",
+                        "--timeframe",
+                        "60",
+                        "--artifact-output",
+                        str(output_path),
+                        "--exit-slippage-ticks",
+                        "0.5",
+                        "--execution-penalty",
+                        "0.2",
+                    ]
+                )
+
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["paper"]["exit_slippage_ticks"], 0.5)
+        self.assertEqual(payload["paper"]["execution_penalty_per_trade"], 0.2)
+
     def test_walk_forward_command_writes_json_artifact_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "ticks.csv"

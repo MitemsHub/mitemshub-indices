@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from synthetic_trader.config import TraderConfig
@@ -61,7 +61,7 @@ class BacktestEngine:
         histories: dict[int, list[Candle]] = {timeframe: [], higher_timeframe: []}
         decision_engine = DecisionEngine(config, self.model)
         risk_engine = RiskEngine(config.risk)
-        broker = PaperBroker()
+        broker = PaperBroker(config.paper)
         outcomes: list[TradeOutcome] = []
         signals = 0
         rejected = 0
@@ -139,7 +139,13 @@ class BacktestEngine:
             model_version=self.model.version,
         )
         if artifact_output_path is not None:
-            dump_json_file(artifact_output_path, result)
+            dump_json_file(
+                artifact_output_path,
+                {
+                    **asdict(result),
+                    "paper": asdict(config.paper),
+                },
+            )
         return result
 
     def _record_and_learn(self, outcome: TradeOutcome, learn: bool) -> None:

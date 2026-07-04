@@ -62,7 +62,7 @@ async def run_live_paper(
     model = OnlineLogisticModel(cfg.model)
     decision_engine = DecisionEngine(cfg, model)
     risk_engine = RiskEngine(cfg.risk)
-    broker = PaperBroker()
+    broker = PaperBroker(cfg.paper)
     journal = TradeJournal(journal_path)
     builders = MultiTimeframeCandleBuilder(symbol, [timeframe_sec, higher_timeframe_sec])
     histories: dict[int, list[Candle]] = {timeframe_sec: [], higher_timeframe_sec: []}
