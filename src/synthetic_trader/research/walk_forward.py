@@ -70,8 +70,17 @@ def run_walk_forward(
     index = 1
     final_model: OnlineLogisticModel | None = None
     while start + train_ticks + test_ticks <= len(ordered):
-        train_slice = ordered[start : start + train_ticks]
-        test_slice = ordered[start + train_ticks : start + train_ticks + test_ticks]
+        train_stop = start + train_ticks
+        # Keep identical timestamps in the same fold partition so train/test windows
+        # remain strictly chronological at the split boundary.
+        while train_stop < len(ordered) and ordered[train_stop - 1].epoch == ordered[train_stop].epoch:
+            train_stop += 1
+        test_stop = train_stop + test_ticks
+        if test_stop > len(ordered):
+            break
+
+        train_slice = ordered[start:train_stop]
+        test_slice = ordered[train_stop:test_stop]
         fold_model = model.clone() if model is not None else OnlineLogisticModel(cfg.model)
 
         train_result = BacktestEngine(config=cfg, model=fold_model).run_ticks(
