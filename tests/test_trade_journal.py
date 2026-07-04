@@ -47,6 +47,29 @@ class TradeJournalTests(unittest.TestCase):
         self.assertEqual(payload["symbol"], "R_75")
         self.assertEqual(payload["reasons"], ["need 80 candles, have 10"])
 
+    def test_journal_records_shutdown_summary_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            journal = TradeJournal(Path(tmpdir) / "journal.jsonl")
+            journal.record_event(
+                "shutdown_summary",
+                {
+                    "symbol": "R_75",
+                    "live_ticks": 5,
+                    "shutdown_closed_trades": 1,
+                    "unresolved_positions": 0,
+                    "session_resets": 1,
+                },
+            )
+            lines = journal.path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(len(lines), 1)
+        payload = json.loads(lines[0])
+        self.assertEqual(payload["type"], "shutdown_summary")
+        self.assertEqual(payload["symbol"], "R_75")
+        self.assertEqual(payload["shutdown_closed_trades"], 1)
+        self.assertEqual(payload["unresolved_positions"], 0)
+        self.assertEqual(payload["session_resets"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

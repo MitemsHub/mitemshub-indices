@@ -93,6 +93,14 @@ async def run_live_paper(
             live_ticks += 1
             if risk_engine.sync_session_day(_day_bucket(tick.epoch)):
                 session_resets += 1
+                journal.record_event(
+                    "session_reset",
+                    {
+                        "symbol": symbol,
+                        "epoch": tick.epoch,
+                        "session_day": _day_bucket(tick.epoch),
+                    },
+                )
             if ticks_output_path is not None:
                 append_ticks_csv(ticks_output_path, [tick])
 
@@ -183,6 +191,16 @@ async def run_live_paper(
 
     unresolved_positions = len(broker.positions)
     finalized = True
+    journal.record_event(
+        "shutdown_summary",
+        {
+            "symbol": symbol,
+            "live_ticks": live_ticks,
+            "shutdown_closed_trades": shutdown_closed_trades,
+            "unresolved_positions": unresolved_positions,
+            "session_resets": session_resets,
+        },
+    )
 
     return LivePaperSummary(
         symbol=symbol,
