@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import math
 from dataclasses import replace
 from pathlib import Path
@@ -12,6 +13,7 @@ from synthetic_trader.data.collector import collect_history
 from synthetic_trader.data.tick_store import TickDatasetReport, inspect_ticks
 from synthetic_trader.journal.trade_journal import TradeJournal
 from synthetic_trader.live.paper_runner import run_live_paper
+from synthetic_trader.monitoring.surface import build_monitor_snapshot, render_monitor_text
 from synthetic_trader.models.online import OnlineLogisticModel
 from synthetic_trader.research.walk_forward import (
     render_walk_forward_report,
@@ -85,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
     paper_live.add_argument("--app-id", help="Deriv app id; defaults to 116450 or DERIV_APP_ID")
     paper_live.add_argument("--exit-slippage-ticks", type=float, default=0.0)
     paper_live.add_argument("--execution-penalty", type=float, default=0.0)
+
+    monitor_live = subparsers.add_parser(
+        "monitor-live",
+        help="render a lightweight paper-live monitor from a summary JSON",
+    )
+    monitor_live.add_argument("--summary-json", required=True, help="paper-live summary JSON path")
     return parser
 
 
@@ -195,6 +203,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"finalized={summary.finalized}")
         print(f"final_equity={summary.final_equity:.2f}")
         print(f"model_version={summary.model_version}")
+        return 0
+
+    if args.command == "monitor-live":
+        summary_payload = json.loads(Path(args.summary_json).read_text(encoding="utf-8"))
+        snapshot = build_monitor_snapshot(live_summary=summary_payload)
+        print(render_monitor_text(snapshot))
         return 0
 
     parser.error(f"unknown command {args.command!r}")
