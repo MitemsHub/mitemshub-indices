@@ -12,7 +12,11 @@ from synthetic_trader.data.tick_store import TickDatasetReport, inspect_ticks
 from synthetic_trader.journal.trade_journal import TradeJournal
 from synthetic_trader.live.paper_runner import run_live_paper
 from synthetic_trader.models.online import OnlineLogisticModel
-from synthetic_trader.research.walk_forward import render_walk_forward_report, run_walk_forward
+from synthetic_trader.research.walk_forward import (
+    render_walk_forward_report,
+    run_walk_forward,
+    save_walk_forward_report,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="model_save",
         help="optional path to save the updated model after the run",
     )
+    backtest.add_argument("--artifact-output", help="optional path to save the backtest report as JSON")
 
     walk_forward = subparsers.add_parser("walk-forward", help="run chronological train/test validation")
     walk_forward.add_argument("--csv", required=True, help="CSV path with epoch,price columns")
@@ -60,6 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
     walk_forward.add_argument("--higher-timeframe", type=int, default=300)
     walk_forward.add_argument("--model-load", help="optional trained model JSON to load before each fold")
     walk_forward.add_argument("--model-save", help="optional path to save the final trained model after the run")
+    walk_forward.add_argument(
+        "--artifact-output",
+        help="optional path to save the walk-forward report as JSON",
+    )
 
     paper_live = subparsers.add_parser("paper-live", help="run live Deriv data through the paper trader only")
     paper_live.add_argument("--symbol", default="R_75", choices=["R_75", "R_100"])
@@ -112,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             symbol=args.symbol,
             timeframe_sec=args.timeframe,
             higher_timeframe_sec=args.higher_timeframe,
+            artifact_output_path=args.artifact_output,
         )
         if args.model_save:
             engine.model.save(args.model_save, metadata={"symbol": args.symbol, "command": "backtest"})
@@ -143,6 +153,8 @@ def main(argv: list[str] | None = None) -> int:
             model_output_path=args.model_save,
             model_metadata={"symbol": args.symbol, "command": "walk-forward"} if args.model_save else None,
         )
+        if args.artifact_output:
+            save_walk_forward_report(report, args.artifact_output)
         print(render_walk_forward_report(report))
         if args.model_save:
             print(f"model_saved={Path(args.model_save)}")
