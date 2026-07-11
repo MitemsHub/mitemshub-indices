@@ -16,6 +16,28 @@ This is not a one-indicator Expert Advisor. The platform is designed around sepa
 
 Important design stance: for synthetic indices, terms like liquidity sweep, fair value gap, order block, and displacement are treated as price-structure features. They are not assumed to represent real institutional order flow unless Deriv exposes verifiable microstructure data.
 
+## Monorepo Layout
+
+This project is one monorepo.
+
+- Python engine: `src/synthetic_trader`
+- Operator web app: `external/mitemshub-indices`
+- Shared project docs: `docs/superpowers`
+
+The operator app is part of the same repository as the engine. Keep feature work, documentation, and release coordination in this root repository.
+
+## Root Git Workflow
+
+Use the root repository for Git operations, even when the change is only in the app folder.
+
+```powershell
+git status
+git add README.md external/mitemshub-indices/README.md
+git commit -m "docs: describe unified monorepo workflow"
+```
+
+Do not create or restore a nested `.git` directory inside `external/mitemshub-indices`.
+
 ## Quick Start
 
 Run tests:
