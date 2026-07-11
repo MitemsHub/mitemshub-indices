@@ -1,0 +1,14 @@
+node_modules/
+.next/
+.data/
+.env.local
+
+dist/
+coverage/
+*.log
+
+task5-preview-check.png
+vitest-task4.json
+
+.DS_Store
+Thumbs.db
