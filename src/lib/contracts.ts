@@ -34,6 +34,23 @@ export const propProfileResponseSchema = propAccountStateSchema.extend({
   telemetry: propTelemetryStateSchema,
 });
 
+export const guardianStateSchema = z.enum([
+  "forming",
+  "armed",
+  "confirmed",
+  "weakening",
+  "invalidated",
+  "unavailable",
+]);
+
+export const guardianStatusSchema = z.object({
+  symbol: z.enum(["R_75", "R_100"]),
+  guardian_state: guardianStateSchema,
+  guardian_reason: z.string(),
+  current_close: z.number().nullable(),
+  generated_at: z.string(),
+});
+
 export const freshCallResponseSchema = z.object({
   symbol: z.enum(["R_75", "R_100"]),
   call: z.enum(["buy_candidate", "sell_candidate", "stand_aside"]),
@@ -52,6 +69,9 @@ export const freshCallResponseSchema = z.object({
   stop_loss: z.number().nullable(),
   take_profit: z.number().nullable(),
   reward_risk: z.number().nullable(),
+  current_close: z.number().nullable(),
+  guardian_state: guardianStateSchema,
+  guardian_reason: z.string(),
   generated_at: z.string(),
   account_mode: accountModeSchema,
   prop_compliance: propComplianceSchema.nullable(),
@@ -88,3 +108,4 @@ export type PropConnectionInput = z.infer<typeof propConnectionInputSchema>;
 export type PropProfileRequest = z.infer<typeof propProfileRequestSchema>;
 export type RunCallRequest = z.infer<typeof runCallRequestSchema>;
 export type PropProfileResponse = z.infer<typeof propProfileResponseSchema>;
+export type GuardianStatus = z.infer<typeof guardianStatusSchema>;

@@ -1,24 +1,41 @@
 import React from "react";
-import type { FreshCallResponse } from "../../lib/contracts";
+import type { FreshCallResponse, GuardianStatus } from "../../lib/contracts";
 import {
   formatActionSummary,
+  formatGuardianReason,
+  formatGuardianState,
   formatMarketCopy,
   formatPrice,
 } from "../../lib/formatters";
 
 type TradeInstructionPanelProps = {
   call: FreshCallResponse | null;
+  guardianStatus: GuardianStatus | null;
 };
 
-export function TradeInstructionPanel({ call }: TradeInstructionPanelProps) {
-  const actionSummary = call ? formatActionSummary(call) : null;
-  const hasExecutionLevels =
+export function TradeInstructionPanel({
+  call,
+  guardianStatus,
+}: TradeInstructionPanelProps) {
+  const effectiveGuardianState =
+    guardianStatus?.guardian_state ?? call?.guardian_state ?? "unavailable";
+  const hasStaleExecutionPlan =
+    call?.trade_status === "valid" && effectiveGuardianState !== "confirmed";
+  const showExecutionLevels =
+    effectiveGuardianState === "confirmed" &&
     call?.entry !== null &&
     call?.entry !== undefined &&
     call?.stop_loss !== null &&
     call?.stop_loss !== undefined &&
     call?.take_profit !== null &&
     call?.take_profit !== undefined;
+  const actionSummary = call
+    ? effectiveGuardianState === "confirmed"
+      ? formatActionSummary(call)
+      : `Do not enter yet. ${formatGuardianReason(
+          guardianStatus?.guardian_reason ?? call.guardian_reason,
+        )}`
+    : null;
 
   return (
     <section className="surface rounded-[32px] px-6 py-7 md:px-8 md:py-8">
@@ -33,7 +50,15 @@ export function TradeInstructionPanel({ call }: TradeInstructionPanelProps) {
           <p className="max-w-2xl leading-7 text-[var(--text-body)]">
             {formatMarketCopy(call.decision_summary ?? call.why)}
           </p>
-          {hasExecutionLevels ? (
+          <div className="info-card rounded-[24px] p-4">
+            <p className="utility-copy text-[11px] uppercase tracking-[0.24em]">
+              Setup status
+            </p>
+            <p className="mt-3 text-lg font-semibold text-[var(--text-strong,#0f172a)]">
+              {formatGuardianState(effectiveGuardianState)}
+            </p>
+          </div>
+          {showExecutionLevels ? (
             <dl className="grid gap-3 md:grid-cols-3">
               <div className="info-card rounded-[24px] p-4">
                 <dt className="utility-copy text-[11px] uppercase tracking-[0.24em]">
@@ -66,7 +91,8 @@ export function TradeInstructionPanel({ call }: TradeInstructionPanelProps) {
                 Execution levels
               </p>
               <p className="mt-3 text-sm leading-7 text-[var(--text-body)]">
-                Entry, stop, and target appear only when a trade is ready.
+                Entry, stop, and target stay hidden until the setup is confirmed.
+                {hasStaleExecutionPlan ? " Do not use the old entry levels." : ""}
               </p>
             </div>
           )}

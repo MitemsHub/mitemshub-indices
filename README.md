@@ -16,3 +16,21 @@ $env:Path = 'C:\Users\USER\AppData\Roaming\TRAE SOLO\ModularData\ai-agent\vm\too
 & 'C:\Users\USER\AppData\Roaming\TRAE SOLO\ModularData\ai-agent\vm\tools\node\npm.cmd' install
 & 'C:\Users\USER\AppData\Roaming\TRAE SOLO\ModularData\ai-agent\vm\tools\node\npm.cmd' run dev
 ```
+
+## One-click local startup
+
+After the first-time setup is complete, you can start the app with:
+
+- `launch-mitemshub-indices.bat`
+
+This launcher:
+
+- checks that `.env.local` exists
+- installs dependencies only if needed
+- builds the app
+- starts the local server on `http://localhost:3006`
+- opens the browser automatically
+
+To stop the locally launched app, run:
+
+- `stop-mitemshub-indices.ps1`

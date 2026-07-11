@@ -4,17 +4,17 @@ import { dirname } from "node:path";
 import { promisify } from "node:util";
 import {
   freshCallResponseSchema,
+  guardianStatusSchema,
   type AccountMode,
   type FreshCallResponse,
+  type GuardianStatus,
   type PropConnectionInput,
   type PropProfileResponse,
   type PropProfileRequest,
 } from "./contracts";
 import {
-  latestMockCall,
   mockCurrentPropProfile,
   mockSystemStatus,
-  recentMockHistory,
 } from "./mock-data";
 import { evaluatePropCompliance, type PropAccountState } from "./prop-policy";
 
@@ -41,28 +41,85 @@ type LivePropProfileConfig = {
 const execFileAsync = promisify(execFile);
 const DEFAULT_HISTORY_LIMIT = 6;
 const DEFAULT_PROP_STARTING_BALANCE = 100000;
+const LIVE_SNAPSHOT_MAX_ATTEMPTS = 2;
 
 export function getConfiguredEngineRoot() {
   const value = process.env.SYNTHETIC_ENGINE_ROOT?.trim();
   return value ? value : null;
 }
 
-function buildMockFreshCall({
+function buildUnavailableBaseCall({
+  symbol,
+  detail,
+}: {
+  symbol: SymbolCode;
+  detail: string;
+}): BaseFreshCall {
+  const message = `Live market read unavailable. ${detail}`;
+
+  return {
+    symbol,
+    call: "stand_aside",
+    alert_type: "context_update",
+    trade_status: "not_valid",
+    confidence: null,
+    regime: null,
+    direction_bias: null,
+    why: message,
+    wait_for: "wait for the live bridge to reconnect, then refresh the call",
+    decision_summary: "Live market read unavailable. Refresh after the live bridge reconnects.",
+    entry_area: null,
+    stop_area: null,
+    target_area: null,
+    entry: null,
+    stop_loss: null,
+    take_profit: null,
+    reward_risk: null,
+    current_close: null,
+    guardian_state: "unavailable",
+    guardian_reason: message,
+    generated_at: new Date().toISOString(),
+  };
+}
+
+function buildUnavailableFreshCall({
   symbol,
   accountMode,
   propAccountState,
+  detail,
 }: {
   symbol: SymbolCode;
   accountMode: AccountMode;
   propAccountState: PropAccountState | null;
+  detail: string;
 }): FreshCallResponse {
-  const base = latestMockCall(symbol);
+  const base = buildUnavailableBaseCall({ symbol, detail });
 
   return applyAccountMode({
     base,
     accountMode,
     propAccountState,
   });
+}
+
+async function readLiveSnapshotWithRetry({
+  engineRoot,
+  symbol,
+}: {
+  engineRoot: string;
+  symbol: SymbolCode;
+}) {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < LIVE_SNAPSHOT_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await liveSnapshotAdapter.read({ engineRoot, symbol });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Unable to read live snapshot");
 }
 
 function applyAccountMode({
@@ -126,6 +183,19 @@ function normalizeText(value: unknown): string | null {
   return normalized ? normalized : null;
 }
 
+function normalizeGuardianState(
+  value: unknown,
+): BaseFreshCall["guardian_state"] {
+  return value === "forming" ||
+    value === "armed" ||
+    value === "confirmed" ||
+    value === "weakening" ||
+    value === "invalidated" ||
+    value === "unavailable"
+    ? value
+    : "unavailable";
+}
+
 function normalizeConnectionField(value: string | null | undefined) {
   return normalizeText(value ?? null);
 }
@@ -187,12 +257,34 @@ function mapLiveSnapshot(raw: Record<string, unknown>, symbol: SymbolCode): Base
     stop_loss: normalizeNumber(raw.stop_loss),
     take_profit: normalizeNumber(raw.take_profit),
     reward_risk: normalizeNumber(raw.reward_risk),
+    current_close: normalizeNumber(raw.current_close),
+    guardian_state: normalizeGuardianState(raw.guardian_state),
+    guardian_reason:
+      normalizeText(raw.guardian_reason) ??
+      "Live guardian state is unavailable.",
     generated_at: new Date().toISOString(),
   };
 
   return {
     ...base,
     decision_summary: base.decision_summary ?? buildDecisionSummary(base),
+  };
+}
+
+function sanitizeUnavailableExecutionLevels(base: BaseFreshCall): BaseFreshCall {
+  if (base.guardian_state !== "unavailable") {
+    return base;
+  }
+
+  return {
+    ...base,
+    entry_area: null,
+    stop_area: null,
+    target_area: null,
+    entry: null,
+    stop_loss: null,
+    take_profit: null,
+    reward_risk: null,
   };
 }
 
@@ -535,17 +627,29 @@ export async function runFreshCall({
   let result: FreshCallResponse;
 
   if (!engineRoot) {
-    result = buildMockFreshCall({ symbol, accountMode, propAccountState });
+    result = buildUnavailableFreshCall({
+      symbol,
+      accountMode,
+      propAccountState,
+      detail: "The local engine path is not configured.",
+    });
   } else {
     try {
-      const base = await liveSnapshotAdapter.read({ engineRoot, symbol });
+      const base = sanitizeUnavailableExecutionLevels(
+        await readLiveSnapshotWithRetry({ engineRoot, symbol }),
+      );
       result = applyAccountMode({
         base,
         accountMode,
         propAccountState,
       });
     } catch {
-      result = buildMockFreshCall({ symbol, accountMode, propAccountState });
+      result = buildUnavailableFreshCall({
+        symbol,
+        accountMode,
+        propAccountState,
+        detail: "The app could not confirm a fresh price from the bridge.",
+      });
     }
   }
 
@@ -566,11 +670,27 @@ export async function getLatestCall(symbol: SymbolCode) {
   });
 }
 
+export async function getGuardianStatus(symbol: SymbolCode): Promise<GuardianStatus> {
+  const call = await runFreshCall({
+    symbol,
+    accountMode: "own_account",
+    propAccountState: null,
+  });
+
+  return guardianStatusSchema.parse({
+    symbol: call.symbol,
+    guardian_state: call.guardian_state,
+    guardian_reason: call.guardian_reason,
+    current_close: call.current_close,
+    generated_at: call.generated_at,
+  });
+}
+
 export async function getRecentHistory(symbol: SymbolCode) {
   const history = await readHistoryEntries(symbol);
 
   return {
-    history: history.length > 0 ? history : recentMockHistory(symbol),
+    history,
   };
 }
 
@@ -579,7 +699,7 @@ export async function getSystemStatus() {
 
   return {
     ...mockSystemStatus,
-    backend_status: engineRoot ? "live_bridge_ready" : mockSystemStatus.backend_status,
+    backend_status: engineRoot ? "live_bridge_ready" : "engine_not_configured",
   };
 }
 

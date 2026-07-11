@@ -19,6 +19,7 @@ export function OperatorShell() {
         <CommandBar
           accountMode={workspace.accountMode}
           loading={workspace.loading}
+          loadingElapsedSeconds={workspace.loadingElapsedSeconds}
           onRunSymbol={workspace.runSymbol}
           onRequestPropMode={workspace.requestPropMode}
           onSelectMode={workspace.setAccountMode}
@@ -34,9 +35,13 @@ export function OperatorShell() {
         <section className="decision-stage mt-6 grid gap-6 xl:grid-cols-[1.45fr_0.85fr]">
           <PrimaryCallPanel
             call={workspace.currentCall}
+            guardianStatus={workspace.guardianStatus}
             loading={workspace.loading}
           />
-          <TradeInstructionPanel call={workspace.currentCall} />
+          <TradeInstructionPanel
+            call={workspace.currentCall}
+            guardianStatus={workspace.guardianStatus}
+          />
 
         </section>
 

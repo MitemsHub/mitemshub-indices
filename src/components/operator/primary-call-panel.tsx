@@ -1,8 +1,10 @@
 import React from "react";
-import type { FreshCallResponse } from "../../lib/contracts";
+import type { FreshCallResponse, GuardianStatus } from "../../lib/contracts";
 import {
   formatCallHeadline,
   formatConfidence,
+  formatGuardianReason,
+  formatGuardianState,
   formatMarketCopy,
   formatNextStep,
 } from "../../lib/formatters";
@@ -10,13 +12,18 @@ import { LoadingState } from "./loading-state";
 
 type PrimaryCallPanelProps = {
   call: FreshCallResponse | null;
+  guardianStatus: GuardianStatus | null;
   loading: boolean;
 };
 
 export function PrimaryCallPanel({
   call,
+  guardianStatus,
   loading,
 }: PrimaryCallPanelProps) {
+  const guardianState = guardianStatus?.guardian_state ?? call?.guardian_state;
+  const guardianReason = guardianStatus?.guardian_reason ?? call?.guardian_reason;
+
   return (
     <section className="primary-panel surface rounded-[2.5rem] p-6 md:p-8">
       <p className="utility-copy text-xs uppercase tracking-[0.28em]">
@@ -35,7 +42,7 @@ export function PrimaryCallPanel({
               Confidence {formatConfidence(call.confidence)}
             </span>
           </div>
-          <div className="mt-6 grid gap-4 md:grid-cols-2">
+          <div className="mt-6 grid gap-4 md:grid-cols-3">
             <div className="info-card rounded-[1.5rem] p-5">
               <p className="utility-copy text-xs uppercase tracking-[0.24em]">
                 Market picture
@@ -50,6 +57,17 @@ export function PrimaryCallPanel({
               </p>
               <p className="mt-2 text-base leading-7 text-[var(--text-strong)]">
                 {formatNextStep(call.wait_for)}
+              </p>
+            </div>
+            <div className="info-card rounded-[1.5rem] p-5">
+              <p className="utility-copy text-xs uppercase tracking-[0.24em]">
+                Setup status
+              </p>
+              <p className="mt-2 text-base leading-7 text-[var(--text-strong)]">
+                {formatGuardianState(guardianState)}
+              </p>
+              <p className="mt-2 text-sm leading-6 text-[var(--text-body)]">
+                {formatGuardianReason(guardianReason)}
               </p>
             </div>
           </div>

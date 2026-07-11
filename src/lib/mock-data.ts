@@ -31,6 +31,9 @@ const baseCalls: Record<SymbolCode, MockCallBase> = {
     stop_loss: 321000.0,
     take_profit: 318600.0,
     reward_risk: 1.8,
+    current_close: 320040.2,
+    guardian_state: "armed",
+    guardian_reason: "Directional thesis is armed, but confirmation has not arrived yet.",
     generated_at: "2026-07-09T12:05:00Z",
   },
   R_100: {
@@ -52,6 +55,9 @@ const baseCalls: Record<SymbolCode, MockCallBase> = {
     stop_loss: 51188.2,
     take_profit: 51326.4,
     reward_risk: 2,
+    current_close: 51240.1,
+    guardian_state: "armed",
+    guardian_reason: "Directional thesis is armed, but confirmation has not arrived yet.",
     generated_at: "2026-07-09T12:00:00Z",
   },
 };
@@ -79,6 +85,9 @@ export function recentMockHistory(symbol: SymbolCode): FreshCallResponse[] {
       trade_status: "no_trade",
       decision_summary: "no trade yet; the market still needs a cleaner setup",
       wait_for: "wait for clean structure confirmation",
+      current_close: latest.current_close,
+      guardian_state: "forming",
+      guardian_reason: "Directional thesis is not yet armed.",
       generated_at: "2026-07-09T11:45:00Z",
       account_mode: "own_account",
       prop_compliance: null,
@@ -91,14 +100,14 @@ export function recentMockHistory(symbol: SymbolCode): FreshCallResponse[] {
 }
 
 export const mockSystemStatus = {
-  latest_call: "R_100 buy_candidate",
-  alert_count: 12,
-  suppressed_context_count: 3,
-  transport_event_count: 4,
-  latest_transport_event: "reconnected",
-  latest_transport_reason: "socket recovered after transient disconnect",
-  backend_status: "mock_ready",
-  journal_status: "fresh",
+  latest_call: "No live decision loaded",
+  alert_count: 0,
+  suppressed_context_count: 0,
+  transport_event_count: 0,
+  latest_transport_event: "waiting",
+  latest_transport_reason: "live bridge status has not loaded yet",
+  backend_status: "bridge_status_pending",
+  journal_status: "waiting",
 };
 
 export const mockCurrentPropProfile: PropProfileResponse = {

@@ -6,6 +6,7 @@ type SymbolCode = "R_75" | "R_100";
 type CommandBarProps = {
   accountMode: AccountMode;
   loading: boolean;
+  loadingElapsedSeconds: number;
   onSelectMode: (mode: AccountMode) => void;
   onRequestPropMode: () => void;
   onRunSymbol: (symbol: SymbolCode) => void;
@@ -14,10 +15,13 @@ type CommandBarProps = {
 export function CommandBar({
   accountMode,
   loading,
+  loadingElapsedSeconds,
   onSelectMode,
   onRequestPropMode,
   onRunSymbol,
 }: CommandBarProps) {
+  const loadingCounter = `${String(loadingElapsedSeconds).padStart(2, "0")}s`;
+
   return (
     <section className="command-rail surface rounded-[2rem] p-6">
       <div className="grid gap-5 xl:grid-cols-[1.2fr_0.95fr_0.85fr] xl:items-end">
@@ -72,9 +76,16 @@ export function CommandBar({
           >
             R_100
           </button>
-          <p className="utility-copy min-w-[11rem] text-right text-xs uppercase tracking-[0.24em]">
-            {loading ? "Pulling live market plan" : "Ready"}
-          </p>
+          <div className="flex min-w-[11rem] items-center justify-end gap-3">
+            {loading ? (
+              <span className="utility-copy rounded-full border border-[rgba(15,23,42,0.12)] px-3 py-1 text-[11px] uppercase tracking-[0.24em] text-[var(--text-strong)]">
+                {loadingCounter}
+              </span>
+            ) : null}
+            <p className="utility-copy text-right text-xs uppercase tracking-[0.24em]">
+              {loading ? "Pulling live market plan" : "Ready"}
+            </p>
+          </div>
         </div>
       </div>
     </section>

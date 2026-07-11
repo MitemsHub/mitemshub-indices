@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { GET as getGuardian } from "../app/api/calls/guardian/route";
 import { GET as getLatest } from "../app/api/calls/latest/route";
 import { POST as postRun } from "../app/api/calls/run/route";
 import { GET as getHistory } from "../app/api/history/route";
@@ -37,15 +38,57 @@ describe("API routes", () => {
     expect(payload.symbol).toBe("R_75");
   });
 
+  it("GET /api/calls/guardian returns a guardian status payload", async () => {
+    const response = await getGuardian(
+      new Request("http://localhost/api/calls/guardian?symbol=R_100"),
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.symbol).toBe("R_100");
+    expect(payload.guardian_state).toBeTruthy();
+    expect(payload.guardian_reason).toBeTruthy();
+  });
+
   it("GET /api/history returns recent calls", async () => {
+    vi.spyOn(engineBridge, "getRecentHistory").mockResolvedValue({
+      history: [
+        {
+          symbol: "R_100",
+          call: "stand_aside",
+          alert_type: "context_update",
+          trade_status: "not_valid",
+          confidence: null,
+          regime: null,
+          direction_bias: null,
+          why: "Live market read unavailable. Refresh after the live bridge reconnects.",
+          wait_for: "wait for the live bridge to reconnect, then refresh the call",
+          decision_summary: "Live market read unavailable. Refresh after the live bridge reconnects.",
+          entry_area: null,
+          stop_area: null,
+          target_area: null,
+          entry: null,
+          stop_loss: null,
+          take_profit: null,
+          reward_risk: null,
+          generated_at: "2026-07-11T02:45:00.000Z",
+          account_mode: "own_account",
+          prop_compliance: null,
+          prop_adjusted_risk: null,
+          prop_block_reason: null,
+          prop_remaining_daily_buffer: null,
+          prop_remaining_overall_buffer: null,
+        },
+      ],
+    });
+
     const response = await getHistory(
       new Request("http://localhost/api/history?symbol=R_100"),
     );
     const payload = await response.json();
 
     expect(response.status).toBe(200);
-    expect(payload.history.length).toBeGreaterThan(0);
-    expect(payload.history.length).toBeLessThanOrEqual(6);
+    expect(payload.history.length).toBe(1);
     expect(payload.history[0].symbol).toBe("R_100");
   });
 
@@ -56,7 +99,7 @@ describe("API routes", () => {
     const payload = await response.json();
 
     expect(response.status).toBe(200);
-    expect(payload.backend_status).toBe("mock_ready");
+    expect(payload.backend_status).toBe("engine_not_configured");
   });
 
   it("GET /api/prop-profiles/current returns the current prop profile", async () => {

@@ -82,6 +82,9 @@ describe("runFreshCall engine config", () => {
         stop_loss: 51210,
         take_profit: 51360,
         reward_risk: 2,
+        guardian_state: "armed",
+        guardian_reason: "Directional thesis is armed, but confirmation has not arrived yet.",
+        current_close: 51280,
         generated_at: "2026-07-09T13:00:00Z",
       });
 
@@ -97,6 +100,238 @@ describe("runFreshCall engine config", () => {
     });
     expect(result.generated_at).toBe("2026-07-09T13:00:00Z");
     expect(result.why).toBe("buyers still control the short-term move");
+    expect(result.guardian_state).toBe("armed");
+    expect(result.guardian_reason).toMatch(/confirmation has not arrived/i);
+    expect(result.current_close).toBe(51280);
+  });
+
+  it("preserves armed guardian reasons when confirmation is blocked", async () => {
+    vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
+
+    vi.spyOn(engineBridge.liveSnapshotAdapter, "read").mockResolvedValue({
+      symbol: "R_100",
+      call: "buy_candidate",
+      alert_type: "setup_candidate",
+      trade_status: "valid",
+      confidence: 0.7,
+      regime: "trend_up",
+      direction_bias: "buy",
+      why: "buyers still control the short-term move",
+      wait_for: "wait for a clean bullish continuation close",
+      decision_summary: "buy thesis present",
+      entry_area: "around 459.6",
+      stop_area: "below 458.2",
+      target_area: "toward 462.2",
+      entry: 459.6,
+      stop_loss: 458.2,
+      take_profit: 462.2,
+      reward_risk: 2,
+      current_close: 459.67,
+      guardian_state: "armed",
+      guardian_reason:
+        "Directional thesis is armed, but persistence is still too weak for confirmation.",
+      generated_at: "2026-07-11T04:00:00Z",
+    });
+
+    const result = await engineBridge.runFreshCall({
+      symbol: "R_100",
+      accountMode: "own_account",
+      propAccountState: null,
+    });
+
+    expect(result.guardian_state).toBe("armed");
+    expect(result.guardian_reason).toMatch(/persistence is still too weak/i);
+    expect(result.entry).toBe(459.6);
+  });
+
+  it("preserves invalidated rollover reasons from the live snapshot", async () => {
+    vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
+
+    vi.spyOn(engineBridge.liveSnapshotAdapter, "read").mockResolvedValue({
+      symbol: "R_100",
+      call: "buy_candidate",
+      alert_type: "setup_candidate",
+      trade_status: "valid",
+      confidence: 0.68,
+      regime: "trend_up",
+      direction_bias: "buy",
+      why: "buyers briefly reclaimed control before rollover pressure took over",
+      wait_for: "wait for a fresh aligned reclaim before considering a new entry",
+      decision_summary: "buy thesis was valid, then broke down",
+      entry_area: "around 459.6",
+      stop_area: "below 458.2",
+      target_area: "toward 462.2",
+      entry: 459.6,
+      stop_loss: 458.2,
+      take_profit: 462.2,
+      reward_risk: 2,
+      current_close: 459.5,
+      guardian_state: "invalidated",
+      guardian_reason:
+        "Setup invalidated after reversal pressure clustered too aggressively.",
+      generated_at: "2026-07-11T04:05:00Z",
+    });
+
+    const result = await engineBridge.runFreshCall({
+      symbol: "R_100",
+      accountMode: "own_account",
+      propAccountState: null,
+    });
+
+    expect(result.guardian_state).toBe("invalidated");
+    expect(result.guardian_reason).toMatch(/clustered too aggressively/i);
+    expect(result.current_close).toBe(459.5);
+  });
+
+  it("returns an unavailable live-read response instead of mock trade levels when the bridge fails", async () => {
+    vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
+
+    vi.spyOn(engineBridge.liveSnapshotAdapter, "read").mockRejectedValue(
+      new Error("live snapshot failed"),
+    );
+
+    const result = await engineBridge.runFreshCall({
+      symbol: "R_100",
+      accountMode: "own_account",
+      propAccountState: null,
+    });
+
+    expect(result.call).toBe("stand_aside");
+    expect(result.trade_status).toBe("not_valid");
+    expect(result.entry).toBeNull();
+    expect(result.stop_loss).toBeNull();
+    expect(result.take_profit).toBeNull();
+    expect(result.decision_summary).toMatch(/live market read unavailable/i);
+    expect(result.why).toMatch(/live market read unavailable/i);
+  });
+
+  it("keeps an unavailable guardian state honest when the bridge returns no trustworthy execution levels", async () => {
+    vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
+
+    vi.spyOn(engineBridge.liveSnapshotAdapter, "read").mockResolvedValue({
+      symbol: "R_100",
+      call: "buy_candidate",
+      alert_type: "context_update",
+      trade_status: "not_valid",
+      confidence: null,
+      regime: null,
+      direction_bias: null,
+      why: "Live market read unavailable. The app could not confirm a fresh price from the bridge.",
+      wait_for: "wait for the live bridge to reconnect, then refresh the call",
+      decision_summary:
+        "Live market read unavailable. Refresh after the live bridge reconnects.",
+      entry_area: null,
+      stop_area: null,
+      target_area: null,
+      entry: null,
+      stop_loss: null,
+      take_profit: null,
+      reward_risk: null,
+      guardian_state: "unavailable",
+      guardian_reason:
+        "Live market read unavailable. The app could not confirm a fresh price from the bridge.",
+      current_close: null,
+      generated_at: "2026-07-11T03:05:00Z",
+    });
+
+    const result = await engineBridge.runFreshCall({
+      symbol: "R_100",
+      accountMode: "own_account",
+      propAccountState: null,
+    });
+
+    expect(result.guardian_state).toBe("unavailable");
+    expect(result.entry).toBeNull();
+    expect(result.stop_loss).toBeNull();
+    expect(result.take_profit).toBeNull();
+    expect(result.decision_summary).toMatch(/live market read unavailable/i);
+  });
+
+  it("keeps unavailable execution levels null when the adapter returns stale numbers", async () => {
+    vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
+
+    vi.spyOn(engineBridge.liveSnapshotAdapter, "read").mockResolvedValue({
+      symbol: "R_100",
+      call: "buy_candidate",
+      alert_type: "context_update",
+      trade_status: "not_valid",
+      confidence: null,
+      regime: null,
+      direction_bias: null,
+      why: "Live market read unavailable. The app could not confirm a fresh price from the bridge.",
+      wait_for: "wait for the live bridge to reconnect, then refresh the call",
+      decision_summary:
+        "Live market read unavailable. Refresh after the live bridge reconnects.",
+      entry_area: "around 459.6",
+      stop_area: "below 458.2",
+      target_area: "toward 462.2",
+      entry: 459.6,
+      stop_loss: 458.2,
+      take_profit: 462.2,
+      reward_risk: 2,
+      guardian_state: "unavailable",
+      guardian_reason:
+        "Live market read unavailable. The app could not confirm a fresh price from the bridge.",
+      current_close: null,
+      generated_at: "2026-07-11T03:05:00Z",
+    });
+
+    const result = await engineBridge.runFreshCall({
+      symbol: "R_100",
+      accountMode: "own_account",
+      propAccountState: null,
+    });
+
+    expect(result.guardian_state).toBe("unavailable");
+    expect(result.entry_area).toBeNull();
+    expect(result.stop_area).toBeNull();
+    expect(result.target_area).toBeNull();
+    expect(result.entry).toBeNull();
+    expect(result.stop_loss).toBeNull();
+    expect(result.take_profit).toBeNull();
+  });
+
+  it("retries a transient live-read failure before declaring the bridge unavailable", async () => {
+    vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
+
+    const liveSnapshotSpy = vi
+      .spyOn(engineBridge.liveSnapshotAdapter, "read")
+      .mockRejectedValueOnce(new Error("temporary bridge error"))
+      .mockResolvedValueOnce({
+        symbol: "R_100",
+        call: "buy_candidate",
+        alert_type: "setup_candidate",
+        trade_status: "valid",
+        confidence: 0.73,
+        regime: "trend_up",
+        direction_bias: "buy",
+        why: "buyers still control the short-term move",
+        wait_for: "wait for a clean bullish continuation close",
+        decision_summary:
+          "buy setup valid; buyers still control the short-term move",
+        entry_area: "around 459.6",
+        stop_area: "below 458.2",
+        target_area: "toward 462.2",
+        entry: 459.6,
+        stop_loss: 458.2,
+        take_profit: 462.2,
+        reward_risk: 2,
+        guardian_state: "confirmed",
+        guardian_reason: "Buy confirmation received from improving short-term acceptance.",
+        current_close: 459.7,
+        generated_at: "2026-07-11T02:30:00Z",
+      });
+
+    const result = await engineBridge.runFreshCall({
+      symbol: "R_100",
+      accountMode: "own_account",
+      propAccountState: null,
+    });
+
+    expect(liveSnapshotSpy).toHaveBeenCalledTimes(2);
+    expect(result.call).toBe("buy_candidate");
+    expect(result.entry).toBe(459.6);
+    expect(result.guardian_state).toBe("confirmed");
   });
 
   it("writes fresh calls into the local history journal", async () => {
@@ -123,6 +358,9 @@ describe("runFreshCall engine config", () => {
       stop_loss: 324,
       take_profit: 315,
       reward_risk: 2,
+      current_close: 320.4,
+      guardian_state: "armed",
+      guardian_reason: "Directional thesis is armed, but confirmation has not arrived yet.",
       generated_at: "2026-07-09T13:10:00Z",
     });
 

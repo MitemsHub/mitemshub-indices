@@ -3,13 +3,66 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { OperatorShell } from "../src/components/operator/operator-shell";
+
+function buildSupportResponse(url: string): Promise<Response> | null {
+  if (url.includes("/api/history")) {
+    return Promise.resolve(
+      new Response(JSON.stringify({ history: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  }
+
+  if (url.includes("/api/system/status")) {
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          latest_call: "R_100 stand_aside",
+          alert_count: 0,
+          suppressed_context_count: 0,
+          transport_event_count: 0,
+          latest_transport_event: "steady",
+          latest_transport_reason: "test route",
+          backend_status: "live_bridge_ready",
+          journal_status: "fresh",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+  }
+
+  if (url.includes("/api/prop-profiles/current")) {
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          profile: "blueberry_2step_funded",
+          startingBalance: 100000,
+          currentBalance: 100200,
+          currentEquity: 100100,
+          todaysRealizedLoss: 0,
+          todaysFloatingLossExposure: 0,
+          highImpactNewsLockout: false,
+          telemetry: {
+            status: "live_unavailable",
+            message: "Live prop check unavailable",
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+  }
+
+  return null;
+}
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("OperatorShell", () => {
@@ -271,6 +324,470 @@ describe("OperatorShell", () => {
     expect(await screen.findByText(/^trade plan$/i)).toBeInTheDocument();
     expect(screen.getByText(/market picture/i)).toBeInTheDocument();
     expect(screen.getByText(/what needs to happen next/i)).toBeInTheDocument();
+  });
+
+  it("shows an elapsed seconds counter while pulling a live market plan", async () => {
+    vi.useFakeTimers();
+
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      const supportResponse = buildSupportResponse(url);
+
+      if (supportResponse) {
+        return supportResponse;
+      }
+
+      if (url.includes("/api/calls/run") && init?.method === "POST") {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => {
+            resolve(
+              new Response(
+                JSON.stringify({
+                  symbol: "R_100",
+                  call: "stand_aside",
+                  alert_type: "context_update",
+                  trade_status: "not_valid",
+                  confidence: null,
+                  regime: null,
+                  direction_bias: null,
+                  why: "Live market read unavailable. The app could not confirm a fresh price from the bridge.",
+                  wait_for: "wait for the live bridge to reconnect, then refresh the call",
+                  decision_summary:
+                    "Live market read unavailable. Refresh after the live bridge reconnects.",
+                  entry_area: null,
+                  stop_area: null,
+                  target_area: null,
+                  entry: null,
+                  stop_loss: null,
+                  take_profit: null,
+                  reward_risk: null,
+                  current_close: null,
+                  guardian_state: "unavailable",
+                  guardian_reason:
+                    "Live market read unavailable. The app could not confirm a fresh price from the bridge.",
+                  generated_at: "2026-07-11T04:30:00.000Z",
+                  account_mode: "own_account",
+                  prop_compliance: null,
+                  prop_adjusted_risk: null,
+                  prop_block_reason: null,
+                  prop_remaining_daily_buffer: null,
+                  prop_remaining_overall_buffer: null,
+                }),
+                { status: 200, headers: { "Content-Type": "application/json" } },
+              ),
+            );
+          }, 2200);
+        });
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    render(<OperatorShell />);
+
+    screen.getByRole("button", { name: /r_100/i }).click();
+    await Promise.resolve();
+
+    expect(screen.getByText(/pulling live market plan/i)).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    expect(screen.getByText("01s")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1200);
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.getByText(/^ready$/i)).toBeInTheDocument();
+    expect(screen.queryByText("01s")).not.toBeInTheDocument();
+  });
+
+  it("shows an explicit live-read unavailable message instead of fake execution levels", async () => {
+    const user = userEvent.setup();
+
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+
+      if (url.includes("/api/history")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ history: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+
+      if (url.includes("/api/system/status")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              latest_call: "R_100 stand_aside",
+              alert_count: 0,
+              suppressed_context_count: 0,
+              transport_event_count: 0,
+              latest_transport_event: "steady",
+              latest_transport_reason: "test route",
+              backend_status: "live_bridge_ready",
+              journal_status: "fresh",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+
+      if (url.includes("/api/prop-profiles/current")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              profile: "blueberry_2step_funded",
+              startingBalance: 100000,
+              currentBalance: 100200,
+              currentEquity: 100100,
+              todaysRealizedLoss: 0,
+              todaysFloatingLossExposure: 0,
+              highImpactNewsLockout: false,
+              telemetry: {
+                status: "live_unavailable",
+                message: "Live prop check unavailable",
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+
+      if (url.includes("/api/calls/run") && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              symbol: "R_100",
+              call: "stand_aside",
+              alert_type: "context_update",
+              trade_status: "not_valid",
+              confidence: null,
+              regime: null,
+              direction_bias: null,
+              why: "Live market read unavailable. The app could not confirm a fresh price from the bridge.",
+              wait_for: "wait for the live bridge to reconnect, then refresh the call",
+              decision_summary:
+                "Live market read unavailable. Refresh after the live bridge reconnects.",
+              entry_area: null,
+              stop_area: null,
+              target_area: null,
+              entry: null,
+              stop_loss: null,
+              take_profit: null,
+              reward_risk: null,
+              generated_at: "2026-07-11T02:25:00.000Z",
+              account_mode: "own_account",
+              prop_compliance: null,
+              prop_adjusted_risk: null,
+              prop_block_reason: null,
+              prop_remaining_daily_buffer: null,
+              prop_remaining_overall_buffer: null,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    render(<OperatorShell />);
+
+    await user.click(screen.getByRole("button", { name: /r_100/i }));
+
+    expect((await screen.findAllByText(/live market read unavailable/i)).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/entry, stop, and target stay hidden until the setup is confirmed/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows guardian state as armed and hides execution levels before confirmation", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler) => {
+      if (typeof handler === "function") {
+        void handler();
+      }
+
+      return 1 as ReturnType<typeof setInterval>;
+    });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      const supportResponse = buildSupportResponse(url);
+
+      if (supportResponse) {
+        return supportResponse;
+      }
+
+      if (url.includes("/api/calls/run") && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              symbol: "R_100",
+              call: "buy_candidate",
+              alert_type: "setup_candidate",
+              trade_status: "valid",
+              confidence: 0.71,
+              regime: "trend_up",
+              direction_bias: "buy",
+              why: "buyers still control the short-term move",
+              wait_for: "wait for a clean bullish continuation close",
+              decision_summary: "buy thesis present",
+              entry_area: "around 459.6",
+              stop_area: "below 458.2",
+              target_area: "toward 462.2",
+              entry: 459.6,
+              stop_loss: 458.2,
+              take_profit: 462.2,
+              reward_risk: 2,
+              current_close: 459.7,
+              guardian_state: "armed",
+              guardian_reason:
+                "Directional thesis is armed, but confirmation has not arrived yet.",
+              generated_at: "2026-07-11T03:15:00.000Z",
+              account_mode: "own_account",
+              prop_compliance: null,
+              prop_adjusted_risk: null,
+              prop_block_reason: null,
+              prop_remaining_daily_buffer: null,
+              prop_remaining_overall_buffer: null,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+
+      if (url.includes("/api/calls/guardian")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              symbol: "R_100",
+              guardian_state: "armed",
+              guardian_reason:
+                "Directional thesis is armed, but confirmation has not arrived yet.",
+              current_close: 459.7,
+              generated_at: "2026-07-11T03:15:05.000Z",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    render(<OperatorShell />);
+
+    await user.click(screen.getByRole("button", { name: /r_100/i }));
+    expect(
+      await screen.findByRole("heading", { name: /buy setup ready/i }),
+    ).toBeInTheDocument();
+
+    expect(screen.getAllByText(/waiting for confirmation/i).length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(/the setup is close, but confirmation has not arrived yet/i).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getAllByText(/setup status/i).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/entry, stop, and target stay hidden until the setup is confirmed/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/do not use the old entry levels/i)).toBeInTheDocument();
+    expect(screen.queryByText("459.6")).not.toBeInTheDocument();
+    expect(screen.queryByText("458.2")).not.toBeInTheDocument();
+    expect(screen.queryByText("462.2")).not.toBeInTheDocument();
+  });
+
+  it("shows execution levels only after guardian state becomes confirmed", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler) => {
+      if (typeof handler === "function") {
+        void handler();
+      }
+
+      return 1 as ReturnType<typeof setInterval>;
+    });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      const supportResponse = buildSupportResponse(url);
+
+      if (supportResponse) {
+        return supportResponse;
+      }
+
+      if (url.includes("/api/calls/run") && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              symbol: "R_100",
+              call: "buy_candidate",
+              alert_type: "setup_candidate",
+              trade_status: "valid",
+              confidence: 0.71,
+              regime: "trend_up",
+              direction_bias: "buy",
+              why: "buyers still control the short-term move",
+              wait_for: "wait for a clean bullish continuation close",
+              decision_summary: "buy thesis present",
+              entry_area: "around 459.6",
+              stop_area: "below 458.2",
+              target_area: "toward 462.2",
+              entry: 459.6,
+              stop_loss: 458.2,
+              take_profit: 462.2,
+              reward_risk: 2,
+              current_close: 459.7,
+              guardian_state: "armed",
+              guardian_reason:
+                "Directional thesis is armed, but confirmation has not arrived yet.",
+              generated_at: "2026-07-11T03:15:00.000Z",
+              account_mode: "own_account",
+              prop_compliance: null,
+              prop_adjusted_risk: null,
+              prop_block_reason: null,
+              prop_remaining_daily_buffer: null,
+              prop_remaining_overall_buffer: null,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+
+      if (url.includes("/api/calls/guardian")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              symbol: "R_100",
+              guardian_state: "confirmed",
+              guardian_reason: "Buy confirmation received from improving short-term acceptance.",
+              current_close: 459.9,
+              generated_at: "2026-07-11T03:15:05.000Z",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    render(<OperatorShell />);
+
+    await user.click(screen.getByRole("button", { name: /r_100/i }));
+    expect(
+      await screen.findByRole("heading", { name: /buy setup ready/i }),
+    ).toBeInTheDocument();
+
+    expect(screen.getAllByText(/confirmed and ready/i).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/buy confirmation is in place and the setup is ready to trade/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText("459.6")).toBeInTheDocument();
+    expect(screen.getByText("458.2")).toBeInTheDocument();
+    expect(screen.getByText("462.2")).toBeInTheDocument();
+  });
+
+  it("reverses a confirmed setup back to weakening and removes enter-now guidance", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler) => {
+      if (typeof handler === "function") {
+        void handler();
+      }
+
+      return 1 as ReturnType<typeof setInterval>;
+    });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      const supportResponse = buildSupportResponse(url);
+
+      if (supportResponse) {
+        return supportResponse;
+      }
+
+      if (url.includes("/api/calls/run") && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              symbol: "R_100",
+              call: "buy_candidate",
+              alert_type: "setup_candidate",
+              trade_status: "valid",
+              confidence: 0.71,
+              regime: "trend_up",
+              direction_bias: "buy",
+              why: "buyers still control the short-term move",
+              wait_for: "wait for a clean bullish continuation close",
+              decision_summary: "buy thesis present",
+              entry_area: "around 459.6",
+              stop_area: "below 458.2",
+              target_area: "toward 462.2",
+              entry: 459.6,
+              stop_loss: 458.2,
+              take_profit: 462.2,
+              reward_risk: 2,
+              current_close: 459.9,
+              guardian_state: "confirmed",
+              guardian_reason:
+                "Buy confirmation received from improving short-term acceptance.",
+              generated_at: "2026-07-11T03:15:00.000Z",
+              account_mode: "own_account",
+              prop_compliance: null,
+              prop_adjusted_risk: null,
+              prop_block_reason: null,
+              prop_remaining_daily_buffer: null,
+              prop_remaining_overall_buffer: null,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+
+      if (url.includes("/api/calls/guardian")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              symbol: "R_100",
+              guardian_state: "weakening",
+              guardian_reason:
+                "Setup is weakening and should not be treated as a clean entry.",
+              current_close: 459.3,
+              generated_at: "2026-07-11T03:15:05.000Z",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    render(<OperatorShell />);
+
+    await user.click(screen.getByRole("button", { name: /r_100/i }));
+    expect(
+      await screen.findByRole("heading", { name: /buy setup ready/i }),
+    ).toBeInTheDocument();
+
+    expect(screen.getAllByText(/confirmation fading/i).length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(/momentum is fading, so do not treat this as a clean entry/i).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getAllByText(/setup status/i).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/entry, stop, and target stay hidden until the setup is confirmed/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/do not use the old entry levels/i)).toBeInTheDocument();
+    expect(screen.queryByText("459.6")).not.toBeInTheDocument();
+    expect(screen.queryByText("458.2")).not.toBeInTheDocument();
+    expect(screen.queryByText("462.2")).not.toBeInTheDocument();
+    expect(screen.getByText(/do not enter yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/enter now only if/i)).not.toBeInTheDocument();
   });
 
   it("sends the selected prop connection when running a symbol in prop mode", async () => {

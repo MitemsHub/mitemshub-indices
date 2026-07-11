@@ -20,27 +20,35 @@ export function HistoryPanel({ history }: HistoryPanelProps) {
         Recent trade plans
       </h3>
       <div className="mt-5 space-y-3">
-        {history.map((entry) => (
-          <article
-            key={`${entry.symbol}-${entry.generated_at}`}
-            className="rounded-[24px] border border-[rgba(15,23,42,0.08)] bg-white/78 p-4"
-          >
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-base font-medium text-[var(--text-strong,#0f172a)]">
-                {entry.symbol}
+        {history.length > 0 ? (
+          history.map((entry) => (
+            <article
+              key={`${entry.symbol}-${entry.generated_at}`}
+              className="rounded-[24px] border border-[rgba(15,23,42,0.08)] bg-white/78 p-4"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-base font-medium text-[var(--text-strong,#0f172a)]">
+                  {entry.symbol}
+                </p>
+                <p className="text-sm text-[rgba(15,23,42,0.52)]">
+                  {formatTimestamp(entry.generated_at)}
+                </p>
+              </div>
+              <p className="mt-2 text-sm font-medium text-[rgba(15,23,42,0.68)]">
+                {formatCallHeadline(entry.call)}
               </p>
-              <p className="text-sm text-[rgba(15,23,42,0.52)]">
-                {formatTimestamp(entry.generated_at)}
+              <p className="mt-2 text-sm leading-6 text-[rgba(15,23,42,0.64)]">
+                {formatMarketCopy(entry.why)}
               </p>
-            </div>
-            <p className="mt-2 text-sm font-medium text-[rgba(15,23,42,0.68)]">
-              {formatCallHeadline(entry.call)}
+            </article>
+          ))
+        ) : (
+          <div className="rounded-[24px] border border-[rgba(15,23,42,0.08)] bg-white/78 p-4">
+            <p className="text-sm leading-6 text-[rgba(15,23,42,0.64)]">
+              Recent live decisions appear here after you pull a fresh market read.
             </p>
-            <p className="mt-2 text-sm leading-6 text-[rgba(15,23,42,0.64)]">
-              {formatMarketCopy(entry.why)}
-            </p>
-          </article>
-        ))}
+          </div>
+        )}
       </div>
     </section>
   );

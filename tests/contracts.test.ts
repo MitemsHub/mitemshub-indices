@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   accountModeSchema,
   freshCallResponseSchema,
+  guardianStateSchema,
   propComplianceSchema,
 } from "../src/lib/contracts";
 
@@ -26,6 +27,9 @@ describe("contracts", () => {
       stop_loss: 51188.2,
       take_profit: 51326.4,
       reward_risk: 2,
+      current_close: 51240.1,
+      guardian_state: "armed",
+      guardian_reason: "Directional thesis is armed, but confirmation has not arrived yet.",
       generated_at: "2026-07-09T12:00:00Z",
       account_mode: "prop_firm",
       prop_compliance: "allowed_with_adjustment",
@@ -49,5 +53,10 @@ describe("contracts", () => {
     expect(propComplianceSchema.parse("insufficient_account_state")).toBe(
       "insufficient_account_state",
     );
+  });
+
+  it("accepts the defined guardian lifecycle states", () => {
+    expect(guardianStateSchema.parse("armed")).toBe("armed");
+    expect(guardianStateSchema.parse("confirmed")).toBe("confirmed");
   });
 });

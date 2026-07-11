@@ -47,6 +47,69 @@ export function formatCallHeadline(call: FreshCallResponse["call"]): string {
   return "No trade yet";
 }
 
+export function formatGuardianState(
+  state: FreshCallResponse["guardian_state"] | null | undefined,
+): string {
+  if (!state) {
+    return "Live read unavailable";
+  }
+
+  switch (state) {
+    case "forming":
+      return "Setup still forming";
+    case "armed":
+      return "Waiting for confirmation";
+    case "confirmed":
+      return "Confirmed and ready";
+    case "weakening":
+      return "Confirmation fading";
+    case "invalidated":
+      return "Setup invalidated";
+    case "unavailable":
+    default:
+      return "Live read unavailable";
+  }
+}
+
+export function formatGuardianReason(value: string | null | undefined): string {
+  if (!value) {
+    return "The live confirmation update is unavailable right now.";
+  }
+
+  const normalized = value.trim();
+  const lower = normalized.toLowerCase();
+
+  if (lower.includes("not yet armed")) {
+    return "The setup is still forming, so stay patient.";
+  }
+
+  if (lower.includes("confirmation has not arrived yet")) {
+    return "The setup is close, but confirmation has not arrived yet.";
+  }
+
+  if (lower.includes("confirmation received")) {
+    if (lower.startsWith("buy confirmation")) {
+      return "Buy confirmation is in place and the setup is ready to trade.";
+    }
+
+    if (lower.startsWith("sell confirmation")) {
+      return "Sell confirmation is in place and the setup is ready to trade.";
+    }
+
+    return "Confirmation is in place and the setup is ready to trade.";
+  }
+
+  if (lower.includes("weakening") && lower.includes("clean entry")) {
+    return "Momentum is fading, so do not treat this as a clean entry.";
+  }
+
+  if (lower.includes("unavailable")) {
+    return "The live confirmation update is unavailable right now.";
+  }
+
+  return sentenceCase(normalized) ?? "The live confirmation update is unavailable right now.";
+}
+
 function sentenceCase(value: string | null): string | null {
   if (!value) {
     return null;
