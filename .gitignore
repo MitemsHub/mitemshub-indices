@@ -13,4 +13,13 @@ data/
 journals/
 models/*.json
 artifacts/
-external/
+external/mitemshub-indices/node_modules/
+external/mitemshub-indices/.next/
+external/mitemshub-indices/.data/
+external/mitemshub-indices/.env.local
+external/mitemshub-indices/dist/
+external/mitemshub-indices/coverage/
+external/mitemshub-indices/*.log
+external/mitemshub-indices/task5-preview-check.png
+external/mitemshub-indices/vitest-task4.json
+external/mitemshub-indices/tsconfig.tsbuildinfo
