@@ -71,6 +71,104 @@ class TradeJournal:
     def record_event(self, event_type: str, payload: dict[str, object]) -> None:
         self._append({"type": event_type, **payload})
 
+    def record_mt5_sync_summary(
+        self,
+        *,
+        symbol: str,
+        venue_symbol: str | None,
+        positions: int,
+        failures: tuple[str, ...],
+    ) -> None:
+        self.record_event(
+            "mt5_sync_summary",
+            {
+                "symbol": symbol,
+                "venue_symbol": venue_symbol,
+                "positions": positions,
+                "failures": list(failures),
+            },
+        )
+
+    def record_mt5_runtime_summary(
+        self,
+        *,
+        symbol: str,
+        venue_symbol: str | None,
+        ready: bool,
+        failures: tuple[str, ...],
+    ) -> None:
+        self.record_event(
+            "mt5_runtime_summary",
+            {
+                "symbol": symbol,
+                "venue_symbol": venue_symbol,
+                "ready": ready,
+                "failures": list(failures),
+            },
+        )
+
+    def record_mt5_reconcile_summary(
+        self,
+        *,
+        symbol: str,
+        target_ticket: int | None,
+        actionable: bool,
+        failures: tuple[str, ...],
+    ) -> None:
+        self.record_event(
+            "mt5_reconcile_summary",
+            {
+                "symbol": symbol,
+                "target_ticket": target_ticket,
+                "actionable": actionable,
+                "failures": list(failures),
+            },
+        )
+
+    def record_mt5_close_result(
+        self,
+        *,
+        symbol: str,
+        venue_symbol: str,
+        ticket: int,
+        accepted: bool,
+        retcode: int | None,
+        message: str,
+    ) -> None:
+        self.record_event(
+            "mt5_close_result",
+            {
+                "symbol": symbol,
+                "venue_symbol": venue_symbol,
+                "ticket": ticket,
+                "accepted": accepted,
+                "retcode": retcode,
+                "message": message,
+            },
+        )
+
+    def record_mt5_modify_result(
+        self,
+        *,
+        symbol: str,
+        venue_symbol: str,
+        ticket: int,
+        accepted: bool,
+        retcode: int | None,
+        message: str,
+    ) -> None:
+        self.record_event(
+            "mt5_modify_result",
+            {
+                "symbol": symbol,
+                "venue_symbol": venue_symbol,
+                "ticket": ticket,
+                "accepted": accepted,
+                "retcode": retcode,
+                "message": message,
+            },
+        )
+
     def outcomes(self) -> list[TradeOutcome]:
         outcomes: list[TradeOutcome] = []
         if not self.path.exists():

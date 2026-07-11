@@ -7,11 +7,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from synthetic_trader.cli import main
+from synthetic_trader.config import LiveMode, Venue
 from synthetic_trader.domain import Direction, FeatureSnapshot, Regime, Tick, TradeSignal
 from synthetic_trader.live.paper_runner import LivePaperSummary, run_live_paper
+from synthetic_trader.models.online import OnlineLogisticModel
 from synthetic_trader.strategy.decision_engine import DecisionReport
 
 
@@ -70,6 +72,66 @@ def _journal_entries(path: Path) -> list[dict[str, object]]:
 
 
 class LivePaperRunnerTests(unittest.TestCase):
+    def test_run_live_paper_uses_simulated_backend_for_dry_run_mt5(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("synthetic_trader.live.paper_runner.build_execution_backend") as backend_builder:
+                backend = Mock()
+                backend.open_positions_count.return_value = 0
+                backend.on_candle.return_value = []
+                backend.shutdown.return_value = Mock(
+                    outcomes=(),
+                    open_positions_before_shutdown=0,
+                    unresolved_positions=0,
+                    finalized=True,
+                )
+                backend_builder.return_value = backend
+
+                asyncio.run(
+                    run_live_paper(
+                        symbol="R_75",
+                        duration_sec=0,
+                        max_live_ticks=0,
+                        warmup_count=0,
+                        venue=Venue.MT5,
+                        live_mode=LiveMode.DRY_RUN_LIVE,
+                        journal_path=Path(tmpdir) / "live_paper.jsonl",
+                        client_factory=lambda: _FakeClient([], []),
+                    )
+                )
+
+        backend_builder.assert_called_once()
+        self.assertIs(backend_builder.call_args.kwargs["live_mode"], LiveMode.DRY_RUN_LIVE)
+
+    def test_run_live_paper_uses_mt5_backend_for_armed_mt5(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("synthetic_trader.live.paper_runner.build_execution_backend") as backend_builder:
+                backend = Mock()
+                backend.open_positions_count.return_value = 0
+                backend.on_candle.return_value = []
+                backend.shutdown.return_value = Mock(
+                    outcomes=(),
+                    open_positions_before_shutdown=0,
+                    unresolved_positions=0,
+                    finalized=True,
+                )
+                backend_builder.return_value = backend
+
+                asyncio.run(
+                    run_live_paper(
+                        symbol="R_75",
+                        duration_sec=0,
+                        max_live_ticks=0,
+                        warmup_count=0,
+                        venue=Venue.MT5,
+                        live_mode=LiveMode.ARMED_LIVE,
+                        journal_path=Path(tmpdir) / "live_paper.jsonl",
+                        client_factory=lambda: _FakeClient([], []),
+                    )
+                )
+
+        backend_builder.assert_called_once()
+        self.assertIs(backend_builder.call_args.kwargs["live_mode"], LiveMode.ARMED_LIVE)
+
     def test_paper_live_summary_prints_shutdown_fields(self) -> None:
         summary = LivePaperSummary(
             symbol="R_75",
@@ -260,6 +322,138 @@ class LivePaperRunnerTests(unittest.TestCase):
         self.assertEqual(session_reset_events[0]["epoch"], 86420)
         self.assertEqual(len(summary_events), 1)
         self.assertEqual(summary_events[0]["session_resets"], 1)
+
+    def test_run_live_paper_uses_deriv_client_builder_by_default(self) -> None:
+        warmup = [Tick(symbol="R_75", epoch=1, price=100.0)]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_client = _FakeClient(warmup, [])
+            with patch(
+                "synthetic_trader.live.paper_runner._build_deriv_client",
+                return_value=fake_client,
+            ) as builder_mock:
+                summary = asyncio.run(
+                    run_live_paper(
+                        symbol="R_75",
+                        duration_sec=0,
+                        max_live_ticks=0,
+                        warmup_count=1,
+                        venue=Venue.DERIV,
+                        journal_path=Path(tmpdir) / "live_paper.jsonl",
+                    )
+                )
+
+        self.assertEqual(summary.symbol, "R_75")
+        self.assertEqual(summary.warmup_ticks, 1)
+        builder_mock.assert_called_once_with(app_id=None, token=None)
+
+    def test_run_live_paper_uses_provided_model_version(self) -> None:
+        provided_model = OnlineLogisticModel(updates=4)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            summary = asyncio.run(
+                run_live_paper(
+                    symbol="R_75",
+                    duration_sec=0,
+                    max_live_ticks=0,
+                    warmup_count=0,
+                    journal_path=Path(tmpdir) / "live_paper.jsonl",
+                    client_factory=lambda: _FakeClient([], []),
+                    model=provided_model,
+                )
+            )
+
+        self.assertEqual(summary.model_version, "online-logistic-v1.4")
+
+    def test_paper_live_loads_model_artifact_when_requested(self) -> None:
+        summary = LivePaperSummary(
+            symbol="R_75",
+            live_ticks=0,
+            warmup_ticks=0,
+            signals=0,
+            approved_signals=0,
+            rejected_signals=0,
+            closed_trades=0,
+            shutdown_closed_trades=0,
+            open_positions_before_shutdown=0,
+            unresolved_positions=0,
+            finalized=True,
+            session_resets=0,
+            final_equity=1000.0,
+            model_version="online-logistic-v1.4",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.json"
+            OnlineLogisticModel(updates=4).save(model_path)
+            with patch("synthetic_trader.cli.run_live_paper", new=AsyncMock(return_value=summary)) as run_live_paper_mock:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    exit_code = main(
+                        [
+                            "paper-live",
+                            "--symbol",
+                            "R_75",
+                            "--duration-sec",
+                            "0",
+                            "--max-live-ticks",
+                            "0",
+                            "--model-load",
+                            str(model_path),
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(run_live_paper_mock.call_args.kwargs["model"].updates, 4)
+
+    def test_paper_live_passes_live_mode_to_runner(self) -> None:
+        summary = LivePaperSummary(
+            symbol="R_100",
+            live_ticks=0,
+            warmup_ticks=0,
+            signals=0,
+            approved_signals=0,
+            rejected_signals=0,
+            closed_trades=0,
+            shutdown_closed_trades=0,
+            open_positions_before_shutdown=0,
+            unresolved_positions=0,
+            finalized=True,
+            session_resets=0,
+            final_equity=1000.0,
+            model_version="online-logistic-v1.0",
+        )
+
+        with patch("synthetic_trader.cli.run_live_paper", new=AsyncMock(return_value=summary)) as run_live_paper_mock:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "paper-live",
+                        "--symbol",
+                        "R_100",
+                        "--venue",
+                        "mt5",
+                        "--live-mode",
+                        "armed-live",
+                        "--armed-live",
+                        "--mt5-server",
+                        "server",
+                        "--mt5-login",
+                        "123456",
+                        "--mt5-password",
+                        "secret",
+                        "--mt5-symbol",
+                        "Volatility 100 Index",
+                        "--duration-sec",
+                        "0",
+                        "--max-live-ticks",
+                        "0",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIs(run_live_paper_mock.call_args.kwargs["live_mode"], LiveMode.ARMED_LIVE)
 
 
 if __name__ == "__main__":

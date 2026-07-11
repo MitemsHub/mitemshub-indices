@@ -6,6 +6,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from synthetic_trader.cli import main
 from synthetic_trader.models.online import OnlineLogisticModel
@@ -116,6 +117,54 @@ class OnlineModelTests(unittest.TestCase):
         self.assertIn("seed_only", saved.weights)
         self.assertEqual(saved.metadata["command"], "walk-forward")
         self.assertEqual(saved.metadata["symbol"], "R_75")
+
+    def test_prepare_live_model_command_collects_history_and_saves_seeded_model(self) -> None:
+        from synthetic_trader.data.tick_store import inspect_ticks, write_ticks_csv
+        from tests.test_backtest import synthetic_ticks
+
+        async def fake_collect_history(
+            *,
+            symbol: str,
+            count: int,
+            output_path: str,
+            app_id: str | None,
+            batch_size: int,
+            append: bool,
+        ):
+            del count, app_id, batch_size
+            ticks = synthetic_ticks(symbol=symbol, candles=130)
+            write_ticks_csv(output_path, ticks, append=append)
+            return inspect_ticks(ticks, symbol=symbol)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "r100_ticks.csv"
+            model_path = Path(tmpdir) / "r100_seed_model.json"
+
+            output = io.StringIO()
+            with patch("synthetic_trader.cli.collect_history", side_effect=fake_collect_history):
+                with contextlib.redirect_stdout(output):
+                    exit_code = main(
+                        [
+                            "prepare-live-model",
+                            "--symbol",
+                            "R_100",
+                            "--count",
+                            "520",
+                            "--output",
+                            str(csv_path),
+                            "--model-save",
+                            str(model_path),
+                            "--replace",
+                        ]
+                    )
+
+            saved = OnlineLogisticModel.load(model_path)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("output=", output.getvalue())
+        self.assertIn("model_saved=", output.getvalue())
+        self.assertEqual(saved.metadata["command"], "prepare-live-model")
+        self.assertEqual(saved.metadata["symbol"], "R_100")
 
 
 def _write_ticks_csv(path: Path, candles: int, symbol: str = "R_75") -> None:

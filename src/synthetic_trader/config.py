@@ -13,6 +13,11 @@ class LiveMode(str, Enum):
     ARMED_LIVE = "armed-live"
 
 
+class Venue(str, Enum):
+    DERIV = "deriv"
+    MT5 = "mt5"
+
+
 @dataclass(frozen=True)
 class SymbolProfile:
     symbol: str
@@ -55,11 +60,24 @@ class PaperExecutionConfig:
 
 
 @dataclass(frozen=True)
+class Mt5Config:
+    server: str | None = None
+    login: str | None = None
+    password: str | None = None
+    terminal_path: str | None = None
+    symbol_map: dict[str, str] = field(default_factory=dict)
+
+    def resolve_symbol(self, symbol: str) -> str | None:
+        return self.symbol_map.get(symbol)
+
+
+@dataclass(frozen=True)
 class TraderConfig:
     symbols: dict[str, SymbolProfile] = field(default_factory=dict)
     risk: RiskConfig = field(default_factory=RiskConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     paper: PaperExecutionConfig = field(default_factory=PaperExecutionConfig)
+    mt5: Mt5Config = field(default_factory=Mt5Config)
 
     @classmethod
     def default(cls) -> "TraderConfig":

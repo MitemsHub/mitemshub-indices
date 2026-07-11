@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from synthetic_trader.config import TraderConfig
+from synthetic_trader.config import LiveMode, TraderConfig, Venue
 from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
 from synthetic_trader.data.collector import deriv_credentials_from_env
 from synthetic_trader.data.tick_store import append_ticks_csv
 from synthetic_trader.domain import Candle
 from synthetic_trader.execution.deriv_ws import DerivWebSocketClient
-from synthetic_trader.execution.paper import PaperBroker
+from synthetic_trader.execution.venues import MarketDataClient
 from synthetic_trader.journal.trade_journal import TradeJournal
+from synthetic_trader.live.execution_backends import build_execution_backend
 from synthetic_trader.models.online import OnlineLogisticModel
 from synthetic_trader.risk.engine import RiskEngine
 from synthetic_trader.strategy.decision_engine import DecisionEngine
@@ -35,6 +37,17 @@ class LivePaperSummary:
     model_version: str
 
 
+def classify_latency_stage(stage_name: str) -> str:
+    if stage_name in {"journal_append", "summary_print", "monitor_emit"}:
+        return "side_effect"
+    return "critical"
+
+
+def _build_deriv_client(app_id: str | None, token: str | None) -> DerivWebSocketClient:
+    credentials = deriv_credentials_from_env(app_id=app_id, token=token)
+    return DerivWebSocketClient(credentials)
+
+
 async def run_live_paper(
     symbol: str,
     app_id: str | None = None,
@@ -47,6 +60,10 @@ async def run_live_paper(
     journal_path: str | Path = "journals/live_paper.jsonl",
     ticks_output_path: str | Path | None = None,
     config: TraderConfig | None = None,
+    venue: Venue = Venue.DERIV,
+    live_mode: LiveMode = LiveMode.PAPER,
+    client_factory: Callable[[], MarketDataClient] | None = None,
+    model: OnlineLogisticModel | None = None,
 ) -> LivePaperSummary:
     cfg = config or TraderConfig.default()
     if symbol not in cfg.symbols:
@@ -58,12 +75,18 @@ async def run_live_paper(
     )
     cfg = replace(cfg, symbols={**cfg.symbols, symbol: profile})
 
-    credentials = deriv_credentials_from_env(app_id=app_id, token=token)
-    model = OnlineLogisticModel(cfg.model)
-    decision_engine = DecisionEngine(cfg, model)
+    live_model = model or OnlineLogisticModel(cfg.model)
+    decision_engine = DecisionEngine(cfg, live_model)
     risk_engine = RiskEngine(cfg.risk)
-    broker = PaperBroker(cfg.paper)
     journal = TradeJournal(journal_path)
+    backend = build_execution_backend(
+        symbol=symbol,
+        venue=venue,
+        live_mode=live_mode,
+        paper_config=cfg.paper,
+        mt5_config=cfg.mt5,
+        journal=journal,
+    )
     builders = MultiTimeframeCandleBuilder(symbol, [timeframe_sec, higher_timeframe_sec])
     histories: dict[int, list[Candle]] = {timeframe_sec: [], higher_timeframe_sec: []}
 
@@ -75,7 +98,11 @@ async def run_live_paper(
     closed_trades = 0
     session_resets = 0
 
-    async with DerivWebSocketClient(credentials) as client:
+    if venue not in {Venue.DERIV, Venue.MT5}:
+        raise ValueError(f"unsupported venue {venue!r}")
+    factory = client_factory or (lambda: _build_deriv_client(app_id=app_id, token=token))
+
+    async with factory() as client:
         if warmup_count > 0:
             warmup = await client.ticks_history(symbol=symbol, count=warmup_count)
             warmup_ticks = len(warmup)
@@ -108,11 +135,11 @@ async def run_live_paper(
             primary = closed.get(timeframe_sec)
             _store_closed_candles(closed, histories)
             if primary is not None:
-                for outcome in broker.on_candle(primary):
+                for outcome in backend.on_candle(primary):
                     closed_trades += 1
                     risk_engine.register_outcome(outcome)
                     journal.record_outcome(outcome)
-                    journal.teach(model, outcome)
+                    journal.teach(live_model, outcome)
 
                 report = decision_engine.evaluate(
                     symbol=symbol,
@@ -132,10 +159,20 @@ async def run_live_paper(
                     signals += 1
                     risk_decision = risk_engine.evaluate(report.signal)
                     if risk_decision.approved and risk_decision.intent is not None:
-                        broker.submit(risk_decision.intent)
-                        risk_engine.register_open()
-                        journal.record_signal(report.signal)
-                        approved += 1
+                        submit_result = backend.submit(risk_decision.intent)
+                        if submit_result.accepted:
+                            risk_engine.register_open()
+                            journal.record_signal(report.signal)
+                            approved += 1
+                        else:
+                            rejected += 1
+                            journal.record_rejection(
+                                symbol=symbol,
+                                epoch=report.signal.snapshot.epoch,
+                                reasons=("execution_backend_rejected",),
+                                model_version=report.signal.model_version,
+                                confidence=report.signal.confidence,
+                            )
                     else:
                         rejected += 1
                         journal.record_rejection(
@@ -150,7 +187,7 @@ async def run_live_paper(
                 break
 
     shutdown_closed_trades = 0
-    open_positions_before_shutdown = len(broker.positions)
+    open_positions_before_shutdown = backend.open_positions_count()
     unresolved_positions = open_positions_before_shutdown
     finalized = False
 
@@ -159,7 +196,7 @@ async def run_live_paper(
     final_primary = flushed.get(timeframe_sec)
     _store_closed_candles(flushed, histories)
     if final_primary is not None:
-        for outcome in broker.on_candle(final_primary):
+        for outcome in backend.on_candle(final_primary):
             closed_trades += 1
             shutdown_closed_trades += 1
             risk_engine.register_outcome(outcome)
@@ -172,9 +209,13 @@ async def run_live_paper(
                     "epoch": final_primary.open_time + final_primary.timeframe_sec,
                 },
             )
-            journal.teach(model, outcome)
+            journal.teach(live_model, outcome)
 
-        for outcome in broker.close_all(final_primary):
+        shutdown_result = backend.shutdown(final_primary)
+        open_positions_before_shutdown = shutdown_result.open_positions_before_shutdown
+        unresolved_positions = shutdown_result.unresolved_positions
+        finalized = shutdown_result.finalized
+        for outcome in shutdown_result.outcomes:
             closed_trades += 1
             shutdown_closed_trades += 1
             risk_engine.register_outcome(outcome)
@@ -187,10 +228,15 @@ async def run_live_paper(
                     "epoch": final_primary.open_time + final_primary.timeframe_sec,
                 },
             )
-            journal.teach(model, outcome)
+            journal.teach(live_model, outcome)
 
-    unresolved_positions = len(broker.positions)
-    finalized = True
+    if final_primary is None:
+        shutdown_result = backend.shutdown(None)
+        open_positions_before_shutdown = shutdown_result.open_positions_before_shutdown
+        unresolved_positions = shutdown_result.unresolved_positions
+        finalized = shutdown_result.finalized
+    else:
+        unresolved_positions = shutdown_result.unresolved_positions
     journal.record_event(
         "shutdown_summary",
         {
@@ -219,7 +265,7 @@ async def run_live_paper(
         finalized=finalized,
         session_resets=session_resets,
         final_equity=risk_engine.state.equity,
-        model_version=model.version,
+        model_version=live_model.version,
     )
 
 

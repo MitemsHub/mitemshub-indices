@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "synthetic-ai-trader"
+version = "0.1.0"
+description = "Research-grade AI trading core for Deriv synthetic indices."
+requires-python = ">=3.11"
+authors = [{ name = "Synthetic Indices Bot" }]
+dependencies = []
+
+[project.optional-dependencies]
+live = ["websockets>=12.0"]
+research = ["numpy>=1.26", "pandas>=2.2", "scikit-learn>=1.4"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+synth-trader = "synthetic_trader.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

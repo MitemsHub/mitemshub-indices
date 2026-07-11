@@ -87,7 +87,7 @@ class ExecutionRealismIntegrationTests(unittest.TestCase):
             with (
                 patch("synthetic_trader.live.paper_runner.deriv_credentials_from_env", return_value=object()),
                 patch("synthetic_trader.live.paper_runner.DerivWebSocketClient", return_value=_EmptyClient()),
-                patch("synthetic_trader.live.paper_runner.PaperBroker", return_value=fake_broker) as broker_cls,
+                patch("synthetic_trader.live.execution_backends.PaperBroker", return_value=fake_broker) as broker_cls,
             ):
                 summary = asyncio.run(
                     run_live_paper(
