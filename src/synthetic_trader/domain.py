@@ -77,6 +77,7 @@ class TradeSignal:
     symbol: str
     direction: Direction
     confidence: float
+    min_confidence: float
     entry: float
     stop_loss: float
     take_profit: float
@@ -84,6 +85,12 @@ class TradeSignal:
     snapshot: FeatureSnapshot
     rationale: tuple[str, ...]
     model_version: str = "bootstrap"
+    execution_stop: float | None = None
+    thesis_invalidation: float | None = None
+    primary_target: float | None = None
+    extended_target: float | None = None
+    hold_horizon_minutes: int | None = None
+    execution_trigger_type: str | None = None
 
     @property
     def reward_risk(self) -> float:

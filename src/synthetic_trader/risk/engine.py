@@ -35,13 +35,14 @@ class RiskEngine:
 
     def evaluate(self, signal: TradeSignal) -> RiskDecision:
         reasons: list[str] = []
+        min_confidence = signal.min_confidence
         if self.state.open_positions >= self.config.max_open_positions:
             reasons.append("max open positions reached")
         if self.state.consecutive_losses >= self.config.max_consecutive_losses:
             reasons.append("consecutive-loss circuit breaker active")
-        if self._daily_drawdown_fraction() >= self.config.max_daily_loss_fraction:
+        if self.daily_drawdown_fraction() >= self.config.max_daily_loss_fraction:
             reasons.append("daily loss limit reached")
-        if signal.confidence < self.config.min_confidence:
+        if signal.confidence < min_confidence:
             reasons.append("signal confidence below risk threshold")
         if signal.reward_risk < self.config.min_reward_risk:
             reasons.append("reward/risk below minimum")
@@ -53,7 +54,7 @@ class RiskEngine:
 
         risk_budget = self.state.equity * self.config.risk_per_trade
         quality = clamp(
-            (signal.confidence - self.config.min_confidence) / max(1.0 - self.config.min_confidence, 1e-9),
+            (signal.confidence - min_confidence) / max(1.0 - min_confidence, 1e-9),
             0.0,
             1.0,
         )
@@ -100,6 +101,6 @@ class RiskEngine:
         self.reset_daily_limits()
         return True
 
-    def _daily_drawdown_fraction(self) -> float:
+    def daily_drawdown_fraction(self) -> float:
         loss = max(0.0, self.state.day_start_equity - self.state.equity)
         return loss / max(self.state.day_start_equity, 1e-9)

@@ -106,6 +106,92 @@ def percentile_rank(value: float, values: list[float]) -> float:
     return below / len(values)
 
 
+def hurst_exponent(values: list[float], max_lag: int = 20) -> float:
+    if len(values) < max_lag + 10:
+        return 0.5
+    lags = list(range(2, min(max_lag, len(values) // 2)))
+    if not lags:
+        return 0.5
+    tau = []
+    for lag in lags:
+        diff = [values[i + lag] - values[i] for i in range(len(values) - lag)]
+        if diff:
+            tau.append(math.sqrt(sum(d * d for d in diff) / len(diff)))
+        else:
+            tau.append(0.0)
+    if len(tau) < 2 or all(t == 0 for t in tau):
+        return 0.5
+    log_lags = [math.log(lag) for lag in lags]
+    log_tau = [math.log(t) if t > 0 else 0.0 for t in tau]
+    n = len(log_lags)
+    x_mean = mean(log_lags)
+    y_mean = mean(log_tau)
+    numerator = sum((log_lags[i] - x_mean) * (log_tau[i] - y_mean) for i in range(n))
+    denominator = sum((log_lags[i] - x_mean) ** 2 for i in range(n))
+    if denominator == 0:
+        return 0.5
+    return clamp(numerator / denominator * 2.0, 0.0, 1.0)
+
+
+def shannon_entropy(values: list[float], bins: int = 10) -> float:
+    if len(values) < bins:
+        return 0.0
+    min_v, max_v = min(values), max(values)
+    if max_v == min_v:
+        return 0.0
+    bin_edges = [min_v + (max_v - min_v) * i / bins for i in range(bins + 1)]
+    counts = [0] * bins
+    for v in values:
+        idx = min(bins - 1, int((v - min_v) / (max_v - min_v) * bins))
+        counts[idx] += 1
+    total = sum(counts)
+    entropy = 0.0
+    for c in counts:
+        if c > 0:
+            p = c / total
+            entropy -= p * math.log2(p)
+    return entropy / math.log2(bins)
+
+
+def volatility_clustering(returns: list[float], period: int = 20) -> float:
+    if len(returns) < period + 1:
+        return 0.0
+    abs_returns = [abs(r) for r in returns[-period:]]
+    squared_returns = [r * r for r in returns[-period:]]
+    mean_abs = mean(abs_returns)
+    mean_sq = mean(squared_returns)
+    if mean_abs == 0:
+        return 0.0
+    return clamp(mean_sq / (mean_abs * mean_abs), 0.0, 5.0)
+
+
+def realized_volatility(returns: list[float], period: int) -> float:
+    window = returns[-period:]
+    if len(window) < 2:
+        return 0.0
+    return pstdev(window) * math.sqrt(len(window))
+
+
+def keltner_channels(candles: list[Candle], period: int = 20, mult: float = 2.0) -> tuple[float, float, float]:
+    if len(candles) < period:
+        return (0.0, 0.0, 0.0)
+    typical_prices = [(c.high + c.low + c.close) / 3.0 for c in candles[-period:]]
+    middle = mean(typical_prices)
+    atr_val = atr(candles[-period:], period)
+    upper = middle + mult * atr_val
+    lower = middle - mult * atr_val
+    return (upper, middle, lower)
+
+
+def donchian_channels(candles: list[Candle], period: int = 20) -> tuple[float, float, float]:
+    if len(candles) < period:
+        return (0.0, 0.0, 0.0)
+    upper = max(c.high for c in candles[-period:])
+    lower = min(c.low for c in candles[-period:])
+    middle = (upper + lower) / 2.0
+    return (upper, middle, lower)
+
+
 def candle_feature_set(candles: list[Candle]) -> dict[str, float]:
     if not candles:
         return {}
@@ -128,6 +214,24 @@ def candle_feature_set(candles: list[Candle]) -> dict[str, float]:
     recent_low = min(lows[-20:])
     position_in_range = safe_div(last.close - recent_low, recent_high - recent_low, 0.5)
 
+    returns = [closes[i] / closes[i - 1] - 1.0 for i in range(1, len(closes))]
+
+    hurst = hurst_exponent(closes) if len(closes) >= 50 else 0.5
+    entropy = shannon_entropy(returns[-50:]) if len(returns) >= 50 else 0.0
+    vol_cluster = volatility_clustering(returns) if len(returns) >= 20 else 0.0
+    realized_vol = realized_volatility(returns, 20) if len(returns) >= 20 else 0.0
+
+    kc_upper, kc_middle, kc_lower = keltner_channels(candles)
+    dc_upper, dc_middle, dc_lower = donchian_channels(candles)
+
+    kc_position = safe_div(last.close - kc_lower, kc_upper - kc_lower, 0.5) if kc_upper != kc_lower else 0.5
+    dc_position = safe_div(last.close - dc_lower, dc_upper - dc_lower, 0.5) if dc_upper != dc_lower else 0.5
+
+    atr_ratio = safe_div(atr_14, atr_50, 1.0)
+    atr_z = 0.0
+    if len(candles) >= 20 and atr_50 > 0:
+        atr_z = (atr_14 - atr_50) / (atr_50 * 0.1 + 1e-9)
+
     return {
         "close": last.close,
         "last_return": last_return,
@@ -146,11 +250,17 @@ def candle_feature_set(candles: list[Candle]) -> dict[str, float]:
         "slope_20_atr": safe_div(slope_20, atr_14),
         "atr_14": atr_14,
         "atr_50": atr_50,
-        "atr_ratio": safe_div(atr_14, atr_50, 1.0),
+        "atr_ratio": atr_ratio,
+        "atr_z_20": atr_z,
         "range_z_50": zscore(last.range, ranges, 50),
         "body_z_50": zscore(last.body_abs, [abs(item) for item in bodies], 50),
-        "realized_vol_20": rolling_std([candle.body for candle in candles], 20),
+        "realized_vol_20": realized_vol,
         "position_in_20_range": clamp(position_in_range, 0.0, 1.0),
         "close_vs_ema_21_atr": safe_div(last.close - ema_21, atr_14),
         "close_vs_ema_50_atr": safe_div(last.close - ema_50, atr_14),
+        "hurst_exponent": hurst,
+        "entropy": entropy,
+        "volatility_clustering": vol_cluster,
+        "kc_position": kc_position,
+        "dc_position": dc_position,
     }

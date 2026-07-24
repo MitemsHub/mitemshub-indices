@@ -130,35 +130,40 @@ def _passes_entry_gate(
     stop_distance: float,
     micro: MicrostructureAssessment,
 ) -> tuple[bool, str]:
+    if context.ticks_since_armed < thresholds.min_persistence_ticks:
+        return (
+            False,
+            "The setup is actionable, but live continuation still needs more persistence.",
+        )
     if micro.persistence_ticks < thresholds.min_persistence_ticks:
         return (
             False,
-            "Directional thesis is armed, but persistence is still too weak for confirmation.",
+            "The setup is actionable, but persistence is still too weak for confirmation.",
         )
     if micro.impulse_ratio < thresholds.min_impulse_ratio:
         return (
             False,
-            "Directional thesis is armed, but impulse quality is still too weak for confirmation.",
+            "The setup is actionable, but impulse quality is still too weak for confirmation.",
         )
     if micro.pullback_ratio > thresholds.max_pullback_ratio:
         return (
             False,
-            "Directional thesis is armed, but pullback depth is still too large for confirmation.",
+            "The setup is actionable, but pullback depth is still too large for confirmation.",
         )
     if _entry_drift_ratio(snapshot, stop_distance) > thresholds.max_entry_drift_ratio:
         return (
             False,
-            "Directional thesis is armed, but price drift is too large to trust the old entry.",
+            "The setup is actionable, but price drift is too large to trust the old entry.",
         )
     if context.ticks_since_armed > thresholds.max_confirmation_window_ticks:
         return (
             False,
-            "Directional thesis is armed, but the confirmation window has already gone stale.",
+            "The setup is actionable, but the confirmation window has already gone stale.",
         )
     if micro.rejection_imbalance <= 0:
         return (
             False,
-            "Directional thesis is armed, but rejection quality is still too mixed for confirmation.",
+            "The setup is actionable, but rejection quality is still too mixed for confirmation.",
         )
     return True, ""
 
@@ -173,31 +178,31 @@ def _detect_rollover(
         and micro.persistence_ticks < thresholds.min_persistence_ticks
     ):
         return (
-            "invalidated",
-            "Setup invalidated after reversal pressure clustered too aggressively.",
+            "cancelled",
+            "The original trade thesis is broken and should not be used.",
         )
     if (
         micro.adverse_cluster_count >= thresholds.max_adverse_cluster_count
         and micro.pullback_ratio >= thresholds.rollover_warning_ratio
     ):
         return (
-            "invalidated",
-            "Setup invalidated after reversal pressure clustered too aggressively.",
+            "cancelled",
+            "The original trade thesis is broken and should not be used.",
         )
     if micro.pullback_ratio >= thresholds.rollover_invalidation_ratio:
         return (
-            "invalidated",
-            "Setup invalidated after pullback depth broke the rollover guardrail.",
+            "cancelled",
+            "The original trade thesis is broken after pullback depth breached the rollover guardrail.",
         )
     if micro.pullback_ratio >= thresholds.rollover_warning_ratio:
         return (
-            "weakening",
-            "Setup is weakening after reversal pressure increased against the thesis.",
+            "failing",
+            "The setup is deteriorating and the old plan is no longer fresh.",
         )
     if micro.acceleration_shift < 0 and micro.adverse_cluster_count > 0:
         return (
-            "weakening",
-            "Setup is weakening after reversal pressure increased against the thesis.",
+            "failing",
+            "The setup is deteriorating and the old plan is no longer fresh.",
         )
     return None, None
 
@@ -208,30 +213,35 @@ def evaluate_signal_guardian(
     thresholds: GuardianThresholds,
 ) -> GuardianEvaluation:
     if snapshot.trade_status != "valid" or snapshot.direction_bias not in {"buy", "sell"}:
-        return GuardianEvaluation("forming", "Directional thesis is not yet armed.")
+        return GuardianEvaluation("forming", "Directional thesis is still forming.")
 
     stop_distance = _stop_distance(snapshot)
     if not stop_distance or stop_distance <= 0:
         return GuardianEvaluation(
             "unavailable",
-            "Guardian cannot evaluate a setup without valid trade levels.",
-        )
-
-    if context.ticks_since_armed > thresholds.max_arming_ticks:
-        return GuardianEvaluation(
-            "invalidated",
-            "Setup went stale before confirmation arrived.",
+            "Live guard cannot score the setup without levels.",
         )
 
     adverse_ratio = context.max_adverse_excursion / stop_distance
     if adverse_ratio >= thresholds.max_adverse_excursion_ratio:
         return GuardianEvaluation(
-            "invalidated",
-            "Setup invalidated after adverse excursion broke the guardrail.",
+            "cancelled",
+            "The original trade thesis is broken and should not be used.",
         )
 
     micro = _assess_microstructure(snapshot, context, thresholds, stop_distance)
     rollover_state, rollover_reason = _detect_rollover(micro, thresholds)
+    if rollover_state == "failing":
+        # Structure-led plans can print an orderly early pullback without losing the thesis.
+        orderly_early_post_entry_move = (
+            context.ticks_since_armed <= thresholds.min_persistence_ticks + 2
+            and adverse_ratio < thresholds.rollover_warning_ratio
+            and micro.pullback_ratio < thresholds.rollover_warning_ratio
+            and micro.rejection_imbalance > 0
+        )
+        if orderly_early_post_entry_move:
+            rollover_state = None
+            rollover_reason = None
     if rollover_state:
         return GuardianEvaluation(
             rollover_state,
@@ -240,8 +250,8 @@ def evaluate_signal_guardian(
 
     if adverse_ratio >= thresholds.weakening_excursion_ratio:
         return GuardianEvaluation(
-            "weakening",
-            "Setup is weakening and should not be treated as a clean entry.",
+            "failing",
+            "The setup is deteriorating and the old plan is no longer fresh.",
         )
 
     passes_entry_gate, gate_reason = _passes_entry_gate(
@@ -258,6 +268,6 @@ def evaluate_signal_guardian(
         )
 
     return GuardianEvaluation(
-        "armed",
-        gate_reason or "Directional thesis is armed, but confirmation has not arrived yet.",
+        "actionable",
+        gate_reason or "The setup is actionable with caution.",
     )

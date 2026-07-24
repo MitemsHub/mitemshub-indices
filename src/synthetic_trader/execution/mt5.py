@@ -144,7 +144,9 @@ def evaluate_mt5_runtime(
         )
 
     try:
-        if not module.login(int(config.login), password=config.password, server=config.server):
+        if config.login is None or config.login == "":
+            failures.append("mt5_login_empty")
+        elif not module.login(int(config.login), password=config.password or "", server=config.server or ""):
             failures.append("mt5_login_failed")
         if module.symbol_info(venue_symbol) is None:
             failures.append("mt5_symbol_unavailable")
@@ -172,6 +174,16 @@ def synchronize_mt5_positions(
             venue_symbol=None,
             positions=(),
         )
+
+    if not hasattr(mt5_module, "terminal_info") or mt5_module.terminal_info() is None:
+        try:
+            if config.terminal_path:
+                if not mt5_module.initialize(path=config.terminal_path):
+                    return Mt5SyncResult(ready=False, failures=("mt5_init_failed",), venue_symbol=venue_symbol, positions=())
+            elif not mt5_module.initialize():
+                return Mt5SyncResult(ready=False, failures=("mt5_init_failed",), venue_symbol=venue_symbol, positions=())
+        except Exception:
+            return Mt5SyncResult(ready=False, failures=("mt5_init_failed",), venue_symbol=venue_symbol, positions=())
 
     positions = mt5_module.positions_get(symbol=venue_symbol) or []
     snapshots = tuple(

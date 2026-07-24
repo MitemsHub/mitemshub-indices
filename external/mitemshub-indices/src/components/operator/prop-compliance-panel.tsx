@@ -21,59 +21,63 @@ export function PropCompliancePanel({
     call?.call === "stand_aside" || call?.trade_status !== "valid";
 
   return (
-    <section className="rounded-[32px] border border-[rgba(154,106,24,0.22)] bg-[rgba(255,248,232,0.92)] px-6 py-7 shadow-[0_18px_40px_rgba(154,106,24,0.08)] md:px-8 md:py-8">
-      <p className="text-[11px] uppercase tracking-[0.24em] text-[rgba(120,53,15,0.72)]">
+    <section className="rounded-2xl border border-[var(--accent-warn-soft)] bg-[var(--accent-warn-soft)] px-5 py-5 shadow-[0_18px_40px_rgba(154,106,24,0.06)]">
+      <p className="text-[11px] uppercase tracking-[0.24em] text-[var(--accent-warn)]">
         Prop protection
       </p>
-      <h3 className="mt-3 text-3xl font-semibold text-[var(--text-strong,#0f172a)]">
+      <h3 className="display-serif mt-2 text-lg font-semibold text-[var(--text-strong)]">
         Compliance status
       </h3>
-      <p className="mt-4 text-sm text-[rgba(15,23,42,0.72)]">
+      <p className="mt-3 text-sm text-[var(--text-body)]">
         {formatPropProfile(profile.profile)}
       </p>
-      <div className="mt-6 grid gap-4 md:grid-cols-2">
-        <div className="rounded-[24px] border border-[rgba(154,106,24,0.16)] bg-[rgba(255,255,255,0.72)] p-4">
-          <p className="text-[11px] uppercase tracking-[0.24em] text-[rgba(120,53,15,0.72)]">
+
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <div className="rounded-xl border border-[var(--accent-warn-soft)] bg-[var(--bg-panel-strong)] p-4">
+          <p className="text-[10px] uppercase tracking-[0.2em] text-[var(--accent-warn)]">
             Policy state
           </p>
-          <p className="mt-3 text-lg font-semibold text-[var(--text-strong,#0f172a)]">
+          <p className="mt-2 text-sm font-semibold text-[var(--text-strong)]">
             {call ? formatLabel(call.prop_compliance) : "Monitoring"}
           </p>
         </div>
-        <div className="rounded-[24px] border border-[rgba(154,106,24,0.16)] bg-[rgba(255,255,255,0.72)] p-4">
-          <p className="text-[11px] uppercase tracking-[0.24em] text-[rgba(120,53,15,0.72)]">
+        <div className="rounded-xl border border-[var(--accent-warn-soft)] bg-[var(--bg-panel-strong)] p-4">
+          <p className="text-[10px] uppercase tracking-[0.2em] text-[var(--accent-warn)]">
             Allowed risk
           </p>
-          <p className="mt-3 text-lg font-semibold text-[var(--text-strong,#0f172a)]">
+          <p className="mt-2 text-sm font-semibold text-[var(--text-strong)]">
             {noTradeActive ? "No trade active" : formatPercent(call?.prop_adjusted_risk ?? null)}
           </p>
         </div>
       </div>
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
-        <div className="rounded-[24px] border border-[rgba(154,106,24,0.16)] bg-[rgba(255,255,255,0.72)] p-4">
-          <p className="text-[11px] uppercase tracking-[0.24em] text-[rgba(120,53,15,0.72)]">
+
+      <div className="mt-3 grid gap-3 md:grid-cols-2">
+        <div className="rounded-xl border border-[var(--accent-warn-soft)] bg-[var(--bg-panel-strong)] p-4">
+          <p className="text-[10px] uppercase tracking-[0.2em] text-[var(--accent-warn)]">
             Daily loss room left
           </p>
-          <p className="mt-3 text-lg font-semibold text-[var(--text-strong,#0f172a)]">
+          <p className="mt-2 text-sm font-semibold text-[var(--text-strong)]">
             {formatPrice(call?.prop_remaining_daily_buffer ?? null)}
           </p>
         </div>
-        <div className="rounded-[24px] border border-[rgba(154,106,24,0.16)] bg-[rgba(255,255,255,0.72)] p-4">
-          <p className="text-[11px] uppercase tracking-[0.24em] text-[rgba(120,53,15,0.72)]">
+        <div className="rounded-xl border border-[var(--accent-warn-soft)] bg-[var(--bg-panel-strong)] p-4">
+          <p className="text-[10px] uppercase tracking-[0.2em] text-[var(--accent-warn)]">
             Total drawdown room left
           </p>
-          <p className="mt-3 text-lg font-semibold text-[var(--text-strong,#0f172a)]">
+          <p className="mt-2 text-sm font-semibold text-[var(--text-strong)]">
             {formatPrice(call?.prop_remaining_overall_buffer ?? null)}
           </p>
         </div>
       </div>
-      <p className="mt-4 text-sm leading-6 text-[rgba(15,23,42,0.68)]">
+
+      <p className="mt-4 text-xs leading-5 text-[var(--text-body)]">
         Daily loss room left is how much of today&apos;s 5% loss limit remains.
         Total drawdown room left is how much equity remains before the overall
         10% drawdown limit is breached.
       </p>
+
       {call?.prop_block_reason ? (
-        <p className="mt-4 text-sm leading-6 text-[rgba(15,23,42,0.68)]">
+        <p className="mt-3 text-xs leading-5 text-[var(--text-body)]">
           {call.prop_block_reason}
         </p>
       ) : null}

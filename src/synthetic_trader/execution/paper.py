@@ -94,6 +94,8 @@ class PaperBroker:
     def _close_at_price(self, position: Position, price: float, closed_at: float) -> TradeOutcome:
         signal = position.signal
         risk_distance = abs(signal.entry - signal.stop_loss)
+        if risk_distance <= 0.0:
+            risk_distance = signal.entry * 0.001
         if signal.direction is Direction.LONG:
             return_r = (price - signal.entry) / risk_distance
         else:

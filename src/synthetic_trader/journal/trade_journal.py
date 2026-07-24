@@ -18,9 +18,22 @@ class JournalMetrics:
 
 
 class TradeJournal:
-    def __init__(self, path: str | Path) -> None:
+    """Append-only trade journal with automatic line-count pruning.
+
+    Keeps at most MAX_LINES entries in the JSONL file. When the file exceeds
+    this limit, the oldest entries are trimmed after each append. Set
+    max_lines=0 to disable pruning (unbounded growth).
+    """
+
+    # Default: keep the most recent 10,000 journal entries. This preserves
+    # roughly 10-20 MB of history, which is enough for months of trading.
+    # Override via the constructor or by subclassing.
+    MAX_LINES: int = 10_000
+
+    def __init__(self, path: str | Path, max_lines: int | None = None) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._max_lines = max_lines if max_lines is not None else self.MAX_LINES
 
     def record_signal(self, signal: TradeSignal) -> None:
         self._append(
@@ -190,12 +203,30 @@ class TradeJournal:
         return metrics_from_outcomes(outcomes)
 
     def teach(self, model: OnlineLogisticModel, outcome: TradeOutcome) -> float:
-        label = 1 if outcome.exit > outcome.entry else 0
+        label = 1 if outcome.won else 0
         return model.update(dict(outcome.features), label=label, sample_weight=min(2.0, max(0.25, abs(outcome.return_r))))
 
     def _append(self, payload: dict[str, object]) -> None:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        # ── Prune to max_lines after each append ──
+        # If the file has grown beyond MAX_LINES entries, rewrite it with
+        # only the most recent MAX_LINES lines. This prevents journal files
+        # from growing unbounded over months of trading.
+        if self._max_lines > 0 and self.path.stat().st_size > 50_000:
+            self._prune(self._max_lines)
+
+    def _prune(self, max_lines: int) -> None:
+        """Keep only the most recent `max_lines` entries in the journal file."""
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+            if len(lines) <= max_lines:
+                return
+            # Keep the last max_lines lines (most recent)
+            with self.path.open("w", encoding="utf-8") as f:
+                f.write("\n".join(lines[-max_lines:]) + "\n")
+        except Exception:
+            pass  # Best-effort; pruning should never crash the trading system.
 
 
 def metrics_from_outcomes(outcomes: list[TradeOutcome]) -> JournalMetrics:

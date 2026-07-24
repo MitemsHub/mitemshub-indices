@@ -7,7 +7,7 @@ from synthetic_trader.domain import Direction, TradeOutcome
 from synthetic_trader.risk.engine import RiskEngine
 from synthetic_trader.strategy.decision_engine import DecisionEngine
 
-from tests.test_decision_engine import trending_candles
+from tests.test_decision_engine import borderline_trending_candles, trending_candles
 
 
 class RiskEngineTests(unittest.TestCase):
@@ -20,6 +20,22 @@ class RiskEngineTests(unittest.TestCase):
 
         self.assertTrue(decision.approved)
         self.assertIsNotNone(decision.intent)
+
+    def test_approves_borderline_synthetic_signal_when_symbol_floor_is_met(self) -> None:
+        config = TraderConfig.default()
+
+        for symbol in ("R_75", "R_100"):
+            with self.subTest(symbol=symbol):
+                signal = DecisionEngine(config).evaluate(
+                    symbol,
+                    borderline_trending_candles(symbol=symbol),
+                ).signal
+                assert signal is not None
+
+                decision = RiskEngine(config.risk).evaluate(signal)
+
+                self.assertTrue(decision.approved)
+                self.assertIsNotNone(decision.intent)
 
     def test_blocks_after_loss_limit(self) -> None:
         config = TraderConfig.default()

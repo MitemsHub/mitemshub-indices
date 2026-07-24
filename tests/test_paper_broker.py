@@ -35,6 +35,7 @@ def make_signal(
         symbol=symbol,
         direction=direction,
         confidence=0.7,
+        min_confidence=0.58,
         entry=entry,
         stop_loss=stop,
         take_profit=target,

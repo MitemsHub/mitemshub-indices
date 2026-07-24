@@ -13,6 +13,7 @@ from synthetic_trader.cli import main
 from synthetic_trader.config import LiveMode, Venue
 from synthetic_trader.domain import Direction, FeatureSnapshot, Regime, Tick, TradeSignal
 from synthetic_trader.live.paper_runner import LivePaperSummary, run_live_paper
+from synthetic_trader.live.supervised_live import LiveReadinessReport
 from synthetic_trader.models.online import OnlineLogisticModel
 from synthetic_trader.strategy.decision_engine import DecisionReport
 
@@ -49,6 +50,7 @@ class _FakeDecisionEngine:
             symbol=symbol,
             direction=Direction.LONG,
             confidence=0.7,
+            min_confidence=0.58,
             entry=primary.close,
             stop_loss=primary.close - 1.0,
             take_profit=primary.close + 2.0,
@@ -425,32 +427,40 @@ class LivePaperRunnerTests(unittest.TestCase):
         )
 
         with patch("synthetic_trader.cli.run_live_paper", new=AsyncMock(return_value=summary)) as run_live_paper_mock:
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                exit_code = main(
-                    [
-                        "paper-live",
-                        "--symbol",
-                        "R_100",
-                        "--venue",
-                        "mt5",
-                        "--live-mode",
-                        "armed-live",
-                        "--armed-live",
-                        "--mt5-server",
-                        "server",
-                        "--mt5-login",
-                        "123456",
-                        "--mt5-password",
-                        "secret",
-                        "--mt5-symbol",
-                        "Volatility 100 Index",
-                        "--duration-sec",
-                        "0",
-                        "--max-live-ticks",
-                        "0",
-                    ]
-                )
+            with patch(
+                "synthetic_trader.cli.build_live_readiness_report",
+                return_value=LiveReadinessReport(
+                    mode=LiveMode.ARMED_LIVE,
+                    ready=True,
+                    failures=(),
+                ),
+            ):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    exit_code = main(
+                        [
+                            "paper-live",
+                            "--symbol",
+                            "R_100",
+                            "--venue",
+                            "mt5",
+                            "--live-mode",
+                            "armed-live",
+                            "--armed-live",
+                            "--mt5-server",
+                            "server",
+                            "--mt5-login",
+                            "123456",
+                            "--mt5-password",
+                            "secret",
+                            "--mt5-symbol",
+                            "Volatility 100 Index",
+                            "--duration-sec",
+                            "0",
+                            "--max-live-ticks",
+                            "0",
+                        ]
+                    )
 
         self.assertEqual(exit_code, 0)
         self.assertIs(run_live_paper_mock.call_args.kwargs["live_mode"], LiveMode.ARMED_LIVE)

@@ -12,7 +12,11 @@ class MarketDataClient(Protocol):
     async def __aexit__(self, *_: object) -> None: ...
 
     async def ticks_history(
-        self, symbol: str, count: int = 5000, end: str | int = "latest"
+        self,
+        symbol: str,
+        count: int = 5000,
+        end: str | int = "latest",
+        start: int | None = None,
     ) -> list[Tick]: ...
 
-    async def subscribe_ticks(self, symbol: str) -> AsyncIterator[Tick]: ...
+    async def subscribe_ticks(self, symbol: str, timeout: float = 20.0) -> AsyncIterator[Tick]: ...

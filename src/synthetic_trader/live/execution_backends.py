@@ -7,11 +7,13 @@ from synthetic_trader.config import LiveMode, Mt5Config, PaperExecutionConfig, V
 from synthetic_trader.domain import Candle, Direction, OrderIntent, TradeOutcome
 from synthetic_trader.execution.mt5 import (
     Mt5CloseRequest,
+    Mt5ModifyRequest,
     Mt5OrderRequest,
     Mt5OrderResult,
     Mt5PositionSnapshot,
     Mt5SyncResult,
     close_mt5_position,
+    modify_mt5_position,
     place_mt5_order,
     synchronize_mt5_positions,
 )
@@ -251,6 +253,39 @@ class Mt5LiveExecutionBackend:
             ),
             mt5_module=self._mt5_module,
         )
+
+    def _modify_position(
+        self,
+        position: TrackedMt5Position,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+    ) -> Mt5OrderResult:
+        return modify_mt5_position(
+            request=Mt5ModifyRequest(
+                symbol=position.signal.symbol,
+                venue_symbol=position.venue_symbol,
+                ticket=position.ticket,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+            ),
+            mt5_module=self._mt5_module,
+        )
+
+    def modify(
+        self,
+        position_id: str,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+    ) -> Mt5OrderResult | None:
+        # position_id is the order ticket as a string; _tracked_positions is keyed by int ticket.
+        try:
+            ticket = int(position_id)
+        except (ValueError, TypeError):
+            return None
+        position = self._tracked_positions.get(ticket)
+        if position is None:
+            return None
+        return self._modify_position(position, stop_loss=stop_loss, take_profit=take_profit)
 
     def _maybe_close_tracked_position(
         self,

@@ -5,6 +5,7 @@ import asyncio
 import json
 import math
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from synthetic_trader.backtest.engine import BacktestEngine, load_ticks_csv
@@ -19,6 +20,8 @@ from synthetic_trader.execution.mt5 import (
     synchronize_mt5_positions,
 )
 from synthetic_trader.journal.trade_journal import TradeJournal
+from synthetic_trader.live.calibration_logger import append_call_record, build_call_record
+from synthetic_trader.live.calibration_scorer import run_score_unresolved_records_from_market
 from synthetic_trader.live.market_snapshot import (
     build_live_watch_review_snapshot,
     render_live_snapshot_text,
@@ -207,6 +210,24 @@ def build_parser() -> argparse.ArgumentParser:
     live_watch_review.add_argument("--limit", type=int, default=5)
     live_watch_review.add_argument("--call", dest="call_filter")
     live_watch_review.add_argument("--valid-only", action="store_true")
+
+    log_live_call = subparsers.add_parser(
+        "log-live-call",
+        help="append one live calibration call record",
+    )
+    log_live_call.add_argument("--symbol", required=True, choices=["R_75", "R_100"])
+    log_live_call.add_argument("--payload-json", required=True)
+    log_live_call.add_argument("--output", default="journals/live_calibration_calls.jsonl")
+
+    score_live_calibration = subparsers.add_parser(
+        "score-live-calibration",
+        help="inspect live calibration calls pending scoring",
+    )
+    score_live_calibration.add_argument("--calls-journal", default="journals/live_calibration_calls.jsonl")
+    score_live_calibration.add_argument("--output", default="journals/live_calibration_outcomes.jsonl")
+    score_live_calibration.add_argument("--symbol", choices=["R_75", "R_100"])
+    score_live_calibration.add_argument("--window-minutes", type=int)
+    score_live_calibration.add_argument("--now", help="optional ISO timestamp for deterministic scoring")
 
     mt5_live_order = subparsers.add_parser(
         "mt5-live-order",
@@ -857,6 +878,38 @@ def main(argv: list[str] | None = None) -> int:
         summary_payload = json.loads(Path(args.summary_json).read_text(encoding="utf-8"))
         snapshot = build_monitor_snapshot(live_summary=summary_payload)
         print(render_monitor_text(snapshot))
+        return 0
+
+    if args.command == "log-live-call":
+        payload = json.loads(Path(args.payload_json).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            print("error=invalid_payload:expected_json_object")
+            return 1
+        payload.setdefault("symbol", args.symbol)
+        record = build_call_record(payload)
+        append_call_record(Path(args.output), record)
+        print(f"symbol={record.get('symbol')}")
+        print(f"output={Path(args.output)}")
+        return 0
+
+    if args.command == "score-live-calibration":
+        journal_path = Path(args.calls_journal)
+        if not journal_path.exists():
+            print(f"error=journal_not_found:{journal_path}")
+            return 1
+        now = datetime.fromisoformat(args.now) if args.now else datetime.now(timezone.utc)
+        result = run_score_unresolved_records_from_market(
+            calls_path=journal_path,
+            outcomes_path=Path(args.output),
+            now=now,
+            symbol=args.symbol,
+            window_minutes=args.window_minutes,
+        )
+        print(f"calls_journal={journal_path}")
+        print(f"output={Path(args.output)}")
+        print(f"scored_records={result.scored_records}")
+        print(f"failed_records={result.failed_records}")
+        print(f"skipped_records={result.skipped_records}")
         return 0
 
     if args.command == "live-snapshot":

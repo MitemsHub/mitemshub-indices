@@ -1,15 +1,15 @@
 import type { FreshCallResponse } from "./contracts";
 
-export function formatConfidence(confidence: number | null): string {
-  if (confidence === null) {
+export function formatConfidence(confidence: number | null | undefined): string {
+  if (confidence == null) {
     return "Pending";
   }
 
   return `${Math.round(confidence * 100)}%`;
 }
 
-export function formatPrice(value: number | null): string {
-  if (value === null) {
+export function formatPrice(value: number | null | undefined): string {
+  if (value == null) {
     return "N/A";
   }
 
@@ -32,7 +32,7 @@ export function formatLabel(value: string | null): string {
     return "More account details needed";
   }
 
-  return value.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
+  return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 export function formatCallHeadline(call: FreshCallResponse["call"]): string {
@@ -57,14 +57,14 @@ export function formatGuardianState(
   switch (state) {
     case "forming":
       return "Setup still forming";
-    case "armed":
-      return "Waiting for confirmation";
+    case "actionable":
+      return "Actionable with caution";
     case "confirmed":
       return "Confirmed and ready";
-    case "weakening":
-      return "Confirmation fading";
-    case "invalidated":
-      return "Setup invalidated";
+    case "failing":
+      return "Plan is losing strength";
+    case "cancelled":
+      return "Setup cancelled";
     case "unavailable":
     default:
       return "Live read unavailable";
@@ -99,8 +99,16 @@ export function formatGuardianReason(value: string | null | undefined): string {
     return "Confirmation is in place and the setup is ready to trade.";
   }
 
-  if (lower.includes("weakening") && lower.includes("clean entry")) {
-    return "Momentum is fading, so do not treat this as a clean entry.";
+  if (lower.includes("actionable with caution")) {
+    return "The setup is tradable, but it still needs disciplined execution.";
+  }
+
+  if (lower.includes("deteriorating") || lower.includes("no longer fresh")) {
+    return "The setup is deteriorating and the old plan is no longer fresh.";
+  }
+
+  if (lower.includes("broken") || lower.includes("cancelled")) {
+    return "The original trade thesis is broken, so the setup is cancelled.";
   }
 
   if (lower.includes("unavailable")) {
@@ -208,6 +216,21 @@ export function formatNextStep(waitFor: string | null): string {
   return normalized ?? "Pull a fresh live reading before making a trade decision.";
 }
 
+export function formatCallAge(value: number | null | undefined): string {
+  if (value === null || value === undefined || value < 0) {
+    return "Age unavailable";
+  }
+
+  const minutes = Math.floor(value / 60);
+  const seconds = value % 60;
+
+  if (minutes === 0) {
+    return `${seconds}s old`;
+  }
+
+  return `${minutes}m ${seconds}s old`;
+}
+
 export function formatPropProfile(value: string): string {
   return value
     .split("_")
@@ -221,13 +244,41 @@ export function formatPropProfile(value: string): string {
     .join(" ");
 }
 
-export function formatPercent(value: number | null): string {
-  return value === null ? "N/A" : `${value.toFixed(2)}%`;
+export function formatPercent(value: number | null | undefined): string {
+  return value == null ? "N/A" : `${value.toFixed(2)}%`;
+}
+
+export function formatPct(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "N/A";
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+export function formatNumber(value: number | null | undefined, decimals = 2): string {
+  if (value == null) return "N/A";
+  return value.toLocaleString("en-US", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+}
+
+/** Convert internal symbol code to user-facing display name. */
+export function formatSymbol(symbol: string | null | undefined): string {
+  if (symbol === "R_75") return "Volatility 75";
+  if (symbol === "R_100") return "Volatility 100";
+  return symbol ?? "Unknown";
 }
 
 export function formatTimestamp(value: string): string {
   return new Date(value).toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
+  });
+}
+
+export function formatTime(value: string): string {
+  return new Date(value).toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
   });
 }

@@ -5,6 +5,7 @@ import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+
 from synthetic_trader.config import ModelConfig
 from synthetic_trader.features.indicators import clamp
 
@@ -25,7 +26,8 @@ class OnlineLogisticModel:
         score = self.bias
         for key, value in self._normalized(features).items():
             score += self.weights.get(key, 0.0) * value
-        return 1.0 / (1.0 + math.exp(-clamp(score, -30.0, 30.0)))
+        raw = 1.0 / (1.0 + math.exp(-clamp(score, -30.0, 30.0)))
+        return clamp(raw, 0.08, 0.92)
 
     def update(self, features: dict[str, float], label: int, sample_weight: float = 1.0) -> float:
         if label not in (0, 1):
@@ -86,3 +88,4 @@ class OnlineLogisticModel:
                 continue
             clean[key] = clamp(float(value), -self.config.feature_clip, self.config.feature_clip)
         return clean
+

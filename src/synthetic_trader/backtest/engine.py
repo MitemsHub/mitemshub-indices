@@ -170,7 +170,7 @@ class BacktestEngine:
             return
         if not learn:
             return
-        label = 1 if outcome.exit > outcome.entry else 0
+        label = 1 if outcome.won else 0
         self.model.update(dict(outcome.features), label=label, sample_weight=min(2.0, max(0.25, abs(outcome.return_r))))
 
 
