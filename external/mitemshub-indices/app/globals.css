@@ -62,6 +62,7 @@ body {
   min-height: 100vh;
   background-color: var(--bg-canvas);
   position: relative;
+  isolation: isolate; /* create stacking context so ::before z-index:-1 stays behind children */
   color: var(--text-strong);
   font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
   font-size: 15px;
