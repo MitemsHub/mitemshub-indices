@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import { haptic } from "../ui/haptic";
 
 type MobileBottomNavTab = "execute" | "history" | "settings";
 
@@ -10,22 +11,6 @@ type MobileBottomNavProps = {
   onHistory: () => void;
   onSettings: () => void;
 };
-
-/**
- * Trigger haptic feedback via the Vibration API.
- * Only fires on devices that support navigator.vibrate() (most Android
- * browsers, some iOS webviews). Desktop browsers silently no-op.
- * Pattern: a short 10ms pulse — light enough to feel but not annoying.
- */
-function triggerHaptic() {
-  try {
-    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
-      navigator.vibrate(10);
-    }
-  } catch {
-    // Silently ignore — haptic is a progressive enhancement
-  }
-}
 
 function ExecuteIcon({ active }: { active: boolean }) {
   return (
@@ -71,7 +56,7 @@ export function MobileBottomNav({
       <button
         type="button"
         className={`mobile-bottom-nav__item${activeTab === "execute" ? " mobile-bottom-nav__item--active" : ""}`}
-        onClick={() => { triggerHaptic(); onExecute(); }}
+        onClick={() => { haptic.doubleTap(); onExecute(); }}
         aria-label="Execute trade"
         aria-current={activeTab === "execute" ? "page" : undefined}
       >
@@ -82,7 +67,7 @@ export function MobileBottomNav({
       <button
         type="button"
         className={`mobile-bottom-nav__item${activeTab === "history" ? " mobile-bottom-nav__item--active" : ""}`}
-        onClick={() => { triggerHaptic(); onHistory(); }}
+        onClick={() => { haptic.tap(); onHistory(); }}
         aria-label="View trade history"
         aria-current={activeTab === "history" ? "page" : undefined}
       >
@@ -93,7 +78,7 @@ export function MobileBottomNav({
       <button
         type="button"
         className={`mobile-bottom-nav__item${activeTab === "settings" ? " mobile-bottom-nav__item--active" : ""}`}
-        onClick={() => { triggerHaptic(); onSettings(); }}
+        onClick={() => { haptic.tap(); onSettings(); }}
         aria-label="Open settings"
         aria-current={activeTab === "settings" ? "page" : undefined}
       >

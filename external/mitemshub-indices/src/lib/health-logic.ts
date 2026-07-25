@@ -55,11 +55,28 @@ export type Mt5Timing = {
   timestamp: number;
 };
 
+export type Mt5TestResult = {
+  success: boolean;
+  error: string | null;
+  server: string | null;
+  terminal_path: string | null;
+  duration_ms: number;
+  account_name: string | null;
+  account_balance: number | null;
+  tested_at: string;
+};
+
 export type HealthMetrics = {
   mt5_configured: boolean;
   mt5_server: string | null;
   mt5_error: string | null;
   mt5_timing: Mt5Timing | null;
+  /** Whether the MT5 terminal64.exe process is currently running. */
+  mt5_process_running: boolean;
+  /** ISO timestamp of the last successful MT5 initialize+login. */
+  mt5_last_connected_at: string | null;
+  /** Result of the most recent MT5 test connection attempt. */
+  mt5_last_test: Mt5TestResult | null;
   csv_size_bytes: number;
   csv_ticks: Record<string, number>;
   health_history: Array<{

@@ -284,6 +284,7 @@ export function OperatorShell() {
                     {enabledPanels.includes("evidence_summary") && (
                       <EvidencePanel
                         evidence={workspace.intelligence?.evidence_summary ?? null}
+                        loading={workspace.intelligenceLoading}
                       />
                     )}
                   </div>
@@ -291,6 +292,7 @@ export function OperatorShell() {
                 {enabledPanels.includes("market_thesis") && (
                   <MarketThesisPanel
                     thesis={(workspace.intelligence?.market_thesis ?? null) as any}
+                    loading={workspace.intelligenceLoading}
                   />
                 )}
               </>

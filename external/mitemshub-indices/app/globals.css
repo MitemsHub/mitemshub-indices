@@ -1027,16 +1027,38 @@ button:focus:not(:focus-visible) {
   opacity: 1;
 }
 
-[data-theme="dark"] .command-rail {
-  background:
-    linear-gradient(120deg, rgba(26, 33, 48, 0.7), transparent 55%),
-    linear-gradient(180deg, rgba(26, 33, 48, 0.32), transparent 100%),
-    var(--bg-panel);
-  border-color: rgba(200, 214, 240, 0.06);
+[data-theme="dark"] .command-rail,
+[data-theme="dark"] .command-rail.surface {
+  background: #141824 !important;
+  border-color: rgba(200, 214, 240, 0.08) !important;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4) !important;
+}
+
+[data-theme="dark"] .command-rail .utility-copy {
+  color: rgba(200, 214, 240, 0.5) !important;
+}
+
+[data-theme="dark"] .command-rail h1,
+[data-theme="dark"] .command-rail .display-serif {
+  color: #e4eaf3 !important;
+}
+
+[data-theme="dark"] .command-rail p {
+  color: #c8d4e3 !important;
+}
+
+[data-theme="dark"] .command-rail .waiting-banner {
+  background: rgba(230, 180, 80, 0.12);
+  border-color: rgba(230, 180, 80, 0.2);
+}
+
+[data-theme="dark"] .command-rail .waiting-banner__text {
+  color: #e6b450;
 }
 
 [data-theme="dark"] .mode-toggle {
   background: rgba(20, 26, 38, 0.6);
+  border-color: rgba(200, 214, 240, 0.1);
   color: var(--text-body);
 }
 
@@ -1053,7 +1075,8 @@ button:focus:not(:focus-visible) {
 [data-theme="dark"] .command-button {
   background: rgba(20, 26, 38, 0.9);
   color: var(--text-strong);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  border-color: rgba(200, 214, 240, 0.08);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 }
 
 [data-theme="dark"] .command-button:hover:not(:disabled) {
@@ -1081,13 +1104,14 @@ button:focus:not(:focus-visible) {
 }
 
 [data-theme="dark"] .command-button--active {
-  background: rgba(228, 234, 243, 0.92) !important;
-  color: #0f1217 !important;
-  border-color: rgba(228, 234, 243, 0.6) !important;
+  background: rgba(106, 156, 245, 0.15) !important;
+  color: #6a9cf5 !important;
+  border-color: rgba(106, 156, 245, 0.3) !important;
+  box-shadow: 0 4px 16px rgba(106, 156, 245, 0.2) !important;
 }
 
 [data-theme="dark"] .command-button--active:hover:not(:disabled) {
-  background: rgba(228, 234, 243, 0.85) !important;
+  background: rgba(106, 156, 245, 0.22) !important;
 }
 
 [data-theme="dark"] .info-chip {
@@ -2039,4 +2063,388 @@ button:focus:not(:focus-visible) {
 
 .theme-toggle:active svg {
   transform: rotate(180deg);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DARK MODE — comprehensive component overrides
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Intelligence panels ──────────────────────────────────── */
+[data-theme="dark"] .intelligence-panel {
+  background: var(--bg-panel);
+  border-color: var(--line-subtle);
+}
+
+[data-theme="dark"] .intelligence-panel .info-card {
+  background: var(--bg-panel-strong);
+  border-color: var(--line-subtle);
+}
+
+[data-theme="dark"] .intelligence-panel p,
+[data-theme="dark"] .intelligence-panel span,
+[data-theme="dark"] .intelligence-panel dd,
+[data-theme="dark"] .intelligence-panel dt {
+  color: var(--text-body);
+}
+
+[data-theme="dark"] .intelligence-panel .info-card p,
+[data-theme="dark"] .intelligence-panel .info-card span,
+[data-theme="dark"] .intelligence-panel .info-card dd {
+  color: var(--text-strong);
+}
+
+/* ── Health dashboard ─────────────────────────────────────── */
+[data-theme="dark"] .health-dashboard {
+  background: var(--bg-panel);
+  border-color: var(--line-subtle);
+}
+
+/* ── Connection status ────────────────────────────────────── */
+[data-theme="dark"] .connection-status {
+  background: var(--bg-panel);
+  border-color: var(--line-subtle);
+}
+
+[data-theme="dark"] .connection-status p,
+[data-theme="dark"] .connection-status span {
+  color: var(--text-body);
+}
+
+/* ── Pipeline diagnostics ─────────────────────────────────── */
+[data-theme="dark"] .pipeline-diagnostics {
+  background: var(--bg-panel);
+  border-color: var(--line-subtle);
+}
+
+/* ── Trade instruction panel ──────────────────────────────── */
+[data-theme="dark"] .trade-instruction {
+  background: var(--bg-panel);
+  border-color: var(--line-subtle);
+}
+
+[data-theme="dark"] .trade-instruction .info-card {
+  background: var(--bg-panel-strong);
+  border-color: var(--line-subtle);
+}
+
+/* ── Prop compliance panel ────────────────────────────────── */
+[data-theme="dark"] .prop-compliance {
+  background: var(--bg-panel);
+  border-color: var(--line-subtle);
+}
+
+/* ── History panel ────────────────────────────────────────── */
+[data-theme="dark"] .history-panel {
+  background: var(--bg-panel);
+  border-color: var(--line-subtle);
+}
+
+[data-theme="dark"] .history-panel p,
+[data-theme="dark"] .history-panel span {
+  color: var(--text-body);
+}
+
+/* ── Mobile nav (second definition — hardcoded white) ──────── */
+[data-theme="dark"] .mobile-nav {
+  background: rgba(16, 20, 30, 0.97) !important;
+  border-left-color: var(--line-subtle);
+}
+
+[data-theme="dark"] .mobile-nav .close-btn {
+  background: var(--bg-surface-hover);
+  color: var(--text-body);
+}
+
+[data-theme="dark"] .mobile-nav .close-btn:hover {
+  background: var(--line-subtle);
+  color: var(--text-strong);
+}
+
+[data-theme="dark"] .mobile-nav-section > h3 {
+  color: var(--text-label);
+}
+
+/* ── Mobile nav drawer ────────────────────────────────────── */
+[data-theme="dark"] .mobile-nav-drawer {
+  background: rgba(16, 20, 30, 0.97);
+  border-left-color: var(--line-subtle);
+}
+
+[data-theme="dark"] .mobile-nav-drawer__header {
+  border-bottom-color: var(--line-subtle);
+}
+
+[data-theme="dark"] .mobile-nav-close {
+  color: var(--text-body);
+}
+
+[data-theme="dark"] .mobile-nav-close:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-strong);
+}
+
+/* ── Bottom sheet (second definition — hardcoded white) ────── */
+[data-theme="dark"] .bottom-sheet-overlay {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+[data-theme="dark"] .bottom-sheet {
+  background: rgba(22, 28, 42, 0.98) !important;
+  border-top-color: var(--line-subtle);
+  box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme="dark"] .bottom-sheet::before {
+  background: var(--line-strong);
+}
+
+[data-theme="dark"] .bottom-sheet-close {
+  background: var(--bg-surface-hover);
+  color: var(--text-body);
+}
+
+[data-theme="dark"] .bottom-sheet-close:hover {
+  background: var(--line-subtle);
+  color: var(--text-strong);
+}
+
+/* ── Hamburger button ─────────────────────────────────────── */
+[data-theme="dark"] .hamburger-btn {
+  background: var(--bg-panel);
+  border-color: var(--line-subtle);
+  color: var(--text-body);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme="dark"] .hamburger-btn:hover {
+  background: var(--bg-panel-strong);
+  color: var(--text-strong);
+}
+
+/* ── Mobile nav trigger ───────────────────────────────────── */
+[data-theme="dark"] .mobile-nav-trigger {
+  background: var(--bg-panel);
+  border-color: var(--line-subtle);
+  color: var(--text-body);
+}
+
+[data-theme="dark"] .mobile-nav-trigger:hover {
+  background: var(--bg-panel-strong);
+  color: var(--text-strong);
+}
+
+/* ── Show trade sheet button ──────────────────────────────── */
+[data-theme="dark"] .show-trade-sheet-btn {
+  background: var(--accent-ink);
+  border-color: var(--accent-ink);
+  color: white;
+}
+
+[data-theme="dark"] .show-trade-sheet-btn:hover {
+  background: var(--accent-ink-hover);
+}
+
+/* ── Mobile accordion ─────────────────────────────────────── */
+[data-theme="dark"] .mobile-accordion {
+  background: var(--bg-panel);
+  border-color: var(--line-subtle);
+}
+
+[data-theme="dark"] .mobile-accordion__trigger {
+  color: var(--text-strong);
+}
+
+[data-theme="dark"] .mobile-accordion__trigger:hover {
+  background: var(--bg-surface-hover);
+}
+
+[data-theme="dark"] .mobile-accordion__icon {
+  color: var(--text-muted);
+}
+
+/* ── Intel accordion ──────────────────────────────────────── */
+[data-theme="dark"] .intel-accordion summary::after {
+  border-color: var(--text-muted);
+}
+
+/* ── Theme toggle ─────────────────────────────────────────── */
+[data-theme="dark"] .theme-toggle {
+  background: var(--bg-panel);
+  border-color: var(--line-subtle);
+  color: var(--text-body);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme="dark"] .theme-toggle:hover {
+  background: var(--bg-panel-strong);
+  color: var(--text-strong);
+}
+
+/* ── Pull to refresh ──────────────────────────────────────── */
+[data-theme="dark"] .pull-to-refresh__text {
+  color: var(--text-muted);
+}
+
+/* ── Waiting banner ───────────────────────────────────────── */
+[data-theme="dark"] .waiting-banner {
+  background: rgba(230, 180, 80, 0.12);
+  border-color: rgba(230, 180, 80, 0.2);
+}
+
+[data-theme="dark"] .waiting-banner__dot {
+  background: var(--accent-warn);
+}
+
+[data-theme="dark"] .waiting-banner__text {
+  color: var(--accent-warn);
+}
+
+/* ── FAB ──────────────────────────────────────────────────── */
+[data-theme="dark"] .fab {
+  background: var(--accent-ink);
+  box-shadow: 0 8px 24px rgba(106, 156, 245, 0.25);
+}
+
+[data-theme="dark"] .fab:hover {
+  background: var(--accent-ink-hover);
+  box-shadow: 0 12px 32px rgba(106, 156, 245, 0.3);
+}
+
+/* ── Tailwind color overrides for dark mode (scoped to panels) */
+/* Override specific Tailwind bg/text/border classes inside intelligence panels */
+[data-theme="dark"] .intelligence-panel .bg-green-50,
+[data-theme="dark"] .intelligence-panel .bg-green-100,
+[data-theme="dark"] .intelligence-panel .bg-green-50\/80 {
+  background: rgba(93, 212, 176, 0.08);
+}
+
+[data-theme="dark"] .intelligence-panel .bg-red-50,
+[data-theme="dark"] .intelligence-panel .bg-red-100,
+[data-theme="dark"] .intelligence-panel .bg-red-50\/80 {
+  background: rgba(240, 106, 96, 0.08);
+}
+
+[data-theme="dark"] .intelligence-panel .bg-blue-50,
+[data-theme="dark"] .intelligence-panel .bg-blue-100 {
+  background: rgba(106, 156, 245, 0.08);
+}
+
+[data-theme="dark"] .intelligence-panel .bg-amber-50,
+[data-theme="dark"] .intelligence-panel .bg-amber-100 {
+  background: rgba(230, 180, 80, 0.08);
+}
+
+[data-theme="dark"] .intelligence-panel .bg-purple-50,
+[data-theme="dark"] .intelligence-panel .bg-purple-100 {
+  background: rgba(167, 139, 250, 0.08);
+}
+
+[data-theme="dark"] .intelligence-panel .bg-gray-50,
+[data-theme="dark"] .intelligence-panel .bg-gray-100 {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+[data-theme="dark"] .intelligence-panel .bg-yellow-100 {
+  background: rgba(230, 180, 80, 0.1);
+}
+
+[data-theme="dark"] .intelligence-panel .text-green-600,
+[data-theme="dark"] .intelligence-panel .text-green-700,
+[data-theme="dark"] .intelligence-panel .text-green-900 {
+  color: #5dd4b0;
+}
+
+[data-theme="dark"] .intelligence-panel .text-red-600,
+[data-theme="dark"] .intelligence-panel .text-red-700,
+[data-theme="dark"] .intelligence-panel .text-red-900 {
+  color: #f06a60;
+}
+
+[data-theme="dark"] .intelligence-panel .text-blue-600,
+[data-theme="dark"] .intelligence-panel .text-blue-700,
+[data-theme="dark"] .intelligence-panel .text-blue-800 {
+  color: #6a9cf5;
+}
+
+[data-theme="dark"] .intelligence-panel .text-amber-600,
+[data-theme="dark"] .intelligence-panel .text-amber-700,
+[data-theme="dark"] .intelligence-panel .text-amber-800 {
+  color: #e6b450;
+}
+
+[data-theme="dark"] .intelligence-panel .text-purple-600,
+[data-theme="dark"] .intelligence-panel .text-purple-700 {
+  color: #a78bfa;
+}
+
+[data-theme="dark"] .intelligence-panel .text-gray-500,
+[data-theme="dark"] .intelligence-panel .text-gray-600,
+[data-theme="dark"] .intelligence-panel .text-gray-700,
+[data-theme="dark"] .intelligence-panel .text-gray-900 {
+  color: var(--text-body);
+}
+
+[data-theme="dark"] .intelligence-panel .text-yellow-800 {
+  color: #e6b450;
+}
+
+[data-theme="dark"] .intelligence-panel .border-green-200,
+[data-theme="dark"] .intelligence-panel .border-green-100 {
+  border-color: rgba(93, 212, 176, 0.2);
+}
+
+[data-theme="dark"] .intelligence-panel .border-red-200,
+[data-theme="dark"] .intelligence-panel .border-red-100 {
+  border-color: rgba(240, 106, 96, 0.2);
+}
+
+[data-theme="dark"] .intelligence-panel .border-blue-200,
+[data-theme="dark"] .intelligence-panel .border-blue-100 {
+  border-color: rgba(106, 156, 245, 0.2);
+}
+
+[data-theme="dark"] .intelligence-panel .border-amber-200,
+[data-theme="dark"] .intelligence-panel .border-amber-100 {
+  border-color: rgba(230, 180, 80, 0.2);
+}
+
+[data-theme="dark"] .intelligence-panel .border-gray-200 {
+  border-color: rgba(148, 163, 184, 0.12);
+}
+
+/* ── Gradient bars inside confidence breakdown ────────────── */
+[data-theme="dark"] .intelligence-panel .from-blue-500 {
+  background: linear-gradient(to right, #6a9cf5, #818cf8);
+}
+
+/* ── Thesis panel white/cream blocks ──────────────────────── */
+[data-theme="dark"] .intelligence-panel .bg-white\/50 {
+  background: rgba(26, 33, 48, 0.5);
+}
+
+[data-theme="dark"] .intelligence-panel .bg-white\/80,
+[data-theme="dark"] .intelligence-panel .bg-white\/82 {
+  background: rgba(26, 33, 48, 0.8);
+}
+
+/* ── Review system and pipeline diagnostics panels ────────── */
+[data-theme="dark"] .review-system .bg-gray-50 {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+[data-theme="dark"] .pipeline-diagnostics .bg-gray-50 {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+/* ── Evidence panel strength bar background ───────────────── */
+[data-theme="dark"] .bg-\[var\(--accent-positive-soft\)\] {
+  background: rgba(93, 212, 176, 0.12);
+}
+
+[data-theme="dark"] .bg-\[var\(--accent-danger-soft\)\] {
+  background: rgba(240, 106, 96, 0.12);
+}
+
+[data-theme="dark"] .bg-\[var\(--accent-neutral-soft\)\] {
+  background: rgba(148, 163, 184, 0.1);
 }

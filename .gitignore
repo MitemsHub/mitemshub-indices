@@ -24,3 +24,14 @@ external/mitemshub-indices/task5-preview-check.png
 external/mitemshub-indices/vitest-task4.json
 external/mitemshub-indices/tsconfig.tsbuildinfo
 external/mitems-studio-os/
+
+# AWS credentials
+infra/.env.aws
+external/mitemshub-indices/NUL
+external/mitemshub-indices/e2e/
+external/mitemshub-indices/test-results/
+external/mitemshub-indices/node_modules/
+.next/
+node_modules/
+.data/
+.freebuff/

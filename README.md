@@ -1,217 +1,467 @@
 # Synthetic AI Trader
 
-Institutional-style research and execution scaffold for Deriv Synthetic Indices, focused first on Volatility 75 (`R_75`) and Volatility 100 (`R_100`).
+**Institutional-grade AI trading intelligence for synthetic indices — powered by multi-timeframe analysis, probabilistic online learning, and structured explainability.**
 
-This is not a one-indicator Expert Advisor. The platform is designed around separated modules:
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Next.js 15](https://img.shields.io/badge/next.js-15-black.svg)](https://nextjs.org/)
+[![Tests](https://img.shields.io/badge/tests-313%20passed-brightgreen.svg)](#testing)
+[![License](https://img.shields.io/badge/license-proprietary-red.svg)](#license)
 
-- market data ingestion and candle construction
-- multi-timeframe features (4H → 1H → 15M → 5M)
-- market-structure and SMC/ICT-inspired structural proxies
-- volatility regime classification with Hurst/entropy
-- probabilistic online learning with confidence calibration
-- decision fusion with explainable trade rationales
-- portfolio and risk controls
-- paper execution, journaling, and post-trade learning
-- Deriv WebSocket adapter hooks for future live execution
+---
 
-Important design stance: for synthetic indices, terms like liquidity sweep, fair value gap, order block, and displacement are treated as price-structure features. They are not assumed to represent real institutional order flow unless Deriv exposes verifiable microstructure data.
+## What This Is
 
-## Phase 4 — AI Evolution, Benchmarking & Self-Improving Intelligence
-See [docs/PHASE4_SUMMARY.md](docs/PHASE4_SUMMARY.md) for complete details on the Phase 4 upgrades:
-- FeatureSelector: automatic feature importance ranking, stability tracking, redundancy detection
-- ModelCalibrator: Platt scaling & isotonic regression for probability calibration
-- ConfidenceScorer: multi-factor confidence (model + regime + structure + displacement)
-- EnsembleModel: weighted combination of multiple models with online updates
-- ModelMonitor: drift detection (KS-statistic), performance tracking (ECE, Brier, expectancy, PF)
-- FeatureImportanceReport: structured explainability with stability scores
-- Experiment tracking and model lifecycle management
+This is not another one-indicator Expert Advisor. Synthetic AI Trader is a **modular, research-first trading platform** that separates market data ingestion, multi-timeframe feature engineering, probabilistic modeling, decision fusion, risk controls, and execution into independent, testable components.
 
-## Phase 3 — Core Intelligence Engine
-See [docs/PHASE3_SUMMARY.md](docs/PHASE3_SUMMARY.md) for complete details on the Phase 3 upgrades:
-- 4-timeframe hierarchy with confluence scoring
-- Continuous background scanner
-- Call lifecycle (forming→actionable→confirmed→failing→cancelled)
-- Hurst exponent, entropy, volatility clustering, channel features
-- FVG detection, internal BOS, equal highs/lows, liquidity sweeps
-- Regime detection with persistence (trend/range/volatile/compression)
-- 8-component confidence scoring with calibration
-- Structured explainability for every signal
-- Feature flags for experimental capabilities
+Built for **Volatility 75 (V75)** and **Volatility 100 (V100)** on Blueberry Markets via MT5.
 
-## Monorepo Layout
+### Key Design Principles
 
-This project is one monorepo.
+- **Separated concerns** — each module is independently testable and replaceable
+- **Explainability first** — every signal comes with structured rationale, confidence breakdown, and invalidation levels
+- **Paper-first** — the system must prove positive expectancy through walk-forward validation before any real execution
+- **Online learning** — the model continuously adapts to regime changes without catastrophic forgetting
+- **Feature flags** — experimental capabilities are gated and can be toggled without code changes
 
-- Python engine: `src/synthetic_trader`
-- Operator web app: `external/mitemshub-indices`
-- Shared project docs: `docs/superpowers`
+---
 
-The operator app is part of the same repository as the engine. Keep feature work, documentation, and release coordination in this root repository.
+## Architecture
 
-## Root Git Workflow
-
-Use the root repository for Git operations, even when the change is only in the app folder.
-
-```powershell
-git status
-git add README.md external/mitemshub-indices/README.md
-git commit -m "docs: describe unified monorepo workflow"
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Operator Dashboard (Next.js)              │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐   │
+│  │ Trade    │ │Intelligence│ │ History  │ │   Health     │   │
+│  │  Plan    │ │  Panels   │ │  Panel   │ │  Dashboard   │   │
+│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └──────┬───────┘   │
+│       └─────────────┼───────────┼───────────────┘           │
+│                     │  Engine Bridge (Python ↔ TS)           │
+└─────────────────────┼───────────────────────────────────────┘
+                      │
+┌─────────────────────┼───────────────────────────────────────┐
+│              Python Trading Engine                            │
+│  ┌──────────────┐ ┌──────────────┐ ┌─────────────────────┐  │
+│  │ Market Data  │ │   Strategy   │ │   Risk Engine        │  │
+│  │  Snapshot    │ │  Decision    │ │  Position sizing     │  │
+│  │  Collector   │ │  Engine      │ │  Drawdown limits     │  │
+│  └──────┬───────┘ └──────┬───────┘ └──────────┬──────────┘  │
+│         │                │                     │              │
+│  ┌──────┴───────┐ ┌──────┴───────┐ ┌──────────┴──────────┐  │
+│  │   Feature    │ │    Model     │ │   Execution          │  │
+│  │   Engine     │ │   Ensemble   │ │   Backend            │  │
+│  │  46 features │ │  Online LR   │ │  MT5 / Deriv WS      │  │
+│  └──────────────┘ └──────────────┘ └──────────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
+                      │
+┌─────────────────────┼───────────────────────────────────────┐
+│              Data Layer                                       │
+│  ┌──────────────┐ ┌──────────────┐ ┌─────────────────────┐  │
+│  │   MT5        │ │  Deriv WS    │ │   CSV Tick Store     │  │
+│  │  Terminal    │ │  Adapter     │ │   (append + rotate)  │  │
+│  └──────────────┘ └──────────────┘ └─────────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Do not create or restore a nested `.git` directory inside `external/mitemshub-indices`.
+---
+
+## Features
+
+### Phase 3 — Core Intelligence Engine
+
+| Feature | Description |
+|---------|-------------|
+| **4-Timeframe Hierarchy** | 4H → 1H → 15M → 5M with per-timeframe regime detection |
+| **Confluence Scoring** | Cross-timeframe alignment scores (0.4–0.9) |
+| **Call Lifecycle** | `forming` → `actionable` → `confirmed` → `failing` → `cancelled` |
+| **Hurst Exponent** | Long-term memory/persistence detection (0–1) |
+| **Shannon Entropy** | Return distribution randomness quantification |
+| **Market Structure** | FVG detection, internal BOS, equal highs/lows, liquidity sweeps |
+| **Regime Detection** | Trend/range/volatile/compression with Hurst-aware persistence |
+| **Background Scanner** | Async continuous monitoring with regime change alerts |
+
+### Phase 4 — AI Evolution & Self-Improving Intelligence
+
+| Feature | Description |
+|---------|-------------|
+| **FeatureSelector** | Automatic importance ranking, stability tracking, redundancy detection |
+| **ModelCalibrator** | Platt scaling & isotonic regression for probability calibration |
+| **ConfidenceScorer** | Multi-factor confidence (model + regime + structure + displacement) |
+| **EnsembleModel** | Weighted combination of multiple models with online updates |
+| **ModelMonitor** | Drift detection (KS-statistic), performance tracking (ECE, Brier) |
+| **Explainability** | 15+ rationale factors per signal with structured trade rationales |
+
+### Decision Engine — 8-Component Fusion
+
+| Component | Weight | Purpose |
+|-----------|--------|---------|
+| Model | 0.28 | Calibrated directional probability |
+| Structure | 0.22 | BOS, FVG, sweeps, internal structure |
+| Regime | 0.15 | Regime + Hurst + entropy + volatility clustering |
+| Confluence | 0.08 | Multi-timeframe alignment |
+| Mean Reversion | 0.08 | Range position, RSI, Keltner/Donchian channels |
+| Displacement | 0.07 | Body/ATR directional alignment |
+| Momentum | 0.07 | Slope, EMA spread, recent returns |
+| Volatility | 0.05 | ATR ratio, realized vol, volatility clustering |
+
+---
+
+## Operator Dashboard
+
+The **MitemsHub Indices** operator dashboard is a Next.js 15 application providing:
+
+- **Trade Plan Panel** — Real-time trade recommendations with entry/invalidation/target levels
+- **AI Market Intelligence** — Regime analysis, bias scoring, and market thesis
+- **Multi-Timeframe Alignment** — Visual alignment matrix across all timeframes
+- **Bullish vs Bearish Evidence** — Ranked evidence with strength bars
+- **Current Market Thesis** — AI-generated thesis with confidence and invalidation
+- **Health Dashboard** — System health monitoring, MT5 diagnostics, bridge status
+- **Trade History** — Complete trade journal with outcomes and performance metrics
+- **Mobile-First Design** — Responsive layout with bottom navigation, haptic feedback, and pull-to-refresh
+
+### Screenshots
+
+The dashboard supports both light and dark themes with a sophisticated glass-morphism design system.
+
+---
+
+## Project Structure
+
+```
+Synthetic Indices Bot/
+├── src/synthetic_trader/          # Python trading engine
+│   ├── cli.py                     # Command-line interface
+│   ├── config.py                  # Trader configuration & feature flags
+│   ├── domain.py                  # Domain models (Tick, Candle, Signal)
+│   ├── backtest/                  # Backtesting engine
+│   ├── execution/                 # Execution backends (MT5, Deriv WS)
+│   ├── features/                  # Feature engineering (46 features)
+│   │   ├── indicators.py          # Technical indicators
+│   │   ├── market_structure.py    # SMC/ICT-inspired structure detection
+│   │   ├── regimes.py             # Volatility regime classification
+│   │   └── multi_timeframe_structure.py
+│   ├── journal/                   # Trade journaling
+│   ├── live/                      # Live data collection
+│   │   ├── market_snapshot.py     # Snapshot builder & alert engine
+│   │   ├── signal_guardian.py     # Signal validation
+│   │   └── execution_backends.py  # MT5 execution
+│   ├── models/                    # ML models
+│   │   ├── online.py              # Online logistic regression
+│   │   └── advanced.py            # FeatureSelector, Calibrator, Ensemble
+│   ├── research/                  # Walk-forward validation
+│   ├── risk/                      # Risk management engine
+│   ├── scanner/                   # Background scanner
+│   └── strategy/                  # Decision engine & confirmation
+│
+├── external/mitemshub-indices/    # Next.js operator dashboard
+│   ├── app/                       # Next.js App Router
+│   │   ├── page.tsx               # Main dashboard
+│   │   ├── globals.css            # Design system (light + dark themes)
+│   │   └── api/                   # API routes
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── intelligence/      # AI analysis panels
+│   │   │   ├── operator/          # Dashboard shell & controls
+│   │   │   └── ui/                # Shared UI utilities (haptic, skeleton)
+│   │   └── lib/
+│   │       ├── engine-bridge.ts   # Python ↔ TypeScript bridge
+│   │       ├── health-logic.ts    # System health computation
+│   │       └── python-runner.ts   # Python process management
+│   └── tests/                     # Vitest test suite
+│
+├── infra/                         # AWS infrastructure (Terraform)
+│   ├── main.tf                    # EC2, ALB, Security Groups
+│   ├── variables.tf               # Input variables
+│   ├── outputs.tf                 # Resource outputs
+│   └── user_data.ps1              # Windows Server bootstrap
+│
+├── tests/                         # Python test suite (313 tests)
+├── docs/                          # Architecture & phase documentation
+│   ├── architecture.md            # System architecture
+│   ├── PHASE3_SUMMARY.md          # Phase 3 implementation details
+│   ├── PHASE4_SUMMARY.md          # Phase 4 implementation details
+│   └── superpowers/               # Design specs & plans
+└── pyproject.toml                 # Python project configuration
+```
+
+---
 
 ## Quick Start
 
-Run tests:
+### Prerequisites
 
-```powershell
-python -m unittest discover -s tests
+- Python 3.11+
+- Node.js 20+
+- MT5 Terminal (Blueberry Markets) — for live data
+- Git
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/MitemsHub/mitemshub-indices.git
+cd "Synthetic Indices Bot"
 ```
 
-Run a CSV backtest:
+### 2. Set Up Python Engine
 
-```powershell
+```bash
+# Create virtual environment
+python -m venv venv
+venv\Scripts\activate  # Windows
+# source venv/bin/activate  # macOS/Linux
+
+# Install dependencies
+pip install -e ".[research,live]"
+```
+
+### 3. Set Up Operator Dashboard
+
+```bash
+cd external/mitemshub-indices
+npm install
+```
+
+### 4. Configure Environment
+
+Copy the environment template and fill in your MT5 credentials:
+
+```bash
+cp external/mitemshub-indices/.env.example external/mitemshub-indices/.env.local
+```
+
+Edit `.env.local` with your MT5 server, login, and password:
+
+```
+SYNTHETIC_MT5_SERVER=BlueberryMarketsSVG-Live
+SYNTHETIC_MT5_LOGIN=your_login
+SYNTHETIC_MT5_PASSWORD=your_password
+SYNTHETIC_MT5_TERMINAL_PATH=C:\Program Files\Blueberry Markets MetaTrader 5\terminal64.exe
+```
+
+### 5. Start the Dashboard
+
+```bash
+cd external/mitemshub-indices
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+---
+
+## CLI Commands
+
+### Backtest
+
+```bash
 python -m synthetic_trader.cli backtest --csv data/ticks.csv --symbol R_75 --timeframe 60
 ```
 
-Inspect a tick dataset:
+### Walk-Forward Validation
 
-```powershell
-python -m synthetic_trader.cli inspect-data --csv data/ticks.csv --symbol R_75
-```
-
-Run walk-forward validation:
-
-```powershell
+```bash
 python -m synthetic_trader.cli walk-forward --csv data/ticks.csv --symbol R_75 --train-ticks 50000 --test-ticks 10000
 ```
 
-Collect Deriv historical ticks:
+### Collect Historical Data
 
-```powershell
+```bash
 python -m synthetic_trader.cli collect-history --symbol R_75 --count 50000 --output data/R_75_ticks.csv
 ```
 
-Run live paper trading against Deriv ticks:
+### Paper Trading
 
-```powershell
+```bash
 python -m synthetic_trader.cli paper-live --symbol R_75 --duration-sec 900 --ticks-output data/R_75_live_ticks.csv
 ```
 
-Expected CSV columns:
+### Inspect Data
 
-```text
-epoch,price
+```bash
+python -m synthetic_trader.cli inspect-data --csv data/ticks.csv --symbol R_75
 ```
 
-Optional columns:
+---
 
-```text
-symbol
+## Testing
+
+### Python Tests (313 tests)
+
+```bash
+python -m pytest tests/ -v
 ```
 
-## Live Trading Safety
+### Next.js Tests (88 tests)
 
-The live Deriv adapter is deliberately separated from the decision engine. The recommended path is:
+```bash
+cd external/mitemshub-indices
+npm test
+```
 
-1. collect tick data
-2. run walk-forward backtests
-3. run paper trading against live ticks
-4. enable tiny-stake supervised live trading
-5. only then consider full automation
+### Run All Tests
 
-Never give the system trade permissions until the paper journal proves positive expectancy after realistic execution costs, latency, bad streaks, and regime changes.
+```bash
+# Python
+python -m pytest tests/ -v
 
-## What You Need To Provide Later
+# Next.js
+cd external/mitemshub-indices && npm test
+```
 
-For data collection and paper-live mode, the default Deriv app ID is `116450`. You can override it with `--app-id` or `DERIV_APP_ID` later.
+---
 
-For real Deriv execution later, provide a Deriv API token with the minimum required permissions. Do not share it until we deliberately move from paper mode to supervised live mode.
+## Infrastructure (AWS Deployment)
 
-For MT5 execution later, provide the broker/server name, login, investor or trading password depending on the integration, and the exact symbol names shown inside your MT5 Market Watch.
+The project includes Terraform templates for deploying to AWS EC2:
 
-## Phase 3 — Core Intelligence Engine (The Brain)
+```bash
+cd infra
 
-Completed major upgrades to the analysis engine:
+# Initialize Terraform
+terraform init
 
-### Multi-Timeframe Hierarchy (4H → 1H → 15M → 5M)
-- Full 4-timeframe support with per-timeframe regime detection
-- Confluence scoring across timeframes (0.4–0.9)
-- Structure notes with regime alignment tracking
-- Backward compatible with 2-timeframe usage
+# Plan deployment
+terraform plan -var-file="terraform.tfvars"
 
-### Continuous Background Scanner
-- Async scanner with configurable intervals
-- Per-symbol state tracking (regime, structure bias, direction)
-- Regime change detection and alerting
-- Callback-based integration
+# Apply deployment
+terraform apply -var-file="terraform.tfvars"
+```
 
-### Call Lifecycle Management
-- States: `forming` → `actionable` → `confirmed` → `failing` → `cancelled`
-- Quality assessment with trigger identification
-- R_100 special case for counter-close continuations
-- Previous state awareness for proper transitions
+### What Gets Deployed
 
-### Enhanced Feature Engineering (14 new features)
-- **Hurst Exponent** — Long-term memory/persistence (0–1)
-- **Shannon Entropy** — Return distribution entropy (0–1)
-- **Volatility Clustering** — Volatility autocorrelation
-- **Realized Volatility** — Annualized realized vol
-- **ATR Z-Score** — Volatility regime detection
-- **Keltner/Donchian Channel Position** — Mean-reversion signals
+- **EC2 Instance** — t3.large Windows Server 2022
+- **Application Load Balancer** — HTTP on port 80
+- **Security Groups** — RDP restricted to admin IP, HTTP through ALB
+- **Auto-Start** — PM2 + Windows Scheduled Task for boot persistence
+- **Pre-installed** — Node.js 20, Python 3.10, Git, MT5 Terminal
 
-### Refined Market Structure Detection
-- Swing detection with strength scoring
-- Fair Value Gap (FVG) detection and active tracking
-- Internal BOS (micro-structure breaks)
-- Equal highs/lows detection (0.1% threshold)
-- Liquidity sweep detection with reclaim tracking
+### Required Variables
 
-### Improved Regime Detection
-- Hurst-persistence aware trend detection
-- Entropy-based noisy range identification
-- Volatility clustering penalties
-- Explicit transitional regime handling
+```hcl
+aws_access_key    = "your-access-key"
+aws_secret_key    = "your-secret-key"
+aws_region        = "eu-north-1"
+admin_ip          = "your.public.ip"
+mt5_server        = "BlueberryMarketsSVG-Live"
+mt5_login         = "your_login"
+mt5_password      = "your_password"
+```
 
-### Decision Fusion (8 components, rebalanced weights)
-| Component | Weight |
-|-----------|--------|
-| Model | 0.28 |
-| Structure | 0.22 |
-| Regime | 0.15 |
-| Mean Reversion | 0.08 |
-| Displacement | 0.07 |
-| Momentum | 0.07 |
-| Volatility | 0.05 |
-| Confluence | 0.08 |
+See `infra/terraform.tfvars.example` for a template.
 
-### Confidence Calibration
-- Isotonic Regression (non-parametric)
-- Platt Scaling (parametric)
-- Automatic fallback for < 30 samples
-- Online updates via `update_calibration()`
+---
 
-### Explainability
-- `engine.explain_signal(signal)` → structured dict
-- 15+ specific rationale factors per signal
-- Explicit entry/invalidation/target reasoning
+## Configuration
 
 ### Feature Flags
-All experimental capabilities gated via `FeatureFlags` dataclass:
+
+All experimental capabilities are gated via `FeatureFlags` in `config.py`:
+
 ```python
-config.features = FeatureFlags(
-    enable_hurst=True,
-    enable_entropy=True,
-    enable_volatility_clustering=True,
-    enable_confidence_calibration=True,
-    enable_explainability=True,
+from synthetic_trader.config import TraderConfig, FeatureFlags
+
+config = TraderConfig(
+    features=FeatureFlags(
+        enable_hurst=True,                    # Hurst exponent analysis
+        enable_entropy=True,                  # Shannon entropy analysis
+        enable_volatility_clustering=True,    # Vol autocorrelation
+        enable_keltner_donchian=True,         # Channel position signals
+        enable_fvg_detection=True,            # Fair value gap detection
+        enable_internal_structure=True,       # Internal BOS detection
+        enable_equal_highs_lows=True,         # Equal highs/lows detection
+        enable_confidence_calibration=True,   # Probability calibration
+        enable_explainability=True,           # Structured explanations
+        enable_regime_persistence=True,       # Regime persistence tracking
+        enable_multi_tf_confluence=True,      # Multi-timeframe confluence
+    )
 )
 ```
 
-### Test Results
-```
-288 passed, 6 subtests passed
-```
-All existing tests pass with updated expectations.
+### Risk Configuration
 
-See `docs/PHASE3_SUMMARY.md` for complete details.
+```python
+from synthetic_trader.config import RiskConfig
+
+risk = RiskConfig(
+    min_confidence=0.58,      # Minimum confidence to generate a signal
+    max_position_pct=0.02,    # Max 2% of equity per trade
+    max_drawdown_pct=0.10,    # Max 10% drawdown before pause
+)
+```
+
+---
+
+## Important Design Stances
+
+### Synthetic Indices vs Real Markets
+
+For synthetic indices, terms like **liquidity sweep**, **fair value gap**, **order block**, and **displacement** are treated as **price-structure features** — not as representations of real institutional order flow. These features are useful only if walk-forward evidence proves they add expectancy.
+
+### Safety-First Upgrade Path
+
+1. ✅ Collect high-quality tick data
+2. ✅ Run walk-forward backtests
+3. ✅ Run paper trading against live ticks
+4. 🔲 Enable tiny-stake supervised live trading
+5. 🔲 Full automation (only after surviving drawdown + drift tests)
+
+**Never enable real execution until the paper journal proves positive expectancy** after realistic execution costs, latency, bad streaks, and regime changes.
+
+---
+
+## Monorepo Workflow
+
+This is a monorepo. All Git operations happen at the root, even for changes in `external/mitemshub-indices/`.
+
+```bash
+# Always work from the root
+git status
+git add external/mitemshub-indices/src/components/
+git commit -m "feat(dashboard): add new intelligence panel"
+git push origin feature/mt5-rollout-enablement
+```
+
+Do not create or restore a nested `.git` directory inside `external/mitemshub-indices/`.
+
+---
+
+## Branch Strategy
+
+| Branch | Purpose |
+|--------|---------|
+| `main` | Production-ready code |
+| `feature/mt5-rollout-enablement` | Active development for MT5 integration |
+| `feat/phase2-paper-live-reliability` | Paper trading reliability improvements |
+
+---
+
+## Technology Stack
+
+| Layer | Technology |
+|-------|------------|
+| **Dashboard** | Next.js 15, React 18, TypeScript 5, Tailwind CSS |
+| **Backend** | Python 3.11+, Online ML, NumPy, Pandas, scikit-learn |
+| **Bridge** | Python child_process ↔ Next.js API routes |
+| **Data** | MT5 Terminal (Blueberry Markets), Deriv WebSocket API |
+| **Infrastructure** | Terraform, AWS EC2 (t3.large), ALB, PM2 |
+| **Testing** | pytest (313 tests), Vitest (88 tests) |
+
+---
+
+## Contributing
+
+1. Create a feature branch from `main`
+2. Make your changes with tests
+3. Ensure all tests pass: `python -m pytest tests/ -v && cd external/mitemshub-indices && npm test`
+4. Submit a pull request with a clear description
+
+---
+
+## License
+
+This is proprietary software. All rights reserved.
+
+---
+
+## Acknowledgments
+
+Built with a research-first mindset — every feature must prove its value through walk-forward validation before being trusted with real capital.

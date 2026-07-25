@@ -2,12 +2,91 @@
 
 import type { MarketThesis } from "../../lib/contracts";
 import { formatPrice } from "../../lib/formatters";
+import { SkeletonBar } from "../ui/skeleton";
 
 type MarketThesisPanelProps = {
   thesis: MarketThesis | null;
+  loading?: boolean;
 };
 
-export function MarketThesisPanel({ thesis }: MarketThesisPanelProps) {
+function MarketThesisSkeleton() {
+  return (
+    <div className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4" aria-hidden="true">
+      {/* Header: title + direction chip */}
+      <div className="flex items-center justify-between">
+        <SkeletonBar width="8rem" height="0.75rem" />
+        <SkeletonBar width="3.5rem" height="1.5rem" className="rounded-full" />
+      </div>
+
+      {/* Thesis block */}
+      <div className="mt-3 md:mt-4 p-3 md:p-4 rounded-lg bg-white/50 border border-gray-100">
+        <SkeletonBar width="4rem" height="0.625rem" className="mb-2" />
+        <SkeletonBar width="100%" height="0.875rem" />
+        <SkeletonBar width="85%" height="0.875rem" className="mt-1.5" />
+        <SkeletonBar width="60%" height="0.875rem" className="mt-1.5" />
+      </div>
+
+      {/* 3 detail cards */}
+      <div className="mt-3 md:mt-4 grid gap-2 md:gap-4 grid-cols-1 sm:grid-cols-3">
+        {[1, 2, 3].map((i) => (
+          <div key={i} className="info-card rounded-xl md:rounded-[1rem] p-3 md:p-4">
+            <SkeletonBar width="5rem" height="0.625rem" />
+            <SkeletonBar width="4rem" height="1rem" className="mt-2" />
+            <SkeletonBar width="6rem" height="0.625rem" className="mt-1.5" />
+          </div>
+        ))}
+      </div>
+
+      {/* Timeframe alignment */}
+      <div className="mt-3 md:mt-4">
+        <SkeletonBar width="7rem" height="0.625rem" className="mb-2" />
+        <SkeletonBar width="3rem" height="1.5rem" className="rounded-full" />
+      </div>
+
+      {/* Supporting evidence rows */}
+      <div className="mt-3 md:mt-4">
+        <SkeletonBar width="8rem" height="0.625rem" className="mb-2" />
+        <div className="space-y-1.5 md:space-y-2">
+          {[1, 2].map((i) => (
+            <div key={i} className="flex items-start gap-2 md:gap-3 p-2 md:p-3 rounded-lg bg-green-50 border border-green-200">
+              <SkeletonBar width="1.25rem" height="1.25rem" className="rounded-full flex-shrink-0" />
+              <div className="flex-1">
+                <SkeletonBar width={`${4 + i}rem`} height="0.875rem" />
+                <SkeletonBar width="8rem" height="0.625rem" className="mt-1.5" />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Counter evidence row */}
+      <div className="mt-3 md:mt-4">
+        <SkeletonBar width="7rem" height="0.625rem" className="mb-2" />
+        <div className="p-2 md:p-3 rounded-lg bg-red-50 border border-red-200">
+          <div className="flex items-start gap-2 md:gap-3">
+            <SkeletonBar width="1.25rem" height="1.25rem" className="rounded-full flex-shrink-0" />
+            <div className="flex-1">
+              <SkeletonBar width="5rem" height="0.875rem" />
+              <SkeletonBar width="7rem" height="0.625rem" className="mt-1.5" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Confidence bar */}
+      <div className="mt-3 md:mt-4 p-3 md:p-4 rounded-lg bg-blue-50 border border-blue-200">
+        <SkeletonBar width="6rem" height="0.625rem" className="mb-2" />
+        <SkeletonBar width="100%" height="0.875rem" />
+      </div>
+    </div>
+  );
+}
+
+export function MarketThesisPanel({ thesis, loading }: MarketThesisPanelProps) {
+  if (loading) {
+    return <MarketThesisSkeleton />;
+  }
+
   if (!thesis) {
     return (
       <div className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">

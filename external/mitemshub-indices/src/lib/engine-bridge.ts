@@ -759,11 +759,25 @@ export async function getHealthMetrics(): Promise<{
   const bridge_unavailable = getConfiguredEngineRoot() !== null
     && diagnostics.lastError !== null;
 
+  // ── MT5 process check and last test (parallel reads) ──────
+  let mt5Running = false;
+  let mt5LastTest: Mt5TestFileRecord | null = null;
+  const mt5Config = getConfiguredLivePropProfile();
+  if (mt5Config) {
+    await Promise.all([
+      isMt5ProcessRunning().then((r) => { mt5Running = r; }),
+      readMt5LastTest(engineRoot).then((r) => { mt5LastTest = r; }),
+    ]);
+  }
+
   return {
-    mt5_configured: getConfiguredLivePropProfile() !== null,
+    mt5_configured: mt5Config !== null,
     mt5_server: process.env.SYNTHETIC_MT5_SERVER?.trim() ?? null,
     mt5_error: mt5Error,
     mt5_timing: mt5Timing,
+    mt5_process_running: mt5Running,
+    mt5_last_connected_at: mt5LastConnectedAt,
+    mt5_last_test: mt5LastTest,
     csv_size_bytes: csvSizeBytes,
     csv_ticks: csvTicks,
     health_history: healthHistory,
@@ -2476,9 +2490,32 @@ export async function getRecentHistory(symbol: SymbolCode) {
 
 export async function getSystemStatus() {
   const engineRoot = getConfiguredEngineRoot();
+  const mt5Config = getConfiguredLivePropProfile();
 
   if (engineRoot) {
     ensurePreparedCallWarmup();
+
+    // Parallel health reads — all independent, no ordering dependency.
+    let mt5Running = false;
+    let mt5LastError: string | null = null;
+    let mt5LastConnectedAtValue: string | null = mt5LastConnectedAt;
+    let mt5LastTest: Mt5TestFileRecord | null = null;
+    let engineVersion: string | null = null;
+    let csvTicks: Record<string, number> = { R_75: 0, R_100: 0 };
+
+    const tasks: Promise<unknown>[] = [
+      countCsvTicks(engineRoot).then((r) => { csvTicks = r; }),
+      readEngineVersion(engineRoot).then((r) => { engineVersion = r; }),
+      readMt5LastError(engineRoot).then((r) => { mt5LastError = r; }),
+      readMt5LastTest(engineRoot).then((r) => { mt5LastTest = r; }),
+    ];
+    if (mt5Config) {
+      tasks.push(
+        isMt5ProcessRunning().then((r) => { mt5Running = r; }),
+      );
+    }
+    await Promise.all(tasks);
+
     return {
       latest_call: "Bridge running",
       alert_count: 0,
@@ -2488,6 +2525,15 @@ export async function getSystemStatus() {
       latest_transport_reason: "The live engine bridge is connected and operational.",
       backend_status: "live_bridge_ready",
       journal_status: "active",
+      // ── MT5 connection health ──────────────────────────────
+      mt5_configured: mt5Config !== null,
+      mt5_process_running: mt5Running,
+      mt5_last_error: mt5LastError,
+      mt5_last_connected_at: mt5LastConnectedAtValue,
+      mt5_last_test: mt5LastTest,
+      mt5_server: process.env.SYNTHETIC_MT5_SERVER?.trim() ?? null,
+      engine_version: engineVersion,
+      csv_ticks: csvTicks,
     };
   }
 
@@ -2500,6 +2546,14 @@ export async function getSystemStatus() {
     latest_transport_reason: "The local engine path is not configured.",
     backend_status: "engine_not_configured",
     journal_status: "inactive",
+    mt5_configured: mt5Config !== null,
+    mt5_process_running: false,
+    mt5_last_error: null,
+    mt5_last_connected_at: null,
+    mt5_last_test: null,
+    mt5_server: process.env.SYNTHETIC_MT5_SERVER?.trim() ?? null,
+    engine_version: null,
+    csv_ticks: { R_75: 0, R_100: 0 },
   };
 }
 

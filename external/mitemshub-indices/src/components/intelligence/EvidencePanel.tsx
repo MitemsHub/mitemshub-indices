@@ -1,12 +1,80 @@
 "use client"
 
 import type { EvidenceSummary, Evidence } from "../../lib/contracts";
+import { SkeletonBar } from "../ui/skeleton";
 
 type EvidencePanelProps = {
   evidence: EvidenceSummary | null;
+  loading?: boolean;
 };
 
-export function EvidencePanel({ evidence }: EvidencePanelProps) {
+function EvidenceSkeleton() {
+  return (
+    <section className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4" aria-hidden="true">
+      {/* Header: title + bullish/bearish/neutral counts */}
+      <div className="flex items-center justify-between">
+        <SkeletonBar width="9rem" height="0.75rem" />
+        <div className="flex items-center gap-2 md:gap-3">
+          <SkeletonBar width="2.5rem" height="1.25rem" className="rounded-full" />
+          <SkeletonBar width="2.5rem" height="1.25rem" className="rounded-full" />
+          <SkeletonBar width="2.5rem" height="1.25rem" className="rounded-full" />
+        </div>
+      </div>
+
+      {/* Net score bar */}
+      <div className="mt-3 md:mt-4">
+        <div className="flex items-center gap-3 md:gap-4">
+          <div className="flex items-center gap-2">
+            <SkeletonBar width="2.5rem" height="0.5rem" className="rounded-full" />
+            <SkeletonBar width="2rem" height="0.875rem" />
+          </div>
+          <div className="w-px h-5 md:h-6 bg-[var(--line-subtle)]" />
+          <div className="flex items-center gap-2">
+            <SkeletonBar width="2.5rem" height="0.5rem" className="rounded-full" />
+            <SkeletonBar width="2rem" height="0.875rem" />
+          </div>
+        </div>
+      </div>
+
+      {/* Evidence rows */}
+      <div className="mt-3 md:mt-4">
+        <SkeletonBar width="10rem" height="0.625rem" className="mb-2 md:mb-3" />
+        <div className="space-y-1.5 md:space-y-2">
+          {[1, 2, 3, 4, 5].map((i) => (
+            <div key={i} className="info-card rounded-lg p-2 md:p-3">
+              <div className="flex items-center gap-2 md:gap-3">
+                {/* Mobile: stacked rank+icon; Desktop: inline */}
+                <div className="hidden md:flex items-center gap-2 flex-shrink-0">
+                  <SkeletonBar width="1.5rem" height="1rem" />
+                  <SkeletonBar width="1.5rem" height="1.5rem" className="rounded-full" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <SkeletonBar width={`${3 + (i % 3)}rem`} height="0.875rem" />
+                  <SkeletonBar width="8rem" height="0.625rem" className="mt-1.5" />
+                </div>
+                {/* Desktop: inline strength bar */}
+                <div className="hidden md:flex items-center gap-2 flex-shrink-0">
+                  <SkeletonBar width="5rem" height="0.375rem" className="rounded-full" />
+                  <SkeletonBar width="2rem" height="0.75rem" />
+                </div>
+              </div>
+              {/* Mobile: strength bar below */}
+              <div className="md:hidden mt-2 ml-6">
+                <SkeletonBar width="100%" height="0.5rem" className="rounded-full" />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function EvidencePanel({ evidence, loading }: EvidencePanelProps) {
+  if (loading) {
+    return <EvidenceSkeleton />;
+  }
+
   if (!evidence) {
     return (
       <section className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">

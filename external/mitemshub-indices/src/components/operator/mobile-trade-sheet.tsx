@@ -5,15 +5,12 @@ import { XIcon } from "../../lib/icons";
 import { useScrollLock } from "../../hooks/use-scroll-lock";
 import type { FreshCallResponse, GuardianStatus, ExecutionMode, TrackedPosition } from "../../lib/contracts";
 import { TradeInstructionPanel } from "./trade-instruction-panel";
+import { haptic } from "../ui/haptic";
 
 /** Minimum downward drag before the sheet auto-dismisses. */
 const SNAP_THRESHOLD = 120;
 /** How much resistance (0-1). 0.5 = drag half as far as your finger moves. */
 const DRAG_RESISTANCE = 0.45;
-/** Single-buzz duration (ms) for drag-dismiss haptic. */
-const HAPTIC_FEEDBACK_DURATION_MS = 10;
-/** Stronger pulse (ms) at the animation midpoint — simulates the sheet clicking out of its rails. */
-const HAPTIC_MIDPOINT_STRENGTH_MS = 20;
 
 type MobileTradeSheetProps = {
   open: boolean;
@@ -95,9 +92,7 @@ export function MobileTradeSheet({
     if (!open) return;
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (typeof navigator.vibrate === "function") {
-          navigator.vibrate([15, 50, 10]);
-        }
+        haptic.close();
         onClose();
       }
     };
@@ -149,9 +144,7 @@ export function MobileTradeSheet({
     setIsDragging(false);
 
     if (currentDragYRef.current >= SNAP_THRESHOLD) {
-      if (typeof navigator.vibrate === "function") {
-        navigator.vibrate(HAPTIC_FEEDBACK_DURATION_MS);
-      }
+      haptic.dismiss();
 
       // Compute average drag velocity (px/ms) over the entire gesture and
       // scale the dismiss animation duration: fast flick → 200ms, slow drag
@@ -172,9 +165,7 @@ export function MobileTradeSheet({
       // is crossed, then a stronger pulse mid-flight.
       const midpoint = Math.floor(duration / 2);
       dismissHapticTimerRef.current = setTimeout(() => {
-        if (typeof navigator.vibrate === "function") {
-          navigator.vibrate(HAPTIC_MIDPOINT_STRENGTH_MS);
-        }
+        haptic.midpoint();
         dismissHapticTimerRef.current = null;
       }, midpoint);
     } else {
@@ -264,9 +255,7 @@ export function MobileTradeSheet({
                 type="button"
                 className="bottom-sheet__close"
                 onClick={() => {
-                  if (typeof navigator.vibrate === "function") {
-                    navigator.vibrate([15, 50, 10]);
-                  }
+                  haptic.close();
                   onClose();
                 }}
                 aria-label="Close"

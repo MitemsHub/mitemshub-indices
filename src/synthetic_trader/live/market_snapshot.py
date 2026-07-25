@@ -565,6 +565,28 @@ def classify_alert_type(alert: dict[str, object]) -> str:
     return "context_update"
 
 
+def build_watch_alert(snapshot: dict[str, object]) -> dict[str, object]:
+    """Convert a raw snapshot dict into a JSON-serializable alert dict.
+
+    This is the bridge between the Python engine and the Next.js frontend.
+    It enriches the snapshot with alert_type and decision_summary fields
+    that the frontend's ``mapLiveSnapshot`` function expects.
+
+    Called by the engine bridge's ``executePythonSnapshot`` after
+    ``run_live_snapshot`` returns.
+    """
+    alert = dict(snapshot)
+    # Ensure alert_type is always present
+    if not alert.get("alert_type"):
+        alert["alert_type"] = classify_alert_type(alert)
+    # Build decision summary if missing
+    if not alert.get("decision_summary"):
+        summary = build_decision_summary(alert)
+        if summary:
+            alert["decision_summary"] = summary
+    return alert
+
+
 def build_watch_state(
     snapshot: dict[str, object],
     *,

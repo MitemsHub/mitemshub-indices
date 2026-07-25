@@ -54,6 +54,18 @@ function barWidth(pct: number): string {
 
 /** Format a warmup ISO timestamp into an elapsed-time string for display.
  *  Returns "—" when the timestamp is null/invalid. */
+/** Format an ISO timestamp into a human-readable elapsed-time string.
+ *  Returns "Never" when the timestamp is null/invalid. */
+function formatTimestamp(iso: string | null | undefined): string {
+  if (!iso) return "Never";
+  const d = new Date(iso);
+  const diff = Date.now() - d.getTime();
+  if (diff < 0) return "Just now";
+  if (diff < 60_000) return `${Math.floor(diff / 1000)}s ago`;
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+}
+
 function formatWarmupAge(isoString: string | null | undefined): string {
   if (!isoString) return "—";
   const elapsed = Date.now() - new Date(isoString).getTime();
@@ -871,56 +883,144 @@ export function HealthDashboard({
             </div>
           )}
 
-          {/* MT5 Connection Timing */}
-          <div className="space-y-1">
+          {/* ── MT5 Connection Diagnostics ────────────────────────────── */}
+          <div className="space-y-2">
             <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-label)] font-medium">
-              MT5 Connection Latency
+              MT5 Connection Diagnostics
             </p>
-            {timing ? (
-              <>
-                <GaugeBar
-                  label="Initialize"
-                  value={timing.init_ms}
-                  max={maxTiming}
-                  color="var(--accent-ink)"
-                />
-                <GaugeBar
-                  label="Login"
-                  value={timing.login_ms}
-                  max={maxTiming}
-                  color="var(--accent-positive)"
-                />
-                <GaugeBar
-                  label="Total"
-                  value={timing.total_ms}
-                  max={maxTiming}
-                  color="var(--accent-warn)"
-                />
-                <p className="text-[10px] text-[var(--text-muted)] mt-1">
-                  Last check: {age(timing.timestamp)}
-                  {data?.mt5_server ? ` · Server: ${data.mt5_server}` : ""}
-                </p>
 
-                {/* ── Latency sparkline (from backend-persisted health_history) ─── */}
-                {data?.health_history && data.health_history.length >= 2 && (
-                  <div className="mt-3">
-                    <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-label)] font-medium mb-1.5">
-                      Latency Trend (last {data.health_history.length} polls)
+            {/* Connection status row */}
+            <div className="flex items-center gap-3 text-[11px]">
+              <span className="w-20 text-[var(--text-muted)] shrink-0 text-right">Status</span>
+              <span className="flex items-center gap-1.5">
+                <span
+                  className={`inline-block w-2 h-2 rounded-full ${
+                    data?.mt5_process_running
+                      ? "bg-[var(--accent-positive)]"
+                      : data?.mt5_configured
+                        ? "bg-[var(--accent-danger)]"
+                        : "bg-[var(--text-muted)]"
+                  }`}
+                  aria-hidden="true"
+                />
+                <span className={
+                  data?.mt5_process_running
+                    ? "text-[var(--accent-positive)] font-medium"
+                    : data?.mt5_configured
+                      ? "text-[var(--accent-danger)] font-medium"
+                      : "text-[var(--text-muted)]"
+                }>
+                  {data?.mt5_process_running
+                    ? "Connected"
+                    : data?.mt5_configured
+                      ? "Terminal not running"
+                      : "Not configured"}
+                </span>
+              </span>
+            </div>
+
+            {/* Server */}
+            {data?.mt5_server && (
+              <div className="flex items-center gap-3 text-[11px]">
+                <span className="w-20 text-[var(--text-muted)] shrink-0 text-right">Server</span>
+                <span className="font-mono text-[var(--text-body)]">{data.mt5_server}</span>
+              </div>
+            )}
+
+            {/* Last connected */}
+            {data?.mt5_last_connected_at && (
+              <div className="flex items-center gap-3 text-[11px]">
+                <span className="w-20 text-[var(--text-muted)] shrink-0 text-right">Last OK</span>
+                <span className="text-[var(--text-body)]">{formatTimestamp(data.mt5_last_connected_at)}</span>
+              </div>
+            )}
+
+            {/* Last error — shown prominently when present */}
+            {data?.mt5_error && (
+              <div className="rounded-lg bg-[var(--accent-danger-soft)] border border-[rgba(196,68,58,0.15)] px-2.5 py-2">
+                <div className="flex items-start gap-2">
+                  <span className="inline-block w-2 h-2 rounded-full bg-[var(--accent-danger)] mt-0.5 shrink-0" aria-hidden="true" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[10px] font-semibold text-[var(--accent-danger)] mb-0.5">Last Error</p>
+                    <p className="text-[10px] text-[var(--accent-danger)] leading-relaxed break-words">
+                      {data.mt5_error}
                     </p>
-                    <LatencySparkline history={data.health_history.map(s => ({ total_ms: s.mt5_total_ms }))} />
                   </div>
-                )}
-              </>
-            ) : (
+                </div>
+              </div>
+            )}
+
+            {/* Last test result */}
+            {data?.mt5_last_test && (
+              <div className="flex items-center gap-3 text-[11px]">
+                <span className="w-20 text-[var(--text-muted)] shrink-0 text-right">Last Test</span>
+                <span className="flex items-center gap-1.5">
+                  <span
+                    className={`inline-block w-1.5 h-1.5 rounded-full ${
+                      data.mt5_last_test.success
+                        ? "bg-[var(--accent-positive)]"
+                        : "bg-[var(--accent-danger)]"
+                    }`}
+                  />
+                  <span className={data.mt5_last_test.success ? "text-[var(--accent-positive)]" : "text-[var(--accent-danger)]"}>
+                    {data.mt5_last_test.success ? "OK" : "Failed"}
+                  </span>
+                  <span className="text-[var(--text-muted)]">
+                    {data.mt5_last_test.duration_ms}ms
+                    {data.mt5_last_test.account_name ? ` · ${data.mt5_last_test.account_name}` : ""}
+                    {data.mt5_last_test.account_balance != null ? ` · $${data.mt5_last_test.account_balance.toLocaleString()}` : ""}
+                  </span>
+                </span>
+              </div>
+            )}
+
+            {/* No data state */}
+            {!data?.mt5_configured && !data?.mt5_error && !data?.mt5_last_test && (
               <p className="text-[10px] text-[var(--text-muted)] italic">
-                {data?.mt5_configured === false
-                  ? "MT5 is not configured."
-                  : data?.mt5_error
-                    ? `Last error: ${data.mt5_error.length > 80 ? data.mt5_error.slice(0, 80) + "…" : data.mt5_error}`
-                    : "No connection data yet. Run a manual call to populate."}
+                MT5 is not configured. Set SYNTHETIC_MT5_SERVER / LOGIN / PASSWORD in .env.local.
               </p>
             )}
           </div>
+
+          {/* MT5 Connection Timing */}
+          {timing && (
+            <div className="space-y-1">
+              <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-label)] font-medium">
+                MT5 Connection Latency
+              </p>
+              <GaugeBar
+                label="Initialize"
+                value={timing.init_ms}
+                max={maxTiming}
+                color="var(--accent-ink)"
+              />
+              <GaugeBar
+                label="Login"
+                value={timing.login_ms}
+                max={maxTiming}
+                color="var(--accent-positive)"
+              />
+              <GaugeBar
+                label="Total"
+                value={timing.total_ms}
+                max={maxTiming}
+                color="var(--accent-warn)"
+              />
+              <p className="text-[10px] text-[var(--text-muted)] mt-1">
+                Last check: {age(timing.timestamp)}
+              </p>
+
+              {/* ── Latency sparkline (from backend-persisted health_history) ─── */}
+              {data?.health_history && data.health_history.length >= 2 && (
+                <div className="mt-3">
+                  <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-label)] font-medium mb-1.5">
+                    Latency Trend (last {data.health_history.length} polls)
+                  </p>
+                  <LatencySparkline history={data.health_history.map(s => ({ total_ms: s.mt5_total_ms }))} />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Snapshot Phase Waterfall */}
           {data?.snapshot_phases && (

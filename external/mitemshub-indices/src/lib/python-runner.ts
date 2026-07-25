@@ -262,6 +262,10 @@ export async function withImportCheck<T>(
 ): Promise<T> {
   const importOk = await checkPythonImport(engineRoot);
   if (!importOk) {
+    // Force a fresh import check on next call by clearing the cached failure.
+    // This handles the case where the Python code was fixed but the cache
+    // still holds the old failure result.
+    checkImportCache.delete(engineRoot);
     throw new Error(
       `[withImportCheck${label ? `:${label}` : ""}] Python import validation failed`,
     );

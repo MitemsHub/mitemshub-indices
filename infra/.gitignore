@@ -1,0 +1,7 @@
+# Terraform state and sensitive files
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+.env.aws
+.terraform.lock.hcl
