@@ -35,3 +35,8 @@ external/mitemshub-indices/node_modules/
 node_modules/
 .data/
 .freebuff/
+
+# Terraform binaries
+terraform.exe
+terraform.zip
+terraform
