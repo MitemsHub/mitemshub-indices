@@ -149,6 +149,12 @@ def select_primary_target(
     if travel_budget <= 0:
         return None
 
+    # Sanity cap: travel budget can never exceed 5% of entry price.
+    # Prevents broken candle data (e.g. 481-point ranges on a 258 instrument)
+    # from producing impossible targets like TP=1,336.
+    max_travel = entry * 0.05
+    travel_budget = min(travel_budget, max_travel)
+
     latest = recent[-1]
     prior = recent[:-1]
 

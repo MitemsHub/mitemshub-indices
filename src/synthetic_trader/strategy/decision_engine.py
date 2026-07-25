@@ -193,7 +193,21 @@ class DecisionEngine:
             setup.reason,
             confirmation.reason,
         )
-        if setup.state == "none" or confirmation.state not in {"confirmed", "actionable"}:
+        # Allow signals when confidence is sufficiently high even if the formal
+        # setup/confirmation gates are not fully met.  The confidence score
+        # already incorporates model probability, structure, regime, momentum,
+        # and confluence — it is a better综合 (holistic) measure than the
+        # binary setup/confirmation states alone.
+        #
+        # Gate: require BOTH setup state AND confirmation to be valid,
+        # OR confidence above an elevated threshold (0.62) which means
+        # at least 5 of the 8 scoring components agree on direction.
+        has_formal_setup = (
+            setup.state != "none"
+            and confirmation.state in {"confirmed", "actionable"}
+        )
+        has_strong_confidence = confidence >= 0.62
+        if not has_formal_setup and not has_strong_confidence:
             return DecisionReport(None, rationale)
 
         execution_plan = None
@@ -245,12 +259,20 @@ class DecisionEngine:
             snapshot_features = dict(snapshot.features) if snapshot else {}
             atr_14 = snapshot_features.get("atr_14", 0.0)
             entry = snapshot_features.get("close", execution_candles[-1].close) if snapshot_features else execution_candles[-1].close
+
+            # Sanity cap: stop distance can never exceed 5% of entry price.
+            # This prevents insane ATR values (e.g. 360 on a 258-priced instrument)
+            # from producing impossible TP levels like 1,336.
+            max_stop = entry * 0.05
+
             if direction is Direction.LONG:
                 stop_distance = max(atr_14 * 1.5, entry * 0.002) if atr_14 > 0 else max(entry - execution_candles[-1].low, profile.pip_size * 2)
+                stop_distance = min(stop_distance, max_stop)
                 stop_loss = entry - stop_distance
                 take_profit = entry + stop_distance * profile.take_profit_rr
             else:
                 stop_distance = max(atr_14 * 1.5, entry * 0.002) if atr_14 > 0 else max(execution_candles[-1].high - entry, profile.pip_size * 2)
+                stop_distance = min(stop_distance, max_stop)
                 stop_loss = entry + stop_distance
                 take_profit = entry - stop_distance * profile.take_profit_rr
 
