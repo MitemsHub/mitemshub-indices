@@ -1779,6 +1779,34 @@ def render_live_watch_alert_text(alert: dict[str, object]) -> str:
 DEFAULT_CONTEXT_ALERT_COOLDOWN = 2
 
 
+async def _build_watch_baseline(
+    *,
+    symbol: str,
+    warmup_count: int,
+    timeframe_sec: int,
+    higher_timeframe_sec: int,
+    app_id: str | None,
+) -> tuple[list, dict[str, object], WatchState]:
+    """Collect warm-up ticks, build a snapshot, and return (ticks, alert, WatchState).
+
+    This is the shared logic used for both the initial baseline and the
+    post-reconnect baseline rebuild.
+    """
+    ticks = await collect_live_snapshot_ticks(
+        symbol=symbol, warmup_count=warmup_count, max_live_ticks=0, app_id=app_id,
+    )
+    snapshot = analyze_live_snapshot(
+        symbol=symbol,
+        ticks=ticks,
+        timeframe_sec=timeframe_sec,
+        higher_timeframe_sec=higher_timeframe_sec,
+    )
+    alert = build_watch_alert(snapshot)
+    alert["symbol"] = symbol
+    state = build_watch_state(alert)
+    return ticks, alert, state
+
+
 async def run_live_watch(
     *,
     symbol: str,
@@ -1810,18 +1838,13 @@ async def run_live_watch(
     context_cooldown_remaining = 0
 
     # ── warm-up baseline ──────────────────────────────────────
-    warmup_ticks = await collect_live_snapshot_ticks(
-        symbol=symbol, warmup_count=warmup_count, max_live_ticks=0, app_id=app_id,
-    )
-    baseline = analyze_live_snapshot(
+    warmup_ticks, baseline_alert, previous = await _build_watch_baseline(
         symbol=symbol,
-        ticks=warmup_ticks,
+        warmup_count=warmup_count,
         timeframe_sec=timeframe_sec,
         higher_timeframe_sec=higher_timeframe_sec,
+        app_id=app_id,
     )
-    baseline_alert = build_watch_alert(baseline)
-    baseline_alert["symbol"] = symbol
-    previous = build_watch_state(baseline_alert)
 
     if emit_initial:
         alert_log.append(baseline_alert)
@@ -1889,17 +1912,13 @@ async def run_live_watch(
             await asyncio.sleep(reconnect_backoff_sec * reconnects)
             # Rebuild baseline after reconnect
             try:
-                warmup_ticks = await collect_live_snapshot_ticks(
-                    symbol=symbol, warmup_count=warmup_count, max_live_ticks=0, app_id=app_id,
-                )
-                rebaseline = analyze_live_snapshot(
-                    symbol=symbol, ticks=warmup_ticks,
+                warmup_ticks, _, previous = await _build_watch_baseline(
+                    symbol=symbol,
+                    warmup_count=warmup_count,
                     timeframe_sec=timeframe_sec,
                     higher_timeframe_sec=higher_timeframe_sec,
+                    app_id=app_id,
                 )
-                rebaseline_alert = build_watch_alert(rebaseline)
-                rebaseline_alert["symbol"] = symbol
-                previous = build_watch_state(rebaseline_alert)
                 _append_journal(journal_file, {
                     "record_type": "watch_transport",
                     "event": "reconnect_rebaseline_ok",
