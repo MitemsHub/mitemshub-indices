@@ -547,7 +547,7 @@ def build_decision_summary(alert: dict[str, object]) -> str | None:
 
     call = str(alert.get("call", ""))
     trade_status = str(alert.get("trade_status", ""))
-    why = str(alert.get("why", "")).strip()
+    why = str(alert.get("why", "")).strip() or str(alert.get("briefing", "")).strip()
     wait_for = str(alert.get("wait_for", "")).strip()
 
     if trade_status != "valid" or call not in {"buy_candidate", "sell_candidate"}:
@@ -576,6 +576,9 @@ def build_watch_alert(snapshot: dict[str, object]) -> dict[str, object]:
     ``run_live_snapshot`` returns.
     """
     alert = dict(snapshot)
+    # Ensure 'why' is populated from 'briefing' for CLI renderers
+    if not alert.get("why") and alert.get("briefing"):
+        alert["why"] = alert["briefing"]
     # Ensure alert_type is always present
     if not alert.get("alert_type"):
         alert["alert_type"] = classify_alert_type(alert)
@@ -1686,3 +1689,423 @@ async def run_live_snapshot(
     _phases["total_ms"] = int((time.time() - _t_start) * 1000)
     result["phase_timing_ms"] = _phases
     return result
+
+
+# ── Render helpers (CLI text output) ─────────────────────────
+
+def render_live_snapshot_text(snapshot: dict[str, object]) -> str:
+    """Render a snapshot dict as human-readable CLI text.
+
+    Briefing is printed *before* structured fields so that the human
+    operator sees the plain-English summary first.
+    """
+    lines = []
+    if snapshot.get("briefing"):
+        lines.append(f"briefing={snapshot['briefing']}")
+    lines.append(f"symbol={snapshot.get('symbol', '?')}")
+    lines.append(f"trading_mode={snapshot.get('trading_mode', 'sniper')}")
+    lines.append(f"call={snapshot.get('call', 'unknown')}")
+    lines.append(f"trade_status={snapshot.get('trade_status', 'unknown')}")
+    lines.append(f"direction_bias={snapshot.get('direction_bias', 'none')}")
+    lines.append(f"regime={snapshot.get('regime', 'unknown')}")
+    if snapshot.get("regime_explanation"):
+        lines.append(f"regime_explanation={snapshot['regime_explanation']}")
+    lines.append(f"guardian_state={snapshot.get('guardian_state', 'unknown')}")
+    lines.append(f"guardian_reason={snapshot.get('guardian_reason', 'no reason')}")
+    if snapshot.get("current_close") is not None:
+        lines.append(f"current_close={snapshot['current_close']}")
+    if snapshot.get("entry") is not None:
+        lines.append(f"entry={snapshot['entry']}")
+    if snapshot.get("stop_loss") is not None:
+        lines.append(f"stop_loss={snapshot['stop_loss']}")
+    if snapshot.get("take_profit") is not None:
+        lines.append(f"take_profit={snapshot['take_profit']}")
+    if snapshot.get("confidence") is not None:
+        lines.append(f"confidence={snapshot['confidence']}")
+    if snapshot.get("wait_for"):
+        lines.append(f"wait_for={snapshot['wait_for']}")
+    if snapshot.get("reasons"):
+        lines.append(f"reasons={snapshot['reasons']}")
+    return "\n".join(lines)
+
+
+def render_live_watch_alert_text(alert: dict[str, object]) -> str:
+    """Render a live-watch alert dict as human-readable CLI text.
+
+    Field ordering rules:
+    - If *decision_summary* is present it goes first (operator headline).
+    - Otherwise *alert_type* goes first.
+    - Then *call*, *symbol*, and remaining fields in a natural order.
+    """
+    lines: list[str] = []
+    if alert.get("decision_summary"):
+        lines.append(f"decision_summary={alert['decision_summary']}")
+        lines.append(f"alert_type={alert.get('alert_type', 'unknown')}")
+    else:
+        lines.append(f"alert_type={alert.get('alert_type', 'unknown')}")
+    lines.append(f"call={alert.get('call', 'unknown')}")
+    lines.append(f"symbol={alert.get('symbol', '?')}")
+    if alert.get("why"):
+        lines.append(f"why={alert['why']}")
+    lines.append(f"direction_bias={alert.get('direction_bias', 'none')}")
+    lines.append(f"trade_status={alert.get('trade_status', 'unknown')}")
+    lines.append(f"regime={alert.get('regime', 'unknown')}")
+    if alert.get("guardian_state"):
+        lines.append(f"guardian_state={alert['guardian_state']}")
+    if alert.get("wait_for"):
+        lines.append(f"wait_for={alert['wait_for']}")
+    if alert.get("current_close") is not None:
+        lines.append(f"current_close={alert['current_close']}")
+    if alert.get("entry") is not None:
+        lines.append(f"entry={alert['entry']}")
+    if alert.get("entry_area"):
+        lines.append(f"entry_area={alert['entry_area']}")
+    if alert.get("stop_area"):
+        lines.append(f"stop_area={alert['stop_area']}")
+    if alert.get("target_area"):
+        lines.append(f"target_area={alert['target_area']}")
+    if alert.get("stop_loss") is not None:
+        lines.append(f"stop_loss={alert['stop_loss']}")
+    if alert.get("take_profit") is not None:
+        lines.append(f"take_profit={alert['take_profit']}")
+    if alert.get("reward_risk") is not None:
+        lines.append(f"reward_risk={alert['reward_risk']}")
+    return "\n".join(lines)
+
+
+# ── Live watch loop ──────────────────────────────────────────
+# Context-update cooldown: suppress non-setup_candidate alerts
+# that occur within CONTEXT_COOLDOWN_SEC of the previous emitted alert.
+DEFAULT_CONTEXT_ALERT_COOLDOWN = 2
+
+
+async def run_live_watch(
+    *,
+    symbol: str,
+    warmup_count: int = 5000,
+    timeframe_sec: int = 60,
+    higher_timeframe_sec: int = 300,
+    journal_path: str = "journals/live_watch_alerts.jsonl",
+    emit_initial: bool = False,
+    max_alerts: int | None = None,
+    max_minutes: int | None = None,
+    max_reconnects: int = 5,
+    reconnect_backoff_sec: int = 1,
+    app_id: str | None = None,
+) -> list[dict[str, object]]:
+    """Monitor a symbol and emit read-only operator calls on meaningful change.
+
+    Uses ``collect_live_snapshot_ticks`` for warm-up history, then loops
+    on ``watch_live_ticks`` to accumulate fresh ticks.  After each batch
+    the snapshot is evaluated via ``analyze_live_snapshot`` and the
+    resulting alert is compared against the previous one via
+    ``has_material_context_change`` / ``should_emit_watch_alert``.
+    """
+    alert_log: list[dict[str, object]] = []
+    journal_file = Path(journal_path)
+    journal_file.parent.mkdir(parents=True, exist_ok=True)
+
+    previous: WatchState | None = None
+    reconnects = 0
+    context_cooldown_remaining = 0
+
+    # ── warm-up baseline ──────────────────────────────────────
+    warmup_ticks = await collect_live_snapshot_ticks(
+        symbol=symbol, warmup_count=warmup_count, max_live_ticks=0, app_id=app_id,
+    )
+    baseline = analyze_live_snapshot(
+        symbol=symbol,
+        ticks=warmup_ticks,
+        timeframe_sec=timeframe_sec,
+        higher_timeframe_sec=higher_timeframe_sec,
+    )
+    baseline_alert = build_watch_alert(baseline)
+    baseline_alert["symbol"] = symbol
+    previous = build_watch_state(baseline_alert)
+
+    if emit_initial:
+        alert_log.append(baseline_alert)
+        _append_journal(journal_file, baseline_alert)
+        if baseline_alert.get("alert_type") == "context_update":
+            context_cooldown_remaining = DEFAULT_CONTEXT_ALERT_COOLDOWN
+
+    # ── main watch loop ───────────────────────────────────────
+    while reconnects <= max_reconnects:
+        if max_alerts and len(alert_log) >= max_alerts:
+            break
+        try:
+            fresh_ticks = await watch_live_ticks(
+                symbol=symbol, app_id=app_id, max_minutes=max_minutes,
+            )
+            if not fresh_ticks:
+                break
+
+            all_ticks = list(warmup_ticks) + list(fresh_ticks)
+            result = analyze_live_snapshot(
+                symbol=symbol,
+                ticks=all_ticks,
+                timeframe_sec=timeframe_sec,
+                higher_timeframe_sec=higher_timeframe_sec,
+            )
+            alert = build_watch_alert(result)
+            alert["symbol"] = symbol
+            current = build_watch_state(alert)
+
+            # Decrement cooldown counter per iteration (bucket-based)
+            if context_cooldown_remaining > 0:
+                context_cooldown_remaining -= 1
+
+            if should_emit_watch_alert(previous, current, context_cooldown_remaining=context_cooldown_remaining):
+                alert_log.append(alert)
+                _append_journal(journal_file, alert)
+                if alert.get("alert_type") == "context_update":
+                    context_cooldown_remaining = DEFAULT_CONTEXT_ALERT_COOLDOWN
+                previous = current
+            elif previous is not None and current != previous:
+                # Context changed but cooldown blocked emission — journal the
+                # suppression so the review command can show transport health.
+                suppressed = dict(alert)
+                suppressed["record_type"] = "suppressed_context"
+                _append_journal(journal_file, suppressed)
+
+            warmup_ticks = all_ticks
+            if max_alerts and len(alert_log) >= max_alerts:
+                break
+
+        except StopIteration:
+            # Exhausted snapshot source — clean exit
+            break
+        except Exception as exc:
+            reconnects += 1
+            transport_record = {
+                "record_type": "watch_transport",
+                "event": "reconnect_attempt" if reconnects <= max_reconnects else "reconnect_failed",
+                "symbol": symbol,
+                "error": str(exc),
+            }
+            _append_journal(journal_file, transport_record)
+            if reconnects > max_reconnects:
+                break
+            await asyncio.sleep(reconnect_backoff_sec * reconnects)
+            # Rebuild baseline after reconnect
+            try:
+                warmup_ticks = await collect_live_snapshot_ticks(
+                    symbol=symbol, warmup_count=warmup_count, max_live_ticks=0, app_id=app_id,
+                )
+                rebaseline = analyze_live_snapshot(
+                    symbol=symbol, ticks=warmup_ticks,
+                    timeframe_sec=timeframe_sec,
+                    higher_timeframe_sec=higher_timeframe_sec,
+                )
+                rebaseline_alert = build_watch_alert(rebaseline)
+                rebaseline_alert["symbol"] = symbol
+                previous = build_watch_state(rebaseline_alert)
+                _append_journal(journal_file, {
+                    "record_type": "watch_transport",
+                    "event": "reconnect_rebaseline_ok",
+                    "symbol": symbol,
+                })
+            except Exception:
+                pass
+
+    return alert_log
+
+
+def build_live_watch_review_snapshot(
+    *,
+    journal_path: Path,
+    symbol: str | None = None,
+    limit: int = 5,
+    call_filter: str | None = None,
+    valid_only: bool = False,
+) -> dict[str, object]:
+    """Build a review snapshot from a live-watch journal JSONL file.
+
+    Returns a flat dict with ``latest_*`` summary fields, ``alert_count``,
+    ``suppressed_context_count``, ``transport_event_count``, and an
+    ``alerts`` list with the filtered entries.
+    """
+    if not journal_path.exists():
+        raise ValueError(f"Journal file not found: {journal_path}")
+
+    all_records: list[dict[str, object]] = []
+    for line in journal_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        all_records.append(entry)
+
+    # If the file exists but has no content, return a safe empty state
+    # (empty journal is valid — just no alerts yet)
+    # But if lines were present but ALL failed to parse, that's invalid.
+    raw_text = journal_path.read_text(encoding="utf-8")
+    non_empty_lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+    if non_empty_lines and not all_records:
+        raise ValueError(f"No valid entries found in journal: {journal_path}")
+
+    # Separate by record type
+    alert_entries: list[dict[str, object]] = []
+    suppressed_entries: list[dict[str, object]] = []
+    transport_entries: list[dict[str, object]] = []
+    for entry in all_records:
+        rtype = entry.get("record_type", "")
+        if rtype == "suppressed_context":
+            suppressed_entries.append(entry)
+        elif rtype == "watch_transport":
+            transport_entries.append(entry)
+        else:
+            alert_entries.append(entry)
+
+    # Apply filters to alert entries
+    filtered: list[dict[str, object]] = []
+    for entry in alert_entries:
+        if symbol and entry.get("symbol") != symbol:
+            continue
+        if call_filter and entry.get("call") != call_filter:
+            continue
+        if valid_only and entry.get("trade_status") != "valid":
+            continue
+        filtered.append(entry)
+
+    # Filter suppressed entries by the same criteria (except transport)
+    filtered_suppressed: list[dict[str, object]] = []
+    for entry in suppressed_entries:
+        if symbol and entry.get("symbol") != symbol:
+            continue
+        if call_filter and entry.get("call") != call_filter:
+            continue
+        if valid_only and entry.get("trade_status") != "valid":
+            continue
+        filtered_suppressed.append(entry)
+
+    filtered = filtered[-limit:]
+    latest = filtered[-1] if filtered else None
+    latest_suppressed = filtered_suppressed[-1] if filtered_suppressed else None
+    latest_transport = transport_entries[-1] if transport_entries else None
+
+    result: dict[str, object] = {
+        "alert_count": len(filtered),
+        "latest_call": latest.get("call") if latest else None,
+        "latest_symbol": latest.get("symbol") if latest else None,
+        "latest_trade_status": latest.get("trade_status") if latest else None,
+        "latest_direction_bias": latest.get("direction_bias") if latest else None,
+        "latest_regime": latest.get("regime") if latest else None,
+        "latest_confidence": latest.get("confidence") if latest else None,
+        "latest_current_close": latest.get("current_close") if latest else None,
+        "latest_wait_for": latest.get("wait_for") if latest else None,
+        "alerts": filtered,
+        "suppressed_context_count": len(filtered_suppressed),
+        "latest_suppressed_direction_bias": latest_suppressed.get("direction_bias") if latest_suppressed else None,
+        "latest_suppressed_regime": latest_suppressed.get("regime") if latest_suppressed else None,
+        "latest_suppressed_why": latest_suppressed.get("why", latest_suppressed.get("briefing")) if latest_suppressed else None,
+        "latest_suppressed_wait_for": latest_suppressed.get("wait_for") if latest_suppressed else None,
+        "transport_event_count": len(transport_entries),
+        "latest_transport_event": latest_transport.get("event") if latest_transport else None,
+        "latest_transport_reason": latest_transport.get("reason") if latest_transport else None,
+        "latest_transport_attempt": latest_transport.get("attempt") if latest_transport else None,
+        "latest_transport_attempts": latest_transport.get("attempts") if latest_transport else None,
+        "latest_transport_regime": latest_transport.get("regime") if latest_transport else None,
+        "latest_transport_direction_bias": latest_transport.get("direction_bias") if latest_transport else None,
+        "latest_transport_trade_status": latest_transport.get("trade_status") if latest_transport else None,
+        "latest_transport_confidence": latest_transport.get("confidence") if latest_transport else None,
+    }
+    return result
+
+
+def render_live_watch_review_text(snapshot: dict[str, object]) -> str:
+    """Render a live-watch review snapshot as CLI text."""
+    lines: list[str] = []
+    # Summary header
+    lines.append(f"review_latest_call={snapshot.get('latest_call', 'none')}")
+    lines.append(f"review_latest_symbol={snapshot.get('latest_symbol', 'none')}")
+    lines.append(f"review_alert_count={snapshot.get('alert_count', 0)}")
+
+    # Suppression summary
+    suppressed_count = snapshot.get("suppressed_context_count", 0)
+    if suppressed_count:
+        lines.append(f"review_suppressed_context_count={suppressed_count}")
+        if snapshot.get("latest_suppressed_direction_bias"):
+            lines.append(f"review_latest_suppressed_direction_bias={snapshot['latest_suppressed_direction_bias']}")
+        if snapshot.get("latest_suppressed_regime"):
+            lines.append(f"review_latest_suppressed_regime={snapshot['latest_suppressed_regime']}")
+        if snapshot.get("latest_suppressed_why"):
+            lines.append(f"review_latest_suppressed_why={snapshot['latest_suppressed_why']}")
+
+    # Transport summary
+    transport_count = snapshot.get("transport_event_count", 0)
+    if transport_count:
+        lines.append(f"review_transport_event_count={transport_count}")
+        if snapshot.get("latest_transport_event"):
+            lines.append(f"review_latest_transport_event={snapshot['latest_transport_event']}")
+        if snapshot.get("latest_transport_reason"):
+            lines.append(f"review_latest_transport_reason={snapshot['latest_transport_reason']}")
+        if snapshot.get("latest_transport_direction_bias"):
+            lines.append(f"review_latest_transport_direction_bias={snapshot['latest_transport_direction_bias']}")
+
+    # Individual alerts
+    for entry in snapshot.get("alerts", []):
+        if entry.get("decision_summary"):
+            lines.append(f"decision_summary={entry['decision_summary']}")
+        if entry.get("alert_type"):
+            lines.append(f"alert_type={entry['alert_type']}")
+        lines.append(f"call={entry.get('call', '?')}")
+        lines.append(f"symbol={entry.get('symbol', '?')}")
+        if entry.get("why"):
+            lines.append(f"why={entry['why']}")
+        if entry.get("wait_for"):
+            lines.append(f"wait_for={entry['wait_for']}")
+        if entry.get("entry_area"):
+            lines.append(f"entry_area={entry['entry_area']}")
+        if entry.get("stop_area"):
+            lines.append(f"stop_area={entry['stop_area']}")
+        if entry.get("target_area"):
+            lines.append(f"target_area={entry['target_area']}")
+        if entry.get("current_close") is not None:
+            lines.append(f"current_close={entry['current_close']}")
+    return "\n".join(lines)
+
+
+def build_watch_alert_from_prepared_state(
+    prepared: PreparedSymbolState,
+) -> dict[str, object]:
+    """Convert a PreparedSymbolState into a watch alert dict."""
+    call = prepared.call
+    direction_bias = (
+        "buy" if call.startswith("buy")
+        else "sell" if call.startswith("sell")
+        else "none"
+    )
+    trade_status = "valid" if prepared.state in ("actionable", "confirmed") else "not_valid"
+    alert: dict[str, object] = {
+        "symbol": prepared.symbol,
+        "call": call,
+        "guardian_state": prepared.state,
+        "direction_bias": direction_bias,
+        "trade_status": trade_status,
+        "confidence": prepared.confidence,
+        "regime": prepared.regime,
+        "briefing": prepared.market_thesis,
+        "why": prepared.market_thesis,
+        "entry": prepared.entry,
+        "stop_loss": prepared.stop_loss,
+        "take_profit": prepared.take_profit,
+        "current_close": prepared.current_close,
+        "reward_risk": prepared.reward_risk,
+        "invalidates_if": prepared.invalidates_if,
+        "wait_for": prepared.next_trigger,
+        "call_age_seconds": prepared.call_age_seconds,
+        "generated_at": prepared.generated_at,
+    }
+    return alert
+
+
+def _append_journal(path: Path, record: dict[str, object]) -> None:
+    """Append a single JSON record to a JSONL journal file."""
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, default=str) + "\n")
