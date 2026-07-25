@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -18,8 +18,8 @@ class ResearchNote:
     content: str
     category: str  # feature, regime, execution, model, decision, rejected, future
     tags: List[str] = field(default_factory=list)
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
-    updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     experiment_ids: List[str] = field(default_factory=list)
     confidence: float = 0.5  # 0-1 confidence in the finding
     validated: bool = False
@@ -62,7 +62,7 @@ class DecisionRecord:
     tradeoffs: Dict[str, str] = field(default_factory=dict)  # pros/cons
     status: str = "active"  # active, superseded, reverted
     superseded_by: Optional[str] = None
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     experiment_ids: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -102,7 +102,7 @@ class ExperimentSummary:
     metrics: Dict[str, Any]
     lessons_learned: str
     follow_up: List[str] = field(default_factory=list)
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -118,7 +118,7 @@ class RejectedIdea:
     reason_rejected: str = ""  # Alias for test compatibility
     evidence: str = ""  # What data/results led to rejection
     category: str = "feature"  # feature, regime, execution, model, method
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     experiment_id: Optional[str] = None
     notes: str = ""
 
@@ -168,7 +168,7 @@ class FutureIdea:
     priority: str = "medium"  # low, medium, high, critical
     estimated_effort: str = "medium"  # low, medium, high
     dependencies: List[str] = field(default_factory=list)
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     experiment_ids: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -207,7 +207,7 @@ class LessonLearned:
     action: str  # What to do differently
     severity: str = "info"  # info, warning, critical
     category: str = "general"
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     experiment_ids: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -358,7 +358,7 @@ class KnowledgeBase:
             if note.note_id == note_id:
                 updated = note.to_dict()
                 updated.update(kwargs)
-                updated["updated_at"] = datetime.utcnow().isoformat() + "Z"
+                updated["updated_at"] = datetime.now(UTC).isoformat()
                 updated["version"] = note.version + 1
                 self._notes[i] = ResearchNote(**updated)
                 self._save(self.notes_file, self._notes)
@@ -714,7 +714,7 @@ class KnowledgeBase:
         """Export knowledge base to markdown for documentation."""
         lines = [
             "# Knowledge Base Export",
-            f"Generated: {datetime.utcnow().isoformat()}",
+            f"Generated: {datetime.now(UTC).isoformat()}",
             "",
         ]
 

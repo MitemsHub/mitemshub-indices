@@ -10,7 +10,7 @@ import warnings
 from collections import defaultdict, deque
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 
@@ -295,7 +295,7 @@ class SystemMonitor:
         }
 
         health = SystemHealth(
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(UTC).isoformat(),
             status=status,
             components=components,
             alerts=all_alerts,
@@ -390,7 +390,7 @@ class ResearchDashboard:
         """Get experiment summary."""
         records = self.experiment_runner.list_experiments()
 
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = datetime.now(UTC) - timedelta(days=days)
         recent = [
             r for r in records
             if datetime.fromisoformat(r.config.created_at.replace("Z", "+00:00")) > cutoff
@@ -459,7 +459,7 @@ class ResearchDashboard:
     def generate_dashboard_data(self) -> Dict[str, Any]:
         """Generate complete dashboard data."""
         return {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(UTC).isoformat(),
             "model_performance": self.get_model_performance_data(),
             "experiment_summary": self.get_experiment_summary(),
             "feature_importance": self.get_feature_importance_trends(),
@@ -524,7 +524,7 @@ class AlertManager:
                         "severity": rule["severity"],
                         "message": rule["message_template"].format(**metrics),
                         "metrics": metrics,
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }
                     triggered.append(alert)
                     rule["last_triggered"] = now
@@ -552,7 +552,7 @@ class AlertManager:
     def resolve_alert(self, alert: Dict[str, Any]) -> None:
         """Mark alert as resolved."""
         alert["resolved"] = True
-        alert["resolved_at"] = datetime.utcnow().isoformat() + "Z"
+        alert["resolved_at"] = datetime.now(UTC).isoformat()
 
 
 class ResearchReportGenerator:
@@ -581,7 +581,7 @@ class ResearchReportGenerator:
 
         return {
             "period": "weekly",
-            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "generated_at": datetime.now(UTC).isoformat(),
             "executive_summary": self._generate_executive_summary(),
             "model_performance": dashboard.get_model_performance_data(),
             "experiments": dashboard.get_experiment_summary(days=7),

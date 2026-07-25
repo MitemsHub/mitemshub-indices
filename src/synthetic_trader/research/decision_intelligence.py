@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -212,8 +212,8 @@ class DecisionIntelligence:
 
         # Build trace
         trace = DecisionTrace(
-            trace_id=f"trace_{datetime.utcnow().timestamp()}",
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            trace_id=f"trace_{datetime.now(UTC).timestamp()}",
+            timestamp=datetime.now(UTC).isoformat(),
             symbol=symbol,
             direction=direction_str,
             entry_price=report.signal.entry if report.signal else 0,
@@ -668,7 +668,7 @@ class DecisionTraceStore:
 
         lines = [
             "# Decision Audit Report",
-            f"Generated: {datetime.utcnow().isoformat()}",
+            f"Generated: {datetime.now(UTC).isoformat()}",
             f"Total Decisions: {len(traces)}",
             "",
         ]

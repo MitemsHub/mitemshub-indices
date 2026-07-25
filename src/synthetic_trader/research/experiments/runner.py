@@ -6,7 +6,7 @@ import json
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 from copy import deepcopy
@@ -49,7 +49,7 @@ class ExperimentConfig:
             name=name,
             description=description,
             config=deepcopy(config),
-            created_at=datetime.utcnow().isoformat() + "Z",
+            created_at=datetime.now(UTC).isoformat(),
             tags=tags or [],
             seed=seed,
         )
@@ -64,7 +64,7 @@ class ExperimentResult:
     artifacts: Dict[str, str]
     duration_seconds: float
     error: Optional[str] = None
-    completed_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    completed_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -172,10 +172,10 @@ class ExperimentRunner:
         # Set random seed
         rng = np.random.default_rng(record.config.seed)
 
-        start_time = datetime.utcnow()
+        start_time = datetime.now(UTC)
         try:
             result = runner(record.config, workspace)
-            result.duration_seconds = (datetime.utcnow() - start_time).total_seconds()
+            result.duration_seconds = (datetime.now(UTC) - start_time).total_seconds()
             result.experiment_id = experiment_id
             result.success = True
 
@@ -183,7 +183,7 @@ class ExperimentRunner:
             record.status = "completed"
 
         except Exception as e:
-            duration = (datetime.utcnow() - start_time).total_seconds()
+            duration = (datetime.now(UTC) - start_time).total_seconds()
             result = ExperimentResult(
                 experiment_id=experiment_id,
                 success=False,

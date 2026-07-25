@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
@@ -32,7 +32,7 @@ class ImprovementSignal:
     description: str
     evidence: Dict[str, Any]
     suggested_actions: List[str]
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     acknowledged: bool = False
     resolved: bool = False
 
@@ -52,7 +52,7 @@ class FeatureHealthReport:
     correlation_with_target: float
     recent_importance: List[float]
     status: str  # healthy, degrading, drifted, unused
-    last_updated: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    last_updated: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -181,7 +181,7 @@ class ContinuousImprovementMonitor:
 
         report = ModelHealthReport(
             model_id=model_id,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(UTC).isoformat(),
             overall_status=overall_status,
             metrics=metrics,
             ece=ece,
@@ -273,7 +273,7 @@ class ContinuousImprovementMonitor:
         # Performance degradation
         if metrics.expectancy_r < 0.1:
             signals.append(ImprovementSignal(
-                signal_id=f"{model_id}_perf_{datetime.utcnow().timestamp()}",
+                signal_id=f"{model_id}_perf_{datetime.now(UTC).timestamp()}",
                 signal_type="performance_degradation",
                 severity=AlertSeverity.WARNING if metrics.expectancy_r < 0 else AlertSeverity.CRITICAL,
                 title="Model Expectancy Below Threshold",
@@ -290,7 +290,7 @@ class ContinuousImprovementMonitor:
         # Calibration degradation
         if ece > 0.1:
             signals.append(ImprovementSignal(
-                signal_id=f"{model_id}_cal_{datetime.utcnow().timestamp()}",
+                signal_id=f"{model_id}_cal_{datetime.now(UTC).timestamp()}",
                 signal_type="confidence_degradation",
                 severity=AlertSeverity.WARNING,
                 title="Calibration Quality Degraded",
@@ -307,7 +307,7 @@ class ContinuousImprovementMonitor:
         # Prediction drift
         if prediction_drift > self.thresholds["prediction_drift"]:
             signals.append(ImprovementSignal(
-                signal_id=f"{model_id}_drift_{datetime.utcnow().timestamp()}",
+                signal_id=f"{model_id}_drift_{datetime.now(UTC).timestamp()}",
                 signal_type="concept_drift",
                 severity=AlertSeverity.WARNING,
                 title="Prediction Distribution Drift Detected",
@@ -326,7 +326,7 @@ class ContinuousImprovementMonitor:
                            if drift > self.thresholds["feature_drift"]]
         if drifted_features:
             signals.append(ImprovementSignal(
-                signal_id=f"{model_id}_featdrift_{datetime.utcnow().timestamp()}",
+                signal_id=f"{model_id}_featdrift_{datetime.now(UTC).timestamp()}",
                 signal_type="feature_drift",
                 severity=AlertSeverity.WARNING,
                 title=f"Feature Drift Detected: {len(drifted_features)} features",
@@ -344,7 +344,7 @@ class ContinuousImprovementMonitor:
         unhealthy_features = [f for f in feature_health if f.status in ("drifted", "degrading", "unused")]
         if unhealthy_features:
             signals.append(ImprovementSignal(
-                signal_id=f"{model_id}_feathealth_{datetime.utcnow().timestamp()}",
+                signal_id=f"{model_id}_feathealth_{datetime.now(UTC).timestamp()}",
                 signal_type="feature_degradation",
                 severity=AlertSeverity.INFO,
                 title=f"{len(unhealthy_features)} Features Need Attention",
@@ -367,7 +367,7 @@ class ContinuousImprovementMonitor:
             trend = np.polyfit(range(len(recent_expectancy)), recent_expectancy, 1)[0]
             if trend < -0.01:
                 signals.append(ImprovementSignal(
-                    signal_id=f"{model_id}_trend_{datetime.utcnow().timestamp()}",
+                    signal_id=f"{model_id}_trend_{datetime.now(UTC).timestamp()}",
                     signal_type="performance_degradation",
                     severity=AlertSeverity.WARNING,
                     title="Negative Performance Trend",
@@ -401,7 +401,7 @@ class ContinuousImprovementMonitor:
 
     def _store_report(self, report: ModelHealthReport) -> None:
         """Store health report for history."""
-        file = self.storage_path / f"health_{report.model_id}_{datetime.utcnow().strftime('%Y%m%d')}.json"
+        file = self.storage_path / f"health_{report.model_id}_{datetime.now(UTC).strftime('%Y%m%d')}.json"
         file.parent.mkdir(parents=True, exist_ok=True)
         # Append to daily file
         reports = []
@@ -439,7 +439,7 @@ class ContinuousImprovementMonitor:
 
         plan = {
             "model_id": model_id,
-            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "generated_at": datetime.now(UTC).isoformat(),
             "priority_actions": [],
             "investigations": [],
             "maintenance": [],
@@ -469,7 +469,7 @@ class ContinuousImprovementMonitor:
     def record_performance_snapshot(self, metrics: ModelMetrics) -> None:
         """Record performance for trend analysis."""
         snapshot = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(UTC).isoformat(),
             "expectancy_r": metrics.expectancy_r,
             "profit_factor": metrics.profit_factor,
             "win_rate": metrics.win_rate,

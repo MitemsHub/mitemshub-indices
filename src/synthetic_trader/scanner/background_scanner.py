@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Callable
 
 from synthetic_trader.config import TraderConfig
@@ -94,7 +94,7 @@ class BackgroundScanner:
         if not ticks:
             return ScanResult(
                 symbol=symbol,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 regime="unknown",
                 structure_bias=0.0,
                 confidence=0.0,
@@ -115,7 +115,7 @@ class BackgroundScanner:
         if len(execution_candles) < profile.min_history_candles:
             return ScanResult(
                 symbol=symbol,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 regime="unknown",
                 structure_bias=0.0,
                 confidence=0.0,
@@ -159,7 +159,7 @@ class BackgroundScanner:
             notes.append("actionable setup detected")
             state.alerts_triggered += 1
 
-        state.last_scan = datetime.utcnow()
+        state.last_scan = datetime.now(UTC)
         state.scan_count += 1
         state.last_regime = regime
         state.last_structure_bias = structure_bias
