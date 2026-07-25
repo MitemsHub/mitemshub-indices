@@ -28,7 +28,8 @@ class Phase14DerivContractTests(unittest.IsolatedAsyncioTestCase):
 
         await client.ticks_history("R_75", count=2)
 
-        self.assertEqual(client.requests[0]["ticks_history"], "R_75")
+        # _deriv_api_symbol maps R_75 -> 1HZ75V for Deriv WebSocket API
+        self.assertEqual(client.requests[0]["ticks_history"], "1HZ75V")
         self.assertEqual(client.requests[0]["count"], 2)
 
 
@@ -54,17 +55,18 @@ class Phase14DerivTransportPreparationTests(unittest.IsolatedAsyncioTestCase):
         second = await client.ticks_history("R_75", count=1)
 
         self.assertEqual(first, second)
+        # _deriv_api_symbol maps R_75 -> 1HZ75V for Deriv WebSocket API
         self.assertEqual(
             client.requests,
             [
                 {
-                    "ticks_history": "R_75",
+                    "ticks_history": "1HZ75V",
                     "count": 1,
                     "end": "latest",
                     "style": "ticks",
                 },
                 {
-                    "ticks_history": "R_75",
+                    "ticks_history": "1HZ75V",
                     "count": 1,
                     "end": "latest",
                     "style": "ticks",

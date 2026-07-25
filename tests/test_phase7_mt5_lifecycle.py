@@ -36,6 +36,12 @@ class Phase7Mt5SyncTests(unittest.TestCase):
         class FakeModule:
             POSITION_TYPE_BUY = 0
 
+            def terminal_info(self):
+                return True
+
+            def initialize(self, path=None):
+                return True
+
             def positions_get(self, symbol=None):
                 return [FakePosition()]
 
