@@ -6,6 +6,7 @@ import sys
 import time
 from collections.abc import Callable
 import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -2125,6 +2126,15 @@ def build_watch_alert_from_prepared_state(
 
 
 def _append_journal(path: Path, record: dict[str, object]) -> None:
-    """Append a single JSON record to a JSONL journal file."""
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, default=str) + "\n")
+    """Append a single JSON record to a JSONL journal file.
+
+    Logs a warning on disk-full or permission errors instead of failing silently
+    so that production issues are diagnosable from logs.
+    """
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+    except OSError as exc:
+        logging.warning(
+            "[_append_journal] failed to write to %s: %s", path, exc,
+        )
