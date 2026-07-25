@@ -1808,6 +1808,56 @@ async def _build_watch_baseline(
     return ticks, alert, state
 
 
+async def _handle_reconnect(
+    *,
+    exc: Exception,
+    symbol: str,
+    reconnects: int,
+    max_reconnects: int,
+    reconnect_backoff_sec: int,
+    journal_file: Path,
+    warmup_count: int,
+    timeframe_sec: int,
+    higher_timeframe_sec: int,
+    app_id: str | None,
+    warmup_ticks: list,
+    previous: WatchState | None,
+) -> tuple[bool, int, list, WatchState | None]:
+    """Handle a transport failure: journal, sleep, rebuild baseline.
+
+    Returns ``(should_break, reconnects, warmup_ticks, previous)``.
+    ``should_break`` is ``True`` when retries are exhausted.
+    """
+    reconnects += 1
+    transport_record = {
+        "record_type": "watch_transport",
+        "event": "reconnect_attempt" if reconnects <= max_reconnects else "reconnect_failed",
+        "symbol": symbol,
+        "error": str(exc),
+    }
+    _append_journal(journal_file, transport_record)
+    if reconnects > max_reconnects:
+        return True, reconnects, warmup_ticks, previous
+    await asyncio.sleep(reconnect_backoff_sec * reconnects)
+    # Rebuild baseline after reconnect
+    try:
+        warmup_ticks, _, previous = await _build_watch_baseline(
+            symbol=symbol,
+            warmup_count=warmup_count,
+            timeframe_sec=timeframe_sec,
+            higher_timeframe_sec=higher_timeframe_sec,
+            app_id=app_id,
+        )
+        _append_journal(journal_file, {
+            "record_type": "watch_transport",
+            "event": "reconnect_rebaseline_ok",
+            "symbol": symbol,
+        })
+    except Exception:
+        pass
+    return False, reconnects, warmup_ticks, previous
+
+
 async def run_live_watch(
     *,
     symbol: str,
@@ -1900,33 +1950,22 @@ async def run_live_watch(
             # Exhausted snapshot source — clean exit
             break
         except Exception as exc:
-            reconnects += 1
-            transport_record = {
-                "record_type": "watch_transport",
-                "event": "reconnect_attempt" if reconnects <= max_reconnects else "reconnect_failed",
-                "symbol": symbol,
-                "error": str(exc),
-            }
-            _append_journal(journal_file, transport_record)
-            if reconnects > max_reconnects:
+            should_break, reconnects, warmup_ticks, previous = await _handle_reconnect(
+                exc=exc,
+                symbol=symbol,
+                reconnects=reconnects,
+                max_reconnects=max_reconnects,
+                reconnect_backoff_sec=reconnect_backoff_sec,
+                journal_file=journal_file,
+                warmup_count=warmup_count,
+                timeframe_sec=timeframe_sec,
+                higher_timeframe_sec=higher_timeframe_sec,
+                app_id=app_id,
+                warmup_ticks=warmup_ticks,
+                previous=previous,
+            )
+            if should_break:
                 break
-            await asyncio.sleep(reconnect_backoff_sec * reconnects)
-            # Rebuild baseline after reconnect
-            try:
-                warmup_ticks, _, previous = await _build_watch_baseline(
-                    symbol=symbol,
-                    warmup_count=warmup_count,
-                    timeframe_sec=timeframe_sec,
-                    higher_timeframe_sec=higher_timeframe_sec,
-                    app_id=app_id,
-                )
-                _append_journal(journal_file, {
-                    "record_type": "watch_transport",
-                    "event": "reconnect_rebaseline_ok",
-                    "symbol": symbol,
-                })
-            except Exception:
-                pass
 
     return alert_log
 
