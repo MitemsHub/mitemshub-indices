@@ -1,0 +1,13 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Copy this file to terraform.tfvars and fill in your values.
+# ─────────────────────────────────────────────────────────────────────────────
+
+aws_region        = "us-east-1"
+project_name      = "synthetic-indices-bot"
+ec2_instance_type = "t3.large"
+key_pair_name     = ""              # Leave empty if using SSM only (no RDP)
+github_repo       = "https://github.com/YOUR_USERNAME/Synthetic-Indices-Bot.git"
+github_branch     = "feature/mt5-rollout-enablement"
+deriv_app_id      = "116450"
+allowed_cidr      = "0.0.0.0/0"     # Restrict to your IP for production (e.g., "203.0.113.5/32")
+acm_certificate_arn = ""            # Leave empty for HTTP-only; add real ACM ARN for HTTPS
