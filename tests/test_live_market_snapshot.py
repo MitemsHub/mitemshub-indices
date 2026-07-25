@@ -421,7 +421,7 @@ class LiveSnapshotStaleDataTests(unittest.TestCase):
         run_live_snapshot(skip_api=True) should return a result with a non-None
         stale_data_since value, a non-None stale_data_max_age_seconds, a "not_valid"
         trade_status, and a briefing that mentions the stale data."""
-        old_epoch = time.time() - 86400  # 24 hours ago — well beyond MAX_TICK_AGE_SECONDS (21,600s / 6h)
+        old_epoch = time.time() - 86400  # 24 hours ago — well beyond MAX_TICK_AGE_SECONDS (86,400s / 24h)
 
         with patch("synthetic_trader.live.market_snapshot._load_csv_ticks", return_value=None):
             with patch("synthetic_trader.live.market_snapshot._read_last_csv_epoch", return_value=old_epoch):
@@ -440,7 +440,7 @@ class LiveSnapshotStaleDataTests(unittest.TestCase):
         self.assertIsNotNone(snapshot.get("stale_data_since"))
         self.assertAlmostEqual(snapshot["stale_data_since"], old_epoch, places=1)
         self.assertIsNotNone(snapshot.get("stale_data_max_age_seconds"))
-        self.assertEqual(snapshot["stale_data_max_age_seconds"], 21600)  # DEFAULT_REGIME_MAX_AGE (6h)
+        self.assertEqual(snapshot["stale_data_max_age_seconds"], 43200)  # DEFAULT_REGIME_MAX_AGE (12h)
         self.assertEqual(snapshot.get("trade_status"), "not_valid")
         self.assertIn("stale", str(snapshot.get("briefing", "")).lower())
         self.assertEqual(snapshot.get("call"), "stand_aside")

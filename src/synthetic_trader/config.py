@@ -27,7 +27,7 @@ class SymbolProfile:
     higher_timeframe_sec: int = 300
     stop_atr_multiple: float = 1.25
     take_profit_rr: float = 1.8
-    min_history_candles: int = 80
+    min_history_candles: int = 30
     confidence_relaxation: float = 0.0
     bias_timeframe_sec: int = 14_400
     setup_timeframe_sec: int = 3_600

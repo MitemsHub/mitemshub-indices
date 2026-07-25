@@ -35,7 +35,7 @@ def _latest_swing(candles: list[Candle], kind: str) -> float | None:
 
 
 def _bias_direction_from_candles(candles: list[Candle]) -> str:
-    if len(candles) < 5:
+    if len(candles) < 3:
         return "neutral"
     n = min(len(candles), 30)
     closes = [c.close for c in candles]
@@ -56,7 +56,7 @@ def _bias_direction_from_candles(candles: list[Candle]) -> str:
 
 
 def _regime_from_candles(candles: list[Candle]) -> str:
-    if len(candles) < 5:
+    if len(candles) < 3:
         return "unknown"
     n = min(len(candles), 20)
     closes = [c.close for c in candles]

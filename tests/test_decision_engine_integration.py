@@ -124,7 +124,7 @@ class DecisionEngineIntegrationTests(unittest.TestCase):
 
     def test_engine_returns_none_signal_when_insufficient_history(self) -> None:
         """Engine must reject candle series shorter than min_history_candles."""
-        candles = trending_up_candles(count=30)
+        candles = trending_up_candles(count=10)
         report = self.engine.evaluate("R_100", candles)
         self.assertIsNone(report.signal)
         self.assertTrue(
@@ -351,7 +351,7 @@ class DecisionEngineIntegrationTests(unittest.TestCase):
         bias_candles = trending_up_candles(count=150, seed=10)
         setup_candles = trending_up_candles(count=100, seed=20)
         confirmation_candles = trending_up_candles(count=60, seed=30)
-        # Only 10 execution candles — below min_history_candles (60 for R_100)
+        # Only 10 execution candles — below min_history_candles (30 for R_100 default)
         execution_candles = trending_up_candles(count=10, seed=40)
 
         report = self.engine.evaluate(

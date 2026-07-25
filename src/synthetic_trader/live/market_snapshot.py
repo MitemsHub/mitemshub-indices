@@ -122,7 +122,7 @@ TRADING_MODE_PRESETS = {
         risk_max_volatility_z=3.0,
         model_decision_threshold=0.50,
         confidence_relaxation=0.10,
-        symbol_min_history_candles=60,
+        symbol_min_history_candles=30,
         symbol_min_primary_reward_risk=2.0,
         execution_mode="swing",
         swing_execution_timeframe_sec=900,
@@ -139,7 +139,7 @@ TRADING_MODE_PRESETS = {
         risk_max_volatility_z=4.5,
         model_decision_threshold=0.43,
         confidence_relaxation=0.08,
-        symbol_min_history_candles=25,
+        symbol_min_history_candles=15,
         symbol_min_primary_reward_risk=0.85,
         execution_mode="intraday",
     ),
@@ -753,7 +753,7 @@ _csv_tick_cache: dict[str, tuple[Path, float, list[Tick]]] = {}
 # Maximum age of CSV ticks considered valid for analysis.
 # Ticks older than this threshold are filtered out in _load_csv_ticks().
 # 6 hours = 21,600 seconds — more than enough for intraday analysis.
-MAX_TICK_AGE_SECONDS = 21_600
+MAX_TICK_AGE_SECONDS = 86_400  # 24 hours — gives 4H bias timeframe enough candle history
 # When the most recent tick is older than this, surface a "stale data" warning
 # in the snapshot result. 5 minutes = 300 seconds.
 STALE_TICK_WARNING_SECONDS = 300
@@ -765,15 +765,15 @@ STALE_TICK_WARNING_SECONDS = 300
 # the dynamic max_age_seconds in _load_csv_ticks() and to surface
 # a regime-aware stale-data message in the guardian reason.
 REGIME_MAX_AGE_SECONDS: dict[str, int] = {
-    "volatile": 7_200,        # 2 hours — fast-moving, old data is misleading
-    "trend_up": 21_600,       # 6 hours — trending, moderate freshness
-    "trend_down": 21_600,     # 6 hours — trending, moderate freshness
-    "range": 43_200,          # 12 hours — range-bound, older data still valid
-    "compression": 14_400,    # 4 hours — compressing, could break either way
-    "unknown": 21_600,        # 6 hours — default conservative
+    "volatile": 14_400,       # 4 hours — fast-moving, old data is misleading
+    "trend_up": 43_200,       # 12 hours — trending, moderate freshness
+    "trend_down": 43_200,     # 12 hours — trending, moderate freshness
+    "range": 86_400,          # 24 hours — range-bound, older data still valid
+    "compression": 28_800,    # 8 hours — compressing, could break either way
+    "unknown": 43_200,        # 12 hours — default conservative
 }
 
-DEFAULT_REGIME_MAX_AGE = 21_600  # 6 hours — fallback when regime is unknown/missing
+DEFAULT_REGIME_MAX_AGE = 43_200  # 12 hours — fallback when regime is unknown/missing
 
 
 def _resolve_regime_max_age(regime: str | None) -> int:
