@@ -75,12 +75,14 @@ export function TradeConfirmModal({
         aria-modal="true"
         aria-label="Confirm trade execution"
         className="fixed inset-0 z-[101] flex items-center justify-center p-4"
+        style={{ overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div
-          className="w-full max-w-md max-h-[90vh] rounded-2xl border border-[var(--line-subtle)] bg-[var(--bg-panel-strong)] shadow-[var(--shadow-elevated)] overflow-hidden flex flex-col"
+          className="w-full max-w-md rounded-2xl border border-[var(--line-subtle)] bg-[var(--bg-panel-strong)] shadow-[var(--shadow-elevated)] overflow-hidden flex flex-col my-auto"
           style={{
             animation: "modalSlideIn 300ms var(--ease-out)",
+            maxHeight: 'min(90vh, 560px)',
           }}
         >
           {/* Header */}
