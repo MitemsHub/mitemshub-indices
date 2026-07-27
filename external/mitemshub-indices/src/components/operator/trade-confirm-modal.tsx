@@ -171,7 +171,7 @@ export function TradeConfirmModal({
                     type="number"
                     step="0.01"
                     value={editEntry}
-                    min="0"
+                    min="0.01"
                     onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) { setEditEntry(v); setEntryModified(true); } }}
                     className="w-full rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel)] px-3 py-2 text-sm font-bold tabular-nums text-[var(--text-strong)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-ink)] focus:border-[var(--accent-ink)] transition-all"
                   />
@@ -191,7 +191,7 @@ export function TradeConfirmModal({
                     type="number"
                     step="0.01"
                     value={editStopLoss}
-                    min="0"
+                    min="0.01"
                     onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) { setEditStopLoss(v); setStopModified(true); } }}
                     className="w-full rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel)] px-3 py-2 text-sm font-bold tabular-nums text-[var(--accent-danger)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-danger)] focus:border-[var(--accent-danger)] transition-all"
                   />
@@ -211,7 +211,7 @@ export function TradeConfirmModal({
                     type="number"
                     step="0.01"
                     value={editTakeProfit}
-                    min="0"
+                    min="0.01"
                     onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) { setEditTakeProfit(v); setTpModified(true); } }}
                     className="w-full rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel)] px-3 py-2 text-sm font-bold tabular-nums text-[var(--accent-positive)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-positive)] focus:border-[var(--accent-positive)] transition-all"
                   />
