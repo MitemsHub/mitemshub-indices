@@ -137,6 +137,7 @@ export function useOperatorWorkspace() {
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("paper");
   const [trackedPosition, setTrackedPosition] = useState<TrackedPosition | null>(null);
   const [executing, setExecuting] = useState(false);
+  const [executionError, setExecutionError] = useState<string | null>(null);
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -477,6 +478,9 @@ export function useOperatorWorkspace() {
     if (!currentCall || currentCall.trade_status !== "valid" || !currentCall.entry) return;
     if (!currentCall.stop_loss || !currentCall.take_profit) return;
 
+    // Clear any previous execution error
+    setExecutionError(null);
+
     if (executionMode === "live_mt5") {
       // Show the professional confirmation modal for live trades
       setConfirmModalOpen(true);
@@ -492,6 +496,7 @@ export function useOperatorWorkspace() {
     if (!currentCall.stop_loss || !currentCall.take_profit) return;
 
     setExecuting(true);
+    setExecutionError(null);
     try {
       const response = await fetch("/api/execution/submit", {
         method: "POST",
@@ -526,11 +531,29 @@ export function useOperatorWorkspace() {
             execution_mode: executionMode,
             mt5_ticket: executionMode === "live_mt5" ? Number(result.position_id) : null,
           });
+          // Close modal on success (live mode only — paper skips modal)
+          if (executionMode === "live_mt5") {
+            setConfirmModalOpen(false);
+          }
+        } else {
+          // Order rejected — surface the error message from the backend
+          const errorMsg = result.message || "Order was rejected by the broker.";
+          setExecutionError(errorMsg);
+          console.error("[execution] Order rejected:", errorMsg);
         }
         return result;
+      } else {
+        // HTTP error
+        const errorBody = await response.json().catch(() => null);
+        const errorMsg = errorBody?.error || `Server error (${response.status})`;
+        setExecutionError(errorMsg);
+        console.error("[execution] HTTP error:", response.status, errorMsg);
       }
-    } catch {
-      // Keep current state on failure
+    } catch (err) {
+      // Network error or unexpected failure
+      const errorMsg = err instanceof Error ? err.message : "Network error — could not reach the server.";
+      setExecutionError(errorMsg);
+      console.error("[execution] Network error:", err);
     } finally {
       setExecuting(false);
     }
@@ -538,12 +561,12 @@ export function useOperatorWorkspace() {
   };
 
   const confirmModalConfirm = () => {
-    setConfirmModalOpen(false);
     void executeTradeOrder();
   };
 
   const confirmModalCancel = () => {
     setConfirmModalOpen(false);
+    setExecutionError(null);
   };
 
   const closeTrackedPosition = async () => {
@@ -669,6 +692,7 @@ return {
   stopRefresh,
   submitTradeOrder: requestTradeConfirm,
   executeTradeOrder,
+  executionError,
   confirmModalOpen,
   confirmModalConfirm,
   confirmModalCancel,

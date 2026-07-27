@@ -437,6 +437,7 @@ export function OperatorShell() {
           open={workspace.confirmModalOpen}
           call={workspace.currentCall}
           executionMode={workspace.executionMode}
+          executionError={workspace.executionError}
           onConfirm={workspace.confirmModalConfirm}
           onCancel={workspace.confirmModalCancel}
         />

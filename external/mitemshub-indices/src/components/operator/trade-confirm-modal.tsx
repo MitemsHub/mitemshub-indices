@@ -9,6 +9,7 @@ type TradeConfirmModalProps = {
   open: boolean;
   call: FreshCallResponse;
   executionMode: ExecutionMode;
+  executionError?: string | null;
   onConfirm: () => void;
   onCancel: () => void;
 };
@@ -17,6 +18,7 @@ export function TradeConfirmModal({
   open,
   call,
   executionMode,
+  executionError = null,
   onConfirm,
   onCancel,
 }: TradeConfirmModalProps) {
@@ -199,7 +201,7 @@ export function TradeConfirmModal({
             )}
 
             {/* Live warning */}
-            {isLive && (
+            {isLive && !executionError && (
               <div className="rounded-xl border border-[var(--accent-danger)] bg-[var(--accent-danger-soft)] px-4 py-3">
                 <p className="text-xs font-semibold text-[var(--accent-danger)]">
                   ⚠ Live MT5 Execution
@@ -207,6 +209,18 @@ export function TradeConfirmModal({
                 <p className="mt-1 text-xs leading-5 text-[var(--text-body)]">
                   This will place a real order on your Blueberry Markets MT5 account.
                   Make sure you have verified the entry, stop loss, and take profit levels.
+                </p>
+              </div>
+            )}
+
+            {/* Execution error */}
+            {executionError && (
+              <div className="rounded-xl border border-[var(--accent-danger)] bg-[var(--accent-danger-soft)] px-4 py-3">
+                <p className="text-xs font-semibold text-[var(--accent-danger)]">
+                  ✗ Order Failed
+                </p>
+                <p className="mt-1 text-xs leading-5 text-[var(--text-body)]">
+                  {executionError}
                 </p>
               </div>
             )}
