@@ -190,6 +190,7 @@ export async function GET(request: Request) {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
           "Connection": "keep-alive",
+          "X-Accel-Buffering": "no",
         },
       });
     }
@@ -237,6 +238,7 @@ export async function GET(request: Request) {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
       },
     });
   }
@@ -255,9 +257,14 @@ export async function GET(request: Request) {
       const intervals: NodeJS.Timeout[] = [];
 
       // Register abort handler FIRST to ensure cleanup even if initial await throws
+      // Decrement counter when stream ends for any reason (abort, server error, etc.)
+      const releaseConnection = () => {
+        activeSseConnections = Math.max(0, activeSseConnections - 1);
+      };
+
       request.signal.addEventListener("abort", () => {
         for (const id of intervals) clearInterval(id);
-        activeSseConnections = Math.max(0, activeSseConnections - 1);
+        releaseConnection();
         try {
           controller.close();
         } catch {
@@ -358,12 +365,12 @@ export async function GET(request: Request) {
     },
   });
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
-      "X-Accel-Buffering": "no", // Disable nginx buffering
-    },
-  });
+  const sseHeaders = {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no", // Disable nginx buffering
+  } as const;
+
+  return new Response(stream, { headers: sseHeaders });
 }

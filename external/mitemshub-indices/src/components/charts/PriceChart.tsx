@@ -110,6 +110,7 @@ function useTickStream(limit = 100) {
   const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const fallbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptRef = useRef(0);
+  const MAX_RECONNECT_ATTEMPTS = 20;
 
   // Store accumulated ticks per symbol for incremental updates
   const ticksRef = useRef<{ R_75: Tick[]; R_100: Tick[] }>({ R_75: [], R_100: [] });
@@ -137,6 +138,12 @@ function useTickStream(limit = 100) {
   // Schedule SSE reconnection with exponential backoff
   const scheduleReconnect = useCallback(() => {
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+
+    // Stop retrying after MAX_RECONNECT_ATTEMPTS — stay on polling fallback
+    if (reconnectAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      console.warn(`[SSE] Reached max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}). Staying on polling fallback.`);
+      return;
+    }
 
     // Exponential backoff: 30s → 60s → 120s → 300s (max 5 minutes)
     const delays = [30_000, 60_000, 120_000, 300_000];
