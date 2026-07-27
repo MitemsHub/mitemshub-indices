@@ -243,7 +243,7 @@ export function TradeConfirmModal({
             )}
 
             {/* Risk summary — reflects edited values */}
-            {editEntry > 0 && (
+            {editEntry > 0 && editStopLoss > 0 && editTakeProfit > 0 && editEntry !== editStopLoss && (
               <div className="flex items-center justify-between text-xs text-[var(--text-muted)] px-1">
                 <span>
                   Risk:{" "}
