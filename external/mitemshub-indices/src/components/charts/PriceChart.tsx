@@ -106,11 +106,12 @@ function useTickStream(limit = 100) {
   const [lastUpdate, setLastUpdate] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [connectionLost, setConnectionLost] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const fallbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptRef = useRef(0);
-  const MAX_RECONNECT_ATTEMPTS = 20;
+  const MAX_RECONNECT_ATTEMPTS = 10;
 
   // Store accumulated ticks per symbol for incremental updates
   const ticksRef = useRef<{ R_75: Tick[]; R_100: Tick[] }>({ R_75: [], R_100: [] });
@@ -139,9 +140,10 @@ function useTickStream(limit = 100) {
   const scheduleReconnect = useCallback(() => {
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
 
-    // Stop retrying after MAX_RECONNECT_ATTEMPTS — stay on polling fallback
+    // Stop retrying after MAX_RECONNECT_ATTEMPTS — show 'Connection Lost'
     if (reconnectAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
-      console.warn(`[SSE] Reached max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}). Staying on polling fallback.`);
+      console.warn(`[SSE] Reached max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}). Showing connection lost.`);
+      setConnectionLost(true);
       return;
     }
 
@@ -195,6 +197,7 @@ function useTickStream(limit = 100) {
 
           case "ready":
             setIsStreaming(true);
+            setConnectionLost(false);
             setError(null);
             // Reset reconnect counter on successful connection
             reconnectAttemptRef.current = 0;
@@ -235,6 +238,17 @@ function useTickStream(limit = 100) {
     };
   }, [limit, updateData, pollTicks, scheduleReconnect]);
 
+  // Manual reconnect handler — resets counter and retries immediately
+  const reconnectNow = useCallback(() => {
+    setConnectionLost(false);
+    reconnectAttemptRef.current = 0;
+    if (fallbackIntervalRef.current) {
+      clearInterval(fallbackIntervalRef.current);
+      fallbackIntervalRef.current = null;
+    }
+    startSSE();
+  }, [startSSE]);
+
   useEffect(() => {
     // Try SSE first
     startSSE();
@@ -246,11 +260,11 @@ function useTickStream(limit = 100) {
     };
   }, [startSSE]);
 
-  return { data, lastUpdate, error, isStreaming };
+  return { data, lastUpdate, error, isStreaming, connectionLost, reconnectNow };
 }
 
 export function PriceChart() {
-  const { data, lastUpdate, error, isStreaming } = useTickStream(100);
+  const { data, lastUpdate, error, isStreaming, connectionLost, reconnectNow } = useTickStream(100);
   const [collapsed, setCollapsed] = useState(false);
 
   // Compute price range for Y-axis domain (memoized to avoid re-computation on every render)
@@ -333,9 +347,13 @@ export function PriceChart() {
               {lastUpdate}
             </span>
           )}
-          <span className={`status-badge ${isStreaming ? "status-badge--confirmed" : "status-badge--warning"}`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${isStreaming ? "bg-[var(--accent-positive)]" : "bg-[var(--accent-warn)]"} animate-pulse`} />
-            {isStreaming ? "Live" : "Polling"}
+          <span className={`status-badge ${connectionLost ? "status-badge--danger" : isStreaming ? "status-badge--confirmed" : "status-badge--warning"}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${connectionLost ? "bg-[var(--accent-danger)]" : isStreaming ? "bg-[var(--accent-positive)]" : "bg-[var(--accent-warn)]"} ${!connectionLost ? "animate-pulse" : ""}`} />
+            {connectionLost ? (
+              <button type="button" onClick={reconnectNow} className="underline underline-offset-2 hover:text-[var(--accent-danger)] transition-colors">
+                Connection Lost — Tap to Retry
+              </button>
+            ) : isStreaming ? "Live" : "Polling"}
           </span>
         </div>
       </button>
