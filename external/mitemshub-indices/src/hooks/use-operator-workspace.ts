@@ -137,6 +137,7 @@ export function useOperatorWorkspace() {
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("paper");
   const [trackedPosition, setTrackedPosition] = useState<TrackedPosition | null>(null);
   const [executing, setExecuting] = useState(false);
+  const [confirmModalOpen, setConfirmModalOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -471,18 +472,24 @@ export function useOperatorWorkspace() {
     };
   }, [tradingMode, currentCall, activeSymbol]);
 
-  const submitTradeOrder = async () => {
+  /** Phase 1: open the confirmation modal (or skip for paper mode). */
+  const requestTradeConfirm = () => {
     if (!currentCall || currentCall.trade_status !== "valid" || !currentCall.entry) return;
-    if (!currentCall.stop_loss || !currentCall.take_profit) {
-      return null;
-    }
+    if (!currentCall.stop_loss || !currentCall.take_profit) return;
 
     if (executionMode === "live_mt5") {
-      const confirmed = window.confirm(
-        `LIVE MT5 EXECUTION\n\nDirection: ${currentCall.direction_bias?.toUpperCase()}\nEntry: ${currentCall.entry}\nStop: ${currentCall.stop_loss}\nTarget: ${currentCall.take_profit}\n\nThis will place a REAL trade on your MT5 account. Proceed?`
-      );
-      if (!confirmed) return null;
+      // Show the professional confirmation modal for live trades
+      setConfirmModalOpen(true);
+    } else {
+      // Paper trades execute immediately — no modal needed
+      void executeTradeOrder();
     }
+  };
+
+  /** Phase 2: called by the modal's Confirm button or directly for paper mode. */
+  const executeTradeOrder = async () => {
+    if (!currentCall || currentCall.trade_status !== "valid" || !currentCall.entry) return;
+    if (!currentCall.stop_loss || !currentCall.take_profit) return;
 
     setExecuting(true);
     try {
@@ -528,6 +535,15 @@ export function useOperatorWorkspace() {
       setExecuting(false);
     }
     return null;
+  };
+
+  const confirmModalConfirm = () => {
+    setConfirmModalOpen(false);
+    void executeTradeOrder();
+  };
+
+  const confirmModalCancel = () => {
+    setConfirmModalOpen(false);
   };
 
   const closeTrackedPosition = async () => {
@@ -651,7 +667,11 @@ return {
   setExecutionMode,
   setTradingMode,
   stopRefresh,
-  submitTradeOrder,
+  submitTradeOrder: requestTradeConfirm,
+  executeTradeOrder,
+  confirmModalOpen,
+  confirmModalConfirm,
+  confirmModalCancel,
   trackedPosition,
   tradingMode,
   runSymbol,

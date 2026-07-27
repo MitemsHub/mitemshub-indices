@@ -15,6 +15,7 @@ import { ErrorBoundary } from "./error-boundary";
 import { HamburgerNav } from "./hamburger-nav";
 import { MobileTradeSheet } from "./mobile-trade-sheet";
 import { MobileBottomNav } from "./mobile-bottom-nav";
+import { TradeConfirmModal } from "./trade-confirm-modal";
 import { usePullToRefresh } from "../../hooks/use-pull-to-refresh";
 import { PullToRefreshIndicator } from "../ui/pull-to-refresh-indicator";
 import { IntelAccordion } from "./intel-accordion";
@@ -427,6 +428,17 @@ export function OperatorShell() {
             setIntelligenceTab("history");
           }}
           onSettings={() => setMobileNavOpen(true)}
+        />
+      )}
+
+      {/* ── Trade Confirmation Modal (replaces window.confirm) ──── */}
+      {workspace.confirmModalOpen && workspace.currentCall && (
+        <TradeConfirmModal
+          open={workspace.confirmModalOpen}
+          call={workspace.currentCall}
+          executionMode={workspace.executionMode}
+          onConfirm={workspace.confirmModalConfirm}
+          onCancel={workspace.confirmModalCancel}
         />
       )}
 
