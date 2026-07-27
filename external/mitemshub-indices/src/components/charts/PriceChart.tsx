@@ -107,6 +107,7 @@ function useTickStream(limit = 100) {
   const [error, setError] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [connectionLost, setConnectionLost] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const fallbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -154,6 +155,8 @@ function useTickStream(limit = 100) {
 
     reconnectTimerRef.current = setTimeout(() => {
       reconnectAttemptRef.current += 1;
+      console.log(`[SSE] Reconnecting (attempt ${reconnectAttemptRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
+      setReconnecting(true);
       startSSE();
     }, delay);
   }, []); // scheduleReconnect references startSSE via closure
@@ -198,6 +201,7 @@ function useTickStream(limit = 100) {
           case "ready":
             setIsStreaming(true);
             setConnectionLost(false);
+            setReconnecting(false);
             setError(null);
             // Reset reconnect counter on successful connection
             reconnectAttemptRef.current = 0;
@@ -241,6 +245,7 @@ function useTickStream(limit = 100) {
   // Manual reconnect handler — resets counter and retries immediately
   const reconnectNow = useCallback(() => {
     setConnectionLost(false);
+    setReconnecting(true);
     reconnectAttemptRef.current = 0;
     if (fallbackIntervalRef.current) {
       clearInterval(fallbackIntervalRef.current);
@@ -260,11 +265,11 @@ function useTickStream(limit = 100) {
     };
   }, [startSSE]);
 
-  return { data, lastUpdate, error, isStreaming, connectionLost, reconnectNow };
+  return { data, lastUpdate, error, isStreaming, connectionLost, reconnecting, reconnectNow };
 }
 
 export function PriceChart() {
-  const { data, lastUpdate, error, isStreaming, connectionLost, reconnectNow } = useTickStream(100);
+  const { data, lastUpdate, error, isStreaming, connectionLost, reconnecting, reconnectNow } = useTickStream(100);
   const [collapsed, setCollapsed] = useState(false);
 
   // Compute price range for Y-axis domain (memoized to avoid re-computation on every render)
@@ -347,13 +352,13 @@ export function PriceChart() {
               {lastUpdate}
             </span>
           )}
-          <span className={`status-badge ${connectionLost ? "status-badge--danger" : isStreaming ? "status-badge--confirmed" : "status-badge--warning"}`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${connectionLost ? "bg-[var(--accent-danger)]" : isStreaming ? "bg-[var(--accent-positive)]" : "bg-[var(--accent-warn)]"} ${!connectionLost ? "animate-pulse" : ""}`} />
+          <span className={`status-badge ${connectionLost ? "status-badge--danger" : reconnecting ? "status-badge--warning" : isStreaming ? "status-badge--confirmed" : "status-badge--warning"}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${connectionLost ? "bg-[var(--accent-danger)]" : reconnecting ? "bg-[var(--accent-warn)]" : isStreaming ? "bg-[var(--accent-positive)]" : "bg-[var(--accent-warn)]"} ${!connectionLost ? "animate-pulse" : ""}`} />
             {connectionLost ? (
               <button type="button" onClick={reconnectNow} className="underline underline-offset-2 hover:text-[var(--accent-danger)] transition-colors">
                 Connection Lost — Tap to Retry
               </button>
-            ) : isStreaming ? "Live" : "Polling"}
+            ) : reconnecting ? "Reconnecting…" : isStreaming ? "Live" : "Polling"}
           </span>
         </div>
       </button>
