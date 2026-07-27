@@ -242,25 +242,25 @@ export function TradeConfirmModal({
               </button>
             )}
 
-            {/* Risk summary */}
-            {call.entry && call.stop_loss && call.take_profit && (
+            {/* Risk summary — reflects edited values */}
+            {editEntry > 0 && (
               <div className="flex items-center justify-between text-xs text-[var(--text-muted)] px-1">
                 <span>
                   Risk:{" "}
                   <span className="font-medium text-[var(--text-body)]">
-                    {formatPrice(Math.abs(call.entry - (call.stop_loss ?? call.entry)))}
+                    {formatPrice(Math.abs(editEntry - editStopLoss))}
                   </span>
                 </span>
                 <span>
                   Reward:{" "}
                   <span className="font-medium text-[var(--text-body)]">
-                    {formatPrice(Math.abs((call.take_profit ?? call.entry) - call.entry))}
+                    {formatPrice(Math.abs(editTakeProfit - editEntry))}
                   </span>
                 </span>
                 <span>
                   R:R{" "}
                   <span className="font-semibold text-[var(--text-strong)]">
-                    {call.reward_risk?.toFixed(1) ?? "—"}
+                    {editEntry !== editStopLoss ? Math.abs(editTakeProfit - editEntry) / Math.abs(editEntry - editStopLoss) : "—"}
                   </span>
                 </span>
               </div>
