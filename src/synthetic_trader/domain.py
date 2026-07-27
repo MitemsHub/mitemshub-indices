@@ -91,6 +91,7 @@ class TradeSignal:
     extended_target: float | None = None
     hold_horizon_minutes: int | None = None
     execution_trigger_type: str | None = None
+    signal_strength: str = "strong"  # "strong" | "weak" | "wait"
 
     @property
     def reward_risk(self) -> float:

@@ -185,14 +185,15 @@ class DecisionEngine:
             self.config.risk.min_confidence - profile.confidence_relaxation,
         )
 
-        if confidence < min_confidence:
-            return DecisionReport(
-                None,
-                (
-                    f"confidence {confidence:.3f} below threshold {min_confidence:.3f}",
-                    f"model long probability {model_long_probability:.3f}",
-                    f"calibrated probability {calibrated_prob:.3f}",
-                ),
+        # --- NEVER return None when data exists. ---
+        # The engine should always produce a signal with its actual confidence.
+        # Low confidence = WEAK signal, not NO signal.
+        is_weak = confidence < min_confidence
+        if is_weak:
+            rationale_weak = (
+                f"weak signal — confidence {confidence:.3f} below threshold {min_confidence:.3f}",
+                f"model long probability {model_long_probability:.3f}",
+                f"calibrated probability {calibrated_prob:.3f}",
             )
 
         rationale = (
@@ -251,6 +252,7 @@ class DecisionEngine:
                     extended_target=scalp_target,
                     hold_horizon_minutes=30,
                     execution_trigger_type="mean_reversion_scalp",
+                    signal_strength="weak" if is_weak else "strong",
                 )
                 return DecisionReport(signal, scalp_rationale)
 
@@ -267,13 +269,17 @@ class DecisionEngine:
             setup.state != "none"
             and confirmation.state in {"confirmed", "actionable"}
         )
-        # Lowered from 0.62 to 0.52 — with a fresh untrained model the
-        # confidence typically scores 0.48-0.55, which is enough when
-        # combined with structure/regime/momentum signals.  0.52 matches
-        # the confirmed_setup_confidence_floor for R_100.
         has_strong_confidence = confidence >= 0.52
-        if not has_formal_setup and not has_strong_confidence:
-            return DecisionReport(None, rationale)
+        if not has_formal_setup and not has_strong_confidence and not is_weak:
+            # Mark as weak instead of blocking — always produce a signal.
+            is_weak = True
+            rationale_weak = (
+                f"no formal setup and confidence {confidence:.3f} below 0.52",
+            )
+
+        # Merge weak rationale into the main rationale so the user sees why it's weak.
+        if is_weak and rationale_weak:
+            rationale = rationale_weak + rationale
 
         execution_plan = None
         if role_candles and trading_mode == "sniper":
@@ -304,6 +310,7 @@ class DecisionEngine:
                     extended_target=swing_signal.take_profit,
                     hold_horizon_minutes=swing_signal.hold_hours * 60,
                     execution_trigger_type="liquidity_sweep_reversal" if swing_signal.setup_type == "liquidity_sweep_reversal" else "structure_continuation",
+                    signal_strength="weak" if is_weak else "strong",
                 )
                 return DecisionReport(signal, rationale)
         elif role_candles:
@@ -371,6 +378,7 @@ class DecisionEngine:
                 primary_target=take_profit,
                 extended_target=take_profit,
                 hold_horizon_minutes=profile.intraday_hold_horizon_minutes,
+                signal_strength="weak" if is_weak else "strong",
             )
             return DecisionReport(signal, rationale)
 
@@ -392,6 +400,7 @@ class DecisionEngine:
             extended_target=execution_plan.extended_target,
             hold_horizon_minutes=execution_plan.hold_horizon_minutes,
             execution_trigger_type=execution_plan.trigger_type,
+            signal_strength="weak" if is_weak else "strong",
         )
         return DecisionReport(signal, rationale)
 

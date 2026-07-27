@@ -297,7 +297,7 @@ const Toast = React.memo(function Toast({ message, type, onDismiss }: { message:
 
 export function PriceChart() {
   const { data, lastUpdate, error, isStreaming, connectionLost, reconnecting, reconnectNow } = useTickStream(100);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const prevConnectionLostRef = useRef(false);
   const [toast, setToast] = useState<{ message: string; type: ToastType } | null>(null);
   const prevWasStreamingRef = useRef(false);

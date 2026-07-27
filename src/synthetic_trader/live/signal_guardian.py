@@ -213,7 +213,7 @@ def evaluate_signal_guardian(
     thresholds: GuardianThresholds,
 ) -> GuardianEvaluation:
     if snapshot.trade_status != "valid" or snapshot.direction_bias not in {"buy", "sell"}:
-        return GuardianEvaluation("forming", "Directional thesis is still forming.")
+        return GuardianEvaluation("forming", "No directional thesis — waiting for market data.")
 
     stop_distance = _stop_distance(snapshot)
     if not stop_distance or stop_distance <= 0:

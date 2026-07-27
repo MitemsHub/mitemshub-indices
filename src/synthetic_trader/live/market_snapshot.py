@@ -502,17 +502,27 @@ def build_guardian_snapshot(
 
     if trading_mode == "sniper":
         # Only claim confirmed if there's an actual signal with trade levels.
-        # Otherwise the frontend would show "Confirmed and ready" but offer
-        # no entry/stop/target to execute — misleading.
+        # When the engine has analyzed data and produced a signal (even weak),
+        # show "actionable" — never "forming". "forming" only means literally
+        # no data to analyze.
+        signal_strength = snapshot.get("signal_strength", "strong")
         if snapshot.get("entry") is not None and snapshot.get("stop_loss") is not None:
-            enriched["guardian_state"] = "confirmed"
-            enriched["guardian_reason"] = "Sniper swing thesis is active; thesis-invalidation levels guard the trade."
+            enriched["guardian_state"] = "confirmed" if signal_strength == "strong" else "actionable"
+            if signal_strength == "strong":
+                enriched["guardian_reason"] = "Sniper swing thesis is active; thesis-invalidation levels guard the trade."
+            else:
+                enriched["guardian_reason"] = "Weak signal — confidence is below threshold. Entry/levels available but execute with caution."
         elif snapshot.get("call") in ("buy_candidate", "sell_candidate"):
             enriched["guardian_state"] = "actionable"
             enriched["guardian_reason"] = "Setup identified — waiting for a cleaner entry trigger."
+        elif snapshot.get("trade_status") == "valid":
+            # Engine analyzed the data and produced a signal, but risk rejected it.
+            enriched["guardian_state"] = "actionable"
+            enriched["guardian_reason"] = "Signal generated but blocked by risk controls. Review risk state."
         else:
+            # Only show "forming" when there's truly no data to analyze.
             enriched["guardian_state"] = "forming"
-            enriched["guardian_reason"] = "Market structure is still forming — no trade plan yet."
+            enriched["guardian_reason"] = "Waiting for market data — no candle history available for analysis."
         return enriched
 
     thresholds = guardian_thresholds or DEFAULT_GUARDIAN_THRESHOLDS
@@ -1264,6 +1274,7 @@ def analyze_live_snapshot(
             "call": "stand_aside",
             "trade_status": "not_valid",
             "direction_bias": direction_bias,
+            "signal_strength": "wait",
             "briefing": "current movement is active but not a clean setup yet",
             "symbol": symbol,
             "trading_mode": mode,
@@ -1315,6 +1326,7 @@ def analyze_live_snapshot(
         "call": call,
         "trade_status": "valid" if risk_decision.approved else "not_valid",
         "direction_bias": direction_bias,
+        "signal_strength": getattr(report.signal, "signal_strength", "strong"),
         "briefing": "; ".join(report.signal.rationale[:2]),
         "decision_summary": "; ".join(report.signal.rationale),
         "symbol": symbol,
