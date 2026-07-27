@@ -1669,6 +1669,11 @@ button:focus:not(:focus-visible) {
   to { transform: rotate(360deg); }
 }
 
+@keyframes slideUp {
+  from { opacity: 0; transform: translate(-50%, 16px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
 /* Bottom-sheet open button on mobile */
 .show-trade-sheet-btn {
   display: flex;

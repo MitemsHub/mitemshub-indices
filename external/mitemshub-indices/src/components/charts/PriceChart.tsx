@@ -268,19 +268,70 @@ function useTickStream(limit = 100) {
   return { data, lastUpdate, error, isStreaming, connectionLost, reconnecting, reconnectNow };
 }
 
+type ToastType = "success" | "error" | "info";
+
+const Toast = React.memo(function Toast({ message, type, onDismiss }: { message: string; type: ToastType; onDismiss: () => void }) {
+  const bgMap: Record<ToastType, string> = {
+    success: "bg-[var(--accent-positive)]",
+    error: "bg-[var(--accent-danger)]",
+    info: "bg-[var(--accent-ink)]",
+  };
+  const onDismissRef = useRef(onDismiss);
+  onDismissRef.current = onDismiss;
+  useEffect(() => {
+    const timer = setTimeout(() => onDismissRef.current(), 5000);
+    return () => clearTimeout(timer);
+  }, []);
+  return (
+    <div
+      className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2.5 px-4 py-2.5 rounded-xl text-sm font-medium text-white shadow-lg transition-all duration-300 animate-[slideUp_0.3s_ease-out] ${bgMap[type]}`}
+      style={{ maxWidth: '90vw' }}
+    >
+      <span>{message}</span>
+      <button type="button" onClick={onDismiss} className="ml-1 opacity-70 hover:opacity-100 transition-opacity">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+      </button>
+    </div>
+  );
+});
+
 export function PriceChart() {
   const { data, lastUpdate, error, isStreaming, connectionLost, reconnecting, reconnectNow } = useTickStream(100);
   const [collapsed, setCollapsed] = useState(false);
   const prevConnectionLostRef = useRef(false);
+  const [toast, setToast] = useState<{ message: string; type: ToastType } | null>(null);
+  const prevWasStreamingRef = useRef(false);
+
+  // Track connectionLost transitions (single effect to avoid ref race condition)
+  const prevConnectionLost = prevConnectionLostRef.current;
 
   // Auto-expand chart when SSE reconnects after being in Connection Lost state
   useEffect(() => {
-    if (prevConnectionLostRef.current && !connectionLost && collapsed) {
+    if (prevConnectionLost && !connectionLost && collapsed) {
       console.log("[PriceChart] SSE reconnected after Connection Lost — auto-expanding chart");
       setCollapsed(false);
     }
+  }, [connectionLost, prevConnectionLost, collapsed]);
+
+  // Toast notifications for SSE reconnection events
+  useEffect(() => {
+    if (connectionLost && !prevConnectionLost) {
+      setToast({ message: "Connection lost — streaming unavailable. Tap badge to retry.", type: "error" });
+    } else if (!connectionLost && prevConnectionLost) {
+      setToast({ message: "Stream restored — live data flowing again.", type: "success" });
+    }
     prevConnectionLostRef.current = connectionLost;
-  }, [connectionLost, collapsed]);
+  }, [connectionLost, prevConnectionLost]);
+
+  // Track streaming recovery for non-Connection-Lost reconnections
+  useEffect(() => {
+    if (isStreaming && !prevWasStreamingRef.current && !prevConnectionLost) {
+      if (reconnecting) {
+        setToast({ message: "Stream restored — live data flowing again.", type: "success" });
+      }
+    }
+    prevWasStreamingRef.current = isStreaming;
+  }, [isStreaming, reconnecting, prevConnectionLost]);
 
   // Compute price range for Y-axis domain (memoized to avoid re-computation on every render)
   const [yMin, yMax] = useMemo(() => {
@@ -466,6 +517,15 @@ export function PriceChart() {
       )}
         </div>
       </div>
+
+      {/* Toast notifications — rendered outside .surface for fixed positioning */}
+      {toast && (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onDismiss={() => setToast(null)}
+        />
+      )}
     </div>
   );
 }
