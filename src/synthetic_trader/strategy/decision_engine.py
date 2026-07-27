@@ -187,11 +187,26 @@ class DecisionEngine:
 
         # --- NEVER return None when data exists. ---
         # The engine should always produce a signal with its actual confidence.
-        # Low confidence = WEAK signal, not NO signal.
-        is_weak = confidence < min_confidence
-        if is_weak:
+        # Four signal states: strong_buy, weak_buy, wait, strong_sell, weak_sell
+        signal_strength = self._classify_signal_strength(
+            confidence=confidence,
+            min_confidence=min_confidence,
+            has_formal_setup=(
+                setup.state != "none"
+                and confirmation.state in {"confirmed", "actionable"}
+            ),
+            direction=direction,
+        )
+        is_weak = signal_strength in ("weak_buy", "weak_sell", "wait")
+        if is_weak and signal_strength != "wait":
             rationale_weak = (
-                f"weak signal — confidence {confidence:.3f} below threshold {min_confidence:.3f}",
+                f"weak signal ({signal_strength}) — confidence {confidence:.3f}",
+                f"model long probability {model_long_probability:.3f}",
+                f"calibrated probability {calibrated_prob:.3f}",
+            )
+        elif signal_strength == "wait":
+            rationale_weak = (
+                f"wait — confidence {confidence:.3f} below minimum {min_confidence:.3f}",
                 f"model long probability {model_long_probability:.3f}",
                 f"calibrated probability {calibrated_prob:.3f}",
             )
@@ -252,7 +267,7 @@ class DecisionEngine:
                     extended_target=scalp_target,
                     hold_horizon_minutes=30,
                     execution_trigger_type="mean_reversion_scalp",
-                    signal_strength="weak" if is_weak else "strong",
+                    signal_strength=signal_strength,
                 )
                 return DecisionReport(signal, scalp_rationale)
 
@@ -272,7 +287,14 @@ class DecisionEngine:
         has_strong_confidence = confidence >= 0.52
         if not has_formal_setup and not has_strong_confidence and not is_weak:
             # Mark as weak instead of blocking — always produce a signal.
+            # Recompute signal_strength with has_formal_setup=False so it matches.
             is_weak = True
+            signal_strength = self._classify_signal_strength(
+                confidence=confidence,
+                min_confidence=min_confidence,
+                has_formal_setup=False,
+                direction=direction,
+            )
             rationale_weak = (
                 f"no formal setup and confidence {confidence:.3f} below 0.52",
             )
@@ -310,7 +332,7 @@ class DecisionEngine:
                     extended_target=swing_signal.take_profit,
                     hold_horizon_minutes=swing_signal.hold_hours * 60,
                     execution_trigger_type="liquidity_sweep_reversal" if swing_signal.setup_type == "liquidity_sweep_reversal" else "structure_continuation",
-                    signal_strength="weak" if is_weak else "strong",
+                    signal_strength=signal_strength,
                 )
                 return DecisionReport(signal, rationale)
         elif role_candles:
@@ -378,7 +400,7 @@ class DecisionEngine:
                 primary_target=take_profit,
                 extended_target=take_profit,
                 hold_horizon_minutes=profile.intraday_hold_horizon_minutes,
-                signal_strength="weak" if is_weak else "strong",
+                signal_strength=signal_strength,
             )
             return DecisionReport(signal, rationale)
 
@@ -400,9 +422,36 @@ class DecisionEngine:
             extended_target=execution_plan.extended_target,
             hold_horizon_minutes=execution_plan.hold_horizon_minutes,
             execution_trigger_type=execution_plan.trigger_type,
-            signal_strength="weak" if is_weak else "strong",
+            signal_strength=signal_strength,
         )
         return DecisionReport(signal, rationale)
+
+    def _classify_signal_strength(
+        self,
+        *,
+        confidence: float,
+        min_confidence: float,
+        has_formal_setup: bool,
+        direction: Direction,
+    ) -> str:
+        """Classify the signal into one of four states based on confidence.
+
+        Thresholds:
+        - STRONG: confidence >= 0.65 AND formal setup confirmed
+        - WEAK: confidence >= min_confidence (but below strong)
+        - WAIT: confidence < min_confidence
+
+        Returns one of: "strong_buy", "weak_buy", "wait", "weak_sell", "strong_sell"
+        """
+        STRONG_THRESHOLD = 0.65
+        dir_suffix = "buy" if direction is Direction.LONG else "sell"
+
+        if confidence >= STRONG_THRESHOLD and has_formal_setup:
+            return f"strong_{dir_suffix}"
+        elif confidence >= min_confidence:
+            return f"weak_{dir_suffix}"
+        else:
+            return "wait"
 
     def _profile(self, symbol: str) -> SymbolProfile:
         try:
