@@ -443,6 +443,20 @@ export function OperatorShell() {
         />
       )}
 
+      {/* ── Execution Success Toast ──────────────────────────── */}
+      {workspace.executionSuccess && (
+        <div
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[200] flex items-center gap-2.5 px-4 py-3 rounded-xl border border-[rgba(15,107,87,0.25)] bg-[rgba(15,107,87,0.12)] shadow-[0_8px_32px_rgba(0,0,0,0.12)] backdrop-blur-sm"
+          style={{ animation: "toastSlideUp 300ms var(--ease-out)" }}
+          role="alert"
+        >
+          <span className="text-[var(--accent-positive)] text-sm">✓</span>
+          <span className="text-sm font-medium text-[var(--text-strong)]">
+            {workspace.executionSuccess}
+          </span>
+        </div>
+      )}
+
       {/* ── Mobile Trade Sheet (bottom sheet) ────────────────────── */}
       <MobileTradeSheet
         open={bottomSheetOpen}
@@ -456,6 +470,19 @@ export function OperatorShell() {
         onSetExecutionMode={workspace.setExecutionMode}
         onClose={() => setBottomSheetOpen(false)}
       />
+
+      <style jsx global>{`
+        @keyframes toastSlideUp {
+          from {
+            opacity: 0;
+            transform: translateX(-50%) translateY(16px);
+          }
+          to {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+          }
+        }
+      `}</style>
     </main>
   );
 }

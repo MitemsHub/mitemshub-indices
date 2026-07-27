@@ -10,7 +10,7 @@ type TradeConfirmModalProps = {
   call: FreshCallResponse;
   executionMode: ExecutionMode;
   executionError?: string | null;
-  onConfirm: () => void;
+  onConfirm: (params: { entry: number; stopLoss: number; takeProfit: number }) => void;
   onCancel: () => void;
 };
 
@@ -24,6 +24,12 @@ export function TradeConfirmModal({
 }: TradeConfirmModalProps) {
   const [acknowledged, setAcknowledged] = useState(false);
   const [countdown, setCountdown] = useState(3);
+  const [editEntry, setEditEntry] = useState(0);
+  const [editStopLoss, setEditStopLoss] = useState(0);
+  const [editTakeProfit, setEditTakeProfit] = useState(0);
+  const [entryModified, setEntryModified] = useState(false);
+  const [stopModified, setStopModified] = useState(false);
+  const [tpModified, setTpModified] = useState(false);
   const confirmBtnRef = useRef<HTMLButtonElement>(null);
 
   // Reset state when modal opens
@@ -31,8 +37,14 @@ export function TradeConfirmModal({
     if (open) {
       setAcknowledged(false);
       setCountdown(3);
+      setEditEntry(call.entry ?? 0);
+      setEditStopLoss(call.stop_loss ?? call.entry ?? 0);
+      setEditTakeProfit(call.take_profit ?? call.entry ?? 0);
+      setEntryModified(false);
+      setStopModified(false);
+      setTpModified(false);
     }
-  }, [open]);
+  }, [open, call]);
 
   // Countdown timer before confirm button is enabled
   useEffect(() => {
@@ -148,33 +160,87 @@ export function TradeConfirmModal({
               </div>
             </div>
 
-            {/* Price levels */}
-            <div className="grid grid-cols-3 gap-3">
-              <div className="rounded-xl bg-[var(--bg-panel-muted)] px-3 py-2.5 text-center">
-                <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)]">
+            {/* Editable Price levels */}
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <label className="w-20 text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)] shrink-0">
                   Entry
-                </p>
-                <p className="mt-0.5 text-sm font-bold tabular-nums text-[var(--text-strong)]">
-                  {formatPrice(call.entry)}
-                </p>
+                </label>
+                <div className="flex-1 relative">
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={editEntry}
+                    min="0"
+                    onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) { setEditEntry(v); setEntryModified(true); } }}
+                    className="w-full rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel)] px-3 py-2 text-sm font-bold tabular-nums text-[var(--text-strong)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-ink)] focus:border-[var(--accent-ink)] transition-all"
+                  />
+                  {entryModified && (
+                    <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-medium text-[var(--accent-warn)] bg-[var(--accent-warn-soft)] px-1.5 py-0.5 rounded">
+                      Modified
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="rounded-xl bg-[var(--bg-panel-muted)] px-3 py-2.5 text-center">
-                <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)]">
+              <div className="flex items-center gap-3">
+                <label className="w-20 text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)] shrink-0">
                   Stop Loss
-                </p>
-                <p className="mt-0.5 text-sm font-bold tabular-nums text-[var(--accent-danger)]">
-                  {formatPrice(call.stop_loss)}
-                </p>
+                </label>
+                <div className="flex-1 relative">
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={editStopLoss}
+                    min="0"
+                    onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) { setEditStopLoss(v); setStopModified(true); } }}
+                    className="w-full rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel)] px-3 py-2 text-sm font-bold tabular-nums text-[var(--accent-danger)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-danger)] focus:border-[var(--accent-danger)] transition-all"
+                  />
+                  {stopModified && (
+                    <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-medium text-[var(--accent-warn)] bg-[var(--accent-warn-soft)] px-1.5 py-0.5 rounded">
+                      Modified
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="rounded-xl bg-[var(--bg-panel-muted)] px-3 py-2.5 text-center">
-                <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)]">
+              <div className="flex items-center gap-3">
+                <label className="w-20 text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)] shrink-0">
                   Take Profit
-                </p>
-                <p className="mt-0.5 text-sm font-bold tabular-nums text-[var(--accent-positive)]">
-                  {formatPrice(call.take_profit)}
-                </p>
+                </label>
+                <div className="flex-1 relative">
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={editTakeProfit}
+                    min="0"
+                    onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) { setEditTakeProfit(v); setTpModified(true); } }}
+                    className="w-full rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel)] px-3 py-2 text-sm font-bold tabular-nums text-[var(--accent-positive)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-positive)] focus:border-[var(--accent-positive)] transition-all"
+                  />
+                  {tpModified && (
+                    <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-medium text-[var(--accent-warn)] bg-[var(--accent-warn-soft)] px-1.5 py-0.5 rounded">
+                      Modified
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
+
+            {/* Reset button if any field was modified */}
+            {(entryModified || stopModified || tpModified) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditEntry(call.entry ?? 0);
+                  setEditStopLoss(call.stop_loss ?? call.entry ?? 0);
+                  setEditTakeProfit(call.take_profit ?? call.entry ?? 0);
+                  setEntryModified(false);
+                  setStopModified(false);
+                  setTpModified(false);
+                }}
+                className="text-xs text-[var(--accent-ink)] hover:underline"
+              >
+                Reset to suggested levels
+              </button>
+            )}
 
             {/* Risk summary */}
             {call.entry && call.stop_loss && call.take_profit && (
@@ -266,7 +332,7 @@ export function TradeConfirmModal({
               ref={confirmBtnRef}
               type="button"
               disabled={!acknowledged || countdown > 0}
-              onClick={onConfirm}
+              onClick={() => onConfirm({ entry: editEntry, stopLoss: editStopLoss, takeProfit: editTakeProfit })}
               className={`flex-1 rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition-all ${
                 isLive
                   ? "bg-[var(--accent-danger)] hover:brightness-90"

@@ -138,8 +138,10 @@ export function useOperatorWorkspace() {
   const [trackedPosition, setTrackedPosition] = useState<TrackedPosition | null>(null);
   const [executing, setExecuting] = useState(false);
   const [executionError, setExecutionError] = useState<string | null>(null);
+  const [executionSuccess, setExecutionSuccess] = useState<string | null>(null);
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const successToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -491,9 +493,13 @@ export function useOperatorWorkspace() {
   };
 
   /** Phase 2: called by the modal's Confirm button or directly for paper mode. */
-  const executeTradeOrder = async () => {
+  const executeTradeOrder = async (overrides?: { entry?: number; stopLoss?: number; takeProfit?: number }) => {
     if (!currentCall || currentCall.trade_status !== "valid" || !currentCall.entry) return;
     if (!currentCall.stop_loss || !currentCall.take_profit) return;
+
+    const entry = overrides?.entry ?? currentCall.entry;
+    const stopLoss = overrides?.stopLoss ?? currentCall.stop_loss ?? currentCall.entry;
+    const takeProfit = overrides?.takeProfit ?? currentCall.take_profit ?? currentCall.entry;
 
     setExecuting(true);
     setExecutionError(null);
@@ -504,9 +510,9 @@ export function useOperatorWorkspace() {
         body: JSON.stringify({
           symbol: currentCall.symbol,
           direction_bias: currentCall.direction_bias,
-          entry: currentCall.entry,
-          stop_loss: currentCall.stop_loss ?? currentCall.entry,
-          take_profit: currentCall.take_profit ?? currentCall.entry,
+          entry,
+          stop_loss: stopLoss,
+          take_profit: takeProfit,
           execution_stop: currentCall.execution_stop,
           thesis_invalidation: currentCall.thesis_invalidation,
           primary_target: currentCall.primary_target,
@@ -523,14 +529,22 @@ export function useOperatorWorkspace() {
             position_id: result.position_id,
             symbol: currentCall.symbol,
             direction: currentCall.direction_bias === "sell" ? "sell" : "buy",
-            entry_price: result.entry_price ?? currentCall.entry,
-            stop_loss: result.stop_loss ?? (currentCall.stop_loss ?? currentCall.entry),
-            take_profit: result.take_profit ?? (currentCall.take_profit ?? currentCall.entry),
+            entry_price: result.entry_price ?? entry,
+            stop_loss: result.stop_loss ?? stopLoss,
+            take_profit: result.take_profit ?? takeProfit,
             current_price: currentCall.current_close,
             opened_at: new Date().toISOString(),
             execution_mode: executionMode,
             mt5_ticket: executionMode === "live_mt5" ? Number(result.position_id) : null,
           });
+          // Show success toast
+          const successMsg = executionMode === "live_mt5"
+            ? `Trade executed on MT5 — Position #${result.position_id}`
+            : `Paper trade recorded — Position #${result.position_id}`;
+          setExecutionError(null);
+          setExecutionSuccess(successMsg);
+          // Auto-dismiss success toast after 5 seconds (stored ref for cleanup)
+          successToastTimerRef.current = setTimeout(() => setExecutionSuccess(null), 5000);
           // Close modal on success (live mode only — paper skips modal)
           if (executionMode === "live_mt5") {
             setConfirmModalOpen(false);
@@ -560,13 +574,18 @@ export function useOperatorWorkspace() {
     return null;
   };
 
-  const confirmModalConfirm = () => {
-    void executeTradeOrder();
+  const confirmModalConfirm = (params?: { entry: number; stopLoss: number; takeProfit: number }) => {
+    void executeTradeOrder(params);
   };
 
   const confirmModalCancel = () => {
     setConfirmModalOpen(false);
     setExecutionError(null);
+    setExecutionSuccess(null);
+    if (successToastTimerRef.current) {
+      clearTimeout(successToastTimerRef.current);
+      successToastTimerRef.current = null;
+    }
   };
 
   const closeTrackedPosition = async () => {
@@ -693,6 +712,7 @@ return {
   submitTradeOrder: requestTradeConfirm,
   executeTradeOrder,
   executionError,
+  executionSuccess,
   confirmModalOpen,
   confirmModalConfirm,
   confirmModalCancel,
