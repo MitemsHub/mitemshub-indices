@@ -324,14 +324,6 @@ export function PriceChart() {
   // Track connectionLost transitions (single effect to avoid ref race condition)
   const prevConnectionLost = prevConnectionLostRef.current;
 
-  // Auto-expand chart when SSE reconnects after being in Connection Lost state
-  useEffect(() => {
-    if (prevConnectionLost && !connectionLost && collapsed) {
-      console.log("[PriceChart] SSE reconnected after Connection Lost — auto-expanding chart");
-      setCollapsed(false);
-    }
-  }, [connectionLost, prevConnectionLost, collapsed]);
-
   // Toast notifications for SSE reconnection events
   useEffect(() => {
     if (connectionLost && !prevConnectionLost) {
