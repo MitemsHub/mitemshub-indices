@@ -59,7 +59,7 @@ export function NotificationBell({
       : "var(--text-muted)";
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative" ref={ref} suppressHydrationWarning>
       {/* Bell button */}
       <button
         type="button"
