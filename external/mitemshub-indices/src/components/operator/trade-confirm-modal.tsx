@@ -78,7 +78,7 @@ export function TradeConfirmModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div
-          className="w-full max-w-md rounded-2xl border border-[var(--line-subtle)] bg-[var(--bg-panel-strong)] shadow-[var(--shadow-elevated)] overflow-hidden"
+          className="w-full max-w-md max-h-[90vh] rounded-2xl border border-[var(--line-subtle)] bg-[var(--bg-panel-strong)] shadow-[var(--shadow-elevated)] overflow-hidden flex flex-col"
           style={{
             animation: "modalSlideIn 300ms var(--ease-out)",
           }}
@@ -107,7 +107,7 @@ export function TradeConfirmModal({
           </div>
 
           {/* Body */}
-          <div className="px-5 py-4 space-y-4">
+          <div className="px-5 py-4 space-y-4 overflow-y-auto flex-1 min-h-0">
             {/* Direction banner */}
             <div
               className="flex items-center justify-between rounded-xl px-4 py-3"
@@ -237,8 +237,8 @@ export function TradeConfirmModal({
             </label>
           </div>
 
-          {/* Footer */}
-          <div className="flex items-center gap-3 px-5 py-4 border-t border-[var(--line-subtle)] bg-[var(--bg-panel-muted)]">
+          {/* Footer — fixed at bottom, never scrolls */}
+          <div className="flex items-center gap-3 px-5 py-4 border-t border-[var(--line-subtle)] bg-[var(--bg-panel-muted)] shrink-0">
             <button
               type="button"
               onClick={onCancel}
