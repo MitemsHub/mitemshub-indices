@@ -271,6 +271,16 @@ function useTickStream(limit = 100) {
 export function PriceChart() {
   const { data, lastUpdate, error, isStreaming, connectionLost, reconnecting, reconnectNow } = useTickStream(100);
   const [collapsed, setCollapsed] = useState(false);
+  const prevConnectionLostRef = useRef(false);
+
+  // Auto-expand chart when SSE reconnects after being in Connection Lost state
+  useEffect(() => {
+    if (prevConnectionLostRef.current && !connectionLost && collapsed) {
+      console.log("[PriceChart] SSE reconnected after Connection Lost — auto-expanding chart");
+      setCollapsed(false);
+    }
+    prevConnectionLostRef.current = connectionLost;
+  }, [connectionLost, collapsed]);
 
   // Compute price range for Y-axis domain (memoized to avoid re-computation on every render)
   const [yMin, yMax] = useMemo(() => {
