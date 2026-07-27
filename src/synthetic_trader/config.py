@@ -44,6 +44,7 @@ class SymbolProfile:
     min_close_location_strength: float = 0.70
     min_reclaim_quality_score: float = 0.65
     late_extension_rejection_ratio: float = 0.70
+    max_stop_distance_pct: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,7 @@ class TraderConfig:
                     min_close_location_strength=0.72,
                     min_reclaim_quality_score=0.66,
                     late_extension_rejection_ratio=0.74,
+                    max_stop_distance_pct=0.04,
                 ),
                 "R_100": SymbolProfile(
                     symbol="R_100",
@@ -141,6 +143,7 @@ class TraderConfig:
                     min_close_location_strength=0.70,
                     min_reclaim_quality_score=0.65,
                     late_extension_rejection_ratio=0.70,
+                    max_stop_distance_pct=0.05,
                 ),
             }
         )

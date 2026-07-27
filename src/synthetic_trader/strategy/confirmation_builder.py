@@ -146,11 +146,15 @@ def _evaluate_call_lifecycle(
         return CallState.ACTIONABLE
 
     if immediate_alignment or relaxed_r100_alignment:
-        if quality >= 0.45 or relaxed_r100_alignment:
+        if quality >= 0.40 or relaxed_r100_alignment:
             return CallState.CONFIRMED
         return CallState.ACTIONABLE
 
-    if quality >= 0.3:
+    # Lowered from 0.3 to 0.2 — with volatile synthetic indices the
+    # quality score often lands at 0.15-0.25, which is still meaningful.
+    # Allowing ACTIONABLE at 0.2 lets the trade plan surface faster
+    # while still filtering out noise (quality < 0.15).
+    if quality >= 0.2:
         return CallState.ACTIONABLE
 
     return CallState.FORMING

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from statistics import mean
 
@@ -14,6 +15,7 @@ from synthetic_trader.strategy.intraday_execution_builder import build_intraday_
 from synthetic_trader.strategy.swing_execution_builder import build_swing_execution
 from synthetic_trader.strategy.setup_builder import classify_setup
 from synthetic_trader.strategy.top_down_bias import infer_top_down_bias
+from synthetic_trader.strategy.regime_models import regime_model
 
 
 @dataclass(frozen=True)
@@ -152,6 +154,11 @@ class DecisionEngine:
         features = dict(snapshot.features)
         model_long_probability = self.model.predict_proba(features)
         calibrated_prob = self.calibration.calibrate(model_long_probability)
+
+        # ── Regime-specific probabilistic model (direction-agnostic) ──
+        regime_out = regime_model(features, snapshot.regime, Direction.FLAT)
+        features.update(regime_out.to_features())
+
         long_score = self._score_direction(Direction.LONG, snapshot.regime, features, calibrated_prob)
         short_score = self._score_direction(Direction.SHORT, snapshot.regime, features, calibrated_prob)
         bias = infer_top_down_bias(
@@ -193,6 +200,60 @@ class DecisionEngine:
             setup.reason,
             confirmation.reason,
         )
+
+        # ── Mean-reversion scalp path for range regimes ──────────────
+        # When the market is range-bound (Hurst < 0.4) and the regime model
+        # produces a directional probability above threshold, generate a
+        # scalp trade with tighter stops/targets instead of refusing.
+        hurst = features.get("hurst_exponent", 0.5)
+        current_regime = snapshot.regime
+        is_range_scalp = (
+            current_regime in (Regime.RANGE, Regime.COMPRESSION)
+            and hurst < 0.4
+            and features.get("regime_confidence", 0.0) > 0.15
+        )
+        if is_range_scalp and confidence >= min_confidence:
+            regime_bull = features.get("regime_bull_prob", 0.5)
+            regime_bear = features.get("regime_bear_prob", 0.5)
+            scalp_direction_prob = max(regime_bull, regime_bear)
+            scalp_direction = Direction.LONG if regime_bull > regime_bear else Direction.SHORT
+            # Require at least 60% directional probability for scalp
+            if scalp_direction_prob >= 0.60:
+                atr_14 = features.get("atr_14", 1.0)
+                entry = features.get("close", execution_candles[-1].close)
+                # Tight scalp: stop = 1x ATR, target = 1.5x ATR (1.5R)
+                scalp_stop_distance = min(atr_14, entry * profile.max_stop_distance_pct)
+                if scalp_direction is Direction.LONG:
+                    scalp_stop = entry - scalp_stop_distance
+                    scalp_target = entry + scalp_stop_distance * 1.5
+                else:
+                    scalp_stop = entry + scalp_stop_distance
+                    scalp_target = entry - scalp_stop_distance * 1.5
+                scalp_rationale = (
+                    f"range scalp: Hurst={hurst:.2f} regime_bull={regime_bull:.2f} regime_bear={regime_bear:.2f}",
+                    f"mean-reversion scalp in {current_regime.value} regime",
+                ) + tuple(regime_out.reasoning[:3])
+                signal = TradeSignal(
+                    symbol=symbol,
+                    direction=scalp_direction,
+                    confidence=confidence,
+                    min_confidence=min_confidence,
+                    entry=entry,
+                    stop_loss=scalp_stop,
+                    take_profit=scalp_target,
+                    horizon_sec=profile.execution_timeframe_sec * 2,
+                    snapshot=snapshot,
+                    rationale=scalp_rationale,
+                    model_version=self.model.version,
+                    execution_stop=scalp_stop,
+                    thesis_invalidation=None,
+                    primary_target=scalp_target,
+                    extended_target=scalp_target,
+                    hold_horizon_minutes=30,
+                    execution_trigger_type="mean_reversion_scalp",
+                )
+                return DecisionReport(signal, scalp_rationale)
+
         # Allow signals when confidence is sufficiently high even if the formal
         # setup/confirmation gates are not fully met.  The confidence score
         # already incorporates model probability, structure, regime, momentum,
@@ -206,7 +267,11 @@ class DecisionEngine:
             setup.state != "none"
             and confirmation.state in {"confirmed", "actionable"}
         )
-        has_strong_confidence = confidence >= 0.62
+        # Lowered from 0.62 to 0.52 — with a fresh untrained model the
+        # confidence typically scores 0.48-0.55, which is enough when
+        # combined with structure/regime/momentum signals.  0.52 matches
+        # the confirmed_setup_confidence_floor for R_100.
+        has_strong_confidence = confidence >= 0.52
         if not has_formal_setup and not has_strong_confidence:
             return DecisionReport(None, rationale)
 
@@ -218,6 +283,7 @@ class DecisionEngine:
                 setup_candles=setup_candles,
                 confirmation_candles=confirmation_candles,
                 bias_candles=bias_candles,
+                max_stop_distance_pct=profile.max_stop_distance_pct,
             )
             if swing_signal is not None:
                 signal = TradeSignal(
@@ -263,18 +329,30 @@ class DecisionEngine:
             # Sanity cap: stop distance can never exceed 5% of entry price.
             # This prevents insane ATR values (e.g. 360 on a 258-priced instrument)
             # from producing impossible TP levels like 1,336.
-            max_stop = entry * 0.05
+            max_stop = entry * profile.max_stop_distance_pct
 
             if direction is Direction.LONG:
                 stop_distance = max(atr_14 * 1.5, entry * 0.002) if atr_14 > 0 else max(entry - execution_candles[-1].low, profile.pip_size * 2)
+                raw_stop_distance = stop_distance
                 stop_distance = min(stop_distance, max_stop)
                 stop_loss = entry - stop_distance
                 take_profit = entry + stop_distance * profile.take_profit_rr
             else:
                 stop_distance = max(atr_14 * 1.5, entry * 0.002) if atr_14 > 0 else max(execution_candles[-1].high - entry, profile.pip_size * 2)
+                raw_stop_distance = stop_distance
                 stop_distance = min(stop_distance, max_stop)
                 stop_loss = entry + stop_distance
                 take_profit = entry - stop_distance * profile.take_profit_rr
+
+            # Diagnostic: log stop distance cap status for live tuning.
+            cap_triggered = raw_stop_distance > max_stop
+            stop_pct = (abs(entry - stop_loss) / entry * 100) if entry else 0
+            logging.info(
+                "[%s] fallback stop_cap=%s raw=%.4f capped=%.4f stop_pct=%.2f%% max_pct=%.2f%% entry=%.4f",
+                symbol, "TRIGGERED" if cap_triggered else "ok",
+                raw_stop_distance, stop_distance, stop_pct,
+                profile.max_stop_distance_pct * 100, entry,
+            )
 
             signal = TradeSignal(
                 symbol=symbol,
@@ -338,16 +416,18 @@ class DecisionEngine:
         momentum_component = self._momentum_component(direction, features)
         volatility_component = self._volatility_component(direction, features)
         confluence_component = self._confluence_component(direction, features)
+        tick_flow_component = self._tick_flow_component(direction, features)
 
         weights = {
-            "model": 0.28,
-            "structure": 0.22,
+            "model": 0.25,
+            "structure": 0.20,
             "regime": 0.15,
             "mean_reversion": 0.08,
-            "displacement": 0.07,
-            "momentum": 0.07,
+            "displacement": 0.06,
+            "momentum": 0.06,
             "volatility": 0.05,
-            "confluence": 0.08,
+            "confluence": 0.07,
+            "tick_flow": 0.08,
         }
 
         confidence = (
@@ -359,6 +439,7 @@ class DecisionEngine:
             + weights["momentum"] * momentum_component
             + weights["volatility"] * volatility_component
             + weights["confluence"] * confluence_component
+            + weights["tick_flow"] * tick_flow_component
         )
         return clamp(confidence, 0.0, 1.0)
 
@@ -383,10 +464,32 @@ class DecisionEngine:
         return clamp(base + boost, 0.0, 1.0)
 
     def _regime_component(self, direction: Direction, regime: Regime, features: dict[str, float]) -> float:
+        """Regime component using probabilistic regime model output.
+
+        When regime_bull_prob/regime_bear_prob are available from the
+        regime-specific models, use them directly.  Otherwise fall back
+        to the legacy heuristic scoring.
+        """
         hurst = features.get("hurst_exponent", 0.5)
         entropy = features.get("entropy", 0.5)
         vol_cluster = features.get("volatility_clustering", 1.0)
 
+        # Use probabilistic regime model output when available.
+        regime_bull = features.get("regime_bull_prob")
+        regime_bear = features.get("regime_bear_prob")
+        if regime_bull is not None and regime_bear is not None:
+            if direction is Direction.LONG:
+                base = regime_bull
+            else:
+                base = regime_bear
+            # Boost with Hurst persistence when available
+            if hurst > 0.6:
+                base = clamp(base + (hurst - 0.5) * 0.1, 0.0, 1.0)
+            elif hurst < 0.3:
+                base = clamp(base - (0.5 - hurst) * 0.1, 0.0, 1.0)
+            return clamp(base, 0.0, 1.0)
+
+        # Legacy heuristic fallback
         if regime is Regime.TREND_UP:
             base = 0.85 if direction is Direction.LONG else 0.20
             if hurst > 0.6:
@@ -481,6 +584,47 @@ class DecisionEngine:
             alignment = sum(1 for v in [htf_bias_down, -setup_bias, -conf_bias] if v > 0)
 
         return alignment / 3.0
+
+    def _tick_flow_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Score based on tick-level micro-structure features.
+
+        Uses velocity, acceleration, exhaustion, impulse/retrace ratio,
+        and streak bias to estimate short-term directional pressure.
+        """
+        velocity = features.get("tick_velocity", 0.0)
+        acceleration = features.get("tick_acceleration", 0.0)
+        exhaustion = features.get("tick_exhaustion", 0.0)
+        impulse_ratio = features.get("tick_impulse_retrace_ratio", 1.0)
+        streak_bias = features.get("tick_streak_bias", 0.0)
+        up_ratio = features.get("tick_up_ratio", 0.5)
+        total_ticks = features.get("tick_total", 0.0)
+
+        # Need at least 10 ticks for meaningful flow analysis
+        if total_ticks < 10:
+            return 0.50
+
+        # Velocity contribution (signed, normalized by ATR)
+        atr = features.get("atr_14", 1.0)
+        velocity_score = clamp(velocity / max(atr, 1e-10) * 2.0, -0.25, 0.25)
+
+        # Acceleration = velocity change direction
+        accel_score = clamp(acceleration / max(atr, 1e-10) * 3.0, -0.15, 0.15)
+
+        # Impulse/retrace ratio: >1 = trending, <1 = ranging
+        impulse_score = clamp((impulse_ratio - 1.0) * 0.15, -0.15, 0.15)
+
+        # Streak bias: positive = up streak, negative = down streak
+        streak_score = clamp(streak_bias * 0.15, -0.15, 0.15)
+
+        # Up/down ratio deviation from 0.5
+        ratio_score = clamp((up_ratio - 0.5) * 0.2, -0.10, 0.10)
+
+        # Exhaustion penalty: high exhaustion = reduce conviction
+        exhaustion_penalty = exhaustion * 0.10
+
+        raw = 0.50 + velocity_score + accel_score + impulse_score + streak_score + ratio_score - exhaustion_penalty
+
+        return clamp(raw, 0.0, 1.0)
 
     def _rationale(
         self,

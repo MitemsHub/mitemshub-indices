@@ -15,6 +15,7 @@ import {
   type PropAccountState,
 } from "../lib/prop-policy";
 import type { ExecutionMode, SubmitOrderResponse, TrackedPosition } from "../lib/contracts";
+import { useNotifications } from "./use-notifications";
 
 type SymbolCode = FreshCallResponse["symbol"];
 type SystemStatus = {
@@ -623,6 +624,9 @@ useEffect(() => {
     };
   }, [currentCall, tradingMode]);
 
+// ── Browser push notifications ──────────────────────────────
+const notifications = useNotifications(currentCall);
+
 return {
   accountMode,
   activeSymbol,
@@ -636,6 +640,7 @@ return {
   history,
   loading,
   loadingElapsedSeconds,
+  notifications,
   propCallPreview,
   propConnection,
   propConnectionDraftOpen,

@@ -1013,11 +1013,13 @@ button:focus:not(:focus-visible) {
   opacity: 1;
 }
 
-/* backdrop-filter intentionally omitted from .surface — see the .surface class comment above.
+/* backdrop-filter intentionally omitted from .surface — see the .surface class comment above. */
 
 [data-theme="dark"] .primary-panel {
+  background-color: var(--bg-panel-strong);
   border-color: rgba(200, 214, 240, 0.07);
   backdrop-filter: none;
+  box-shadow: var(--shadow-soft);
 }
 
 [data-theme="dark"] .primary-panel::before {
@@ -1030,13 +1032,18 @@ button:focus:not(:focus-visible) {
 
 [data-theme="dark"] .command-rail,
 [data-theme="dark"] .command-rail.surface {
-  background: #141824 !important;
-  border-color: rgba(200, 214, 240, 0.08) !important;
+  background: rgba(20, 26, 38, 0.95) !important;
+  border-color: rgba(200, 214, 240, 0.1) !important;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4) !important;
 }
 
+[data-theme="dark"] .command-rail::before,
+[data-theme="dark"] .command-rail::after {
+  display: none !important;
+}
+
 [data-theme="dark"] .command-rail .utility-copy {
-  color: rgba(200, 214, 240, 0.5) !important;
+  color: rgba(200, 214, 240, 0.6) !important;
 }
 
 [data-theme="dark"] .command-rail h1,

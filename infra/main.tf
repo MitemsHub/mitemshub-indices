@@ -1,7 +1,5 @@
-# ── Terraform State ─────────────────────────────────────────────
 terraform {
-  required_version = ">= 1.5.0"
-
+  required_version = ">= 1.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -10,17 +8,14 @@ terraform {
   }
 }
 
-# ── Provider ───────────────────────────────────────────────────
 provider "aws" {
-  region     = var.aws_region
-  access_key = var.aws_access_key
-  secret_key = var.aws_secret_key
+  region = var.aws_region
 }
 
-# ── Data Sources ───────────────────────────────────────────────
+# ─── Data: Latest Windows Server 2022 AMI ───────────────────────────
 data "aws_ami" "windows_2022" {
   most_recent = true
-  owners      = ["amazon"]
+  owners      = ["801119661308"] # Amazon Windows owner
 
   filter {
     name   = "name"
@@ -33,6 +28,7 @@ data "aws_ami" "windows_2022" {
   }
 }
 
+# ─── VPC (default) ──────────────────────────────────────────────────
 data "aws_vpc" "default" {
   default = true
 }
@@ -44,173 +40,171 @@ data "aws_subnets" "default" {
   }
 }
 
-# ── Security Group — EC2 ──────────────────────────────────────
+# ─── Security Group ─────────────────────────────────────────────────
 resource "aws_security_group" "trading_server" {
-  name        = "mitemshub-trading-server"
-  description = "Security group for the Synthetic Indices Trading Server"
+  name        = "mitemshub-trading-server-sg"
+  description = "Allow SSH, HTTP, HTTPS for MitemsHub Trading System"
+  vpc_id      = data.aws_vpc.default.id
 
-  # HTTP from ALB only
+  # RDP (for initial setup via AWS console)
   ingress {
-    from_port       = 80
-    to_port         = 80
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-    description     = "HTTP from ALB"
-  }
-
-  # Next.js from ALB only
-  ingress {
-    from_port       = 3000
-    to_port         = 3000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-    description     = "Next.js from ALB"
-  }
-
-  # RDP — restricted to admin IP
-  ingress {
+    description = "RDP from admin IP"
     from_port   = 3389
     to_port     = 3389
     protocol    = "tcp"
     cidr_blocks = ["${var.admin_ip}/32"]
-    description = "RDP (restricted to admin IP)"
   }
 
-  # MT5 IPC port (local only)
+  # HTTP (Cloudflare forwards to this)
   ingress {
-    from_port   = 22346
-    to_port     = 22346
-    protocol    = "tcp"
-    self        = true
-    description = "MT5 MCP server (local only)"
-  }
-
-  # All outbound
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "All outbound traffic"
-  }
-
-  tags = {
-    Name    = "mitemshub-trading-server"
-    Project = "SyntheticIndicesBot"
-  }
-}
-
-# ── Security Group — ALB ──────────────────────────────────────
-resource "aws_security_group" "alb" {
-  name        = "mitemshub-alb"
-  description = "Security group for the Application Load Balancer"
-
-  ingress {
+    description = "HTTP from anywhere (for Cloudflare proxy)"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTP from anywhere"
   }
 
+  # HTTPS (Cloudflare forwards to this)
+  ingress {
+    description = "HTTPS from anywhere (for Cloudflare proxy)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Next.js dev port (for direct access during setup)
+  ingress {
+    description = "Next.js dev port from admin IP"
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["${var.admin_ip}/32"]
+  }
+
+  # All outbound traffic
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
-    description = "All outbound"
   }
 
   tags = {
-    Name    = "mitemshub-alb"
-    Project = "SyntheticIndicesBot"
+    Name    = "mitemshub-trading-server-sg"
+    Project = "MitemsHub Indices"
   }
 }
 
-# ── ALB ────────────────────────────────────────────────────────
-resource "aws_lb" "main" {
-  name               = "mitemshub-alb"
+# ─── IAM Role for EC2 (SSM access, CloudWatch logs) ────────────────
+resource "aws_iam_role" "ec2_role" {
+  name = "mitemshub-ec2-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name = "mitemshub-ec2-profile"
+  role = aws_iam_role.ec2_role.name
+}
+
+# ─── EC2 Instance ───────────────────────────────────────────────────
+resource "aws_instance" "trading_server" {
+  ami                    = data.aws_ami.windows_2022.id
+  instance_type          = var.instance_type
+  vpc_security_group_ids = [aws_security_group.trading_server.id]
+  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
+
+  root_block_device {
+    volume_size = 50
+    volume_type = "gp3"
+  }
+
+  user_data = templatefile("${path.module}/user_data.ps1", {
+    nodejs_version  = "20"
+    python_version  = "3.12"
+    app_port        = 3000
+    github_repo_url = var.github_repo_url
+  })
+
+  tags = {
+    Name    = "mitemshub-trading-server"
+    Project = "MitemsHub Indices"
+  }
+}
+
+# ─── Application Load Balancer ─────────────────────────────────────
+resource "aws_lb" "trading_alb" {
+  name               = "mitemshub-trading-alb"
   internal           = false
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
+  security_groups    = [aws_security_group.trading_server.id]
   subnets            = data.aws_subnets.default.ids
 
   tags = {
-    Name    = "mitemshub-alb"
-    Project = "SyntheticIndicesBot"
+    Name    = "mitemshub-trading-alb"
+    Project = "MitemsHub Indices"
   }
 }
 
-# ── Target Group ───────────────────────────────────────────────
-resource "aws_lb_target_group" "app" {
-  name     = "mitemshub-app"
-  port     = 3000
+# ─── Target Group ───────────────────────────────────────────────────
+resource "aws_lb_target_group" "trading_tg" {
+  name     = "mitemshub-trading-tg"
+  port     = var.app_port
   protocol = "HTTP"
   vpc_id   = data.aws_vpc.default.id
 
   health_check {
-    enabled             = true
-    path                = "/api/system/status"
-    port                = "3000"
+    path                = "/"
+    port                = "traffic-port"
     healthy_threshold   = 3
     unhealthy_threshold = 3
     timeout             = 10
     interval            = 30
-    matcher             = "200"
+    matcher             = "200-399"
   }
 
   tags = {
-    Name    = "mitemshub-app"
-    Project = "SyntheticIndicesBot"
+    Name    = "mitemshub-trading-tg"
+    Project = "MitemsHub Indices"
   }
 }
 
-# ── ALB Listener — HTTP ───────────────────────────────────────
+# ─── Target Group Attachment ────────────────────────────────────────
+resource "aws_lb_target_group_attachment" "trading_attachment" {
+  target_group_arn = aws_lb_target_group.trading_tg.arn
+  target_id        = aws_instance.trading_server.id
+  port             = var.app_port
+}
+
+# ─── HTTP Listener (port 80) ───────────────────────────────────────
 resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.main.arn
+  load_balancer_arn = aws_lb.trading_alb.arn
   port              = "80"
   protocol          = "HTTP"
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.app.arn
+    target_group_arn = aws_lb_target_group.trading_tg.arn
   }
-}
-
-# ── EC2 Instance ──────────────────────────────────────────────
-resource "aws_instance" "trading_server" {
-  ami                    = data.aws_ami.windows_2022.id
-  instance_type          = "t3.large"
-  vpc_security_group_ids = [aws_security_group.trading_server.id]
-  subnet_id              = data.aws_subnets.default.ids[0]
-
-  root_block_device {
-    volume_size = 50
-    volume_type = "gp3"
-    encrypted   = true
-  }
-
-  user_data = templatefile("${path.module}/user_data.ps1", {
-    github_repo     = "https://github.com/MitemsHub/mitemshub-indices.git"
-    github_branch   = "feature/mt5-rollout-enablement"
-    mt5_server      = var.mt5_server
-    mt5_login       = var.mt5_login
-    mt5_password    = var.mt5_password
-  })
 
   tags = {
-    Name    = "mitemshub-trading-server"
-    Project = "SyntheticIndicesBot"
-  }
-}
-
-# ── Elastic IP ────────────────────────────────────────────────
-resource "aws_eip" "main" {
-  instance = aws_instance.trading_server.id
-  domain   = "vpc"
-
-  tags = {
-    Name    = "mitemshub-eip"
-    Project = "SyntheticIndicesBot"
+    Name = "mitemshub-http-listener"
   }
 }

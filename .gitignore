@@ -27,6 +27,10 @@ external/mitems-studio-os/
 
 # AWS credentials
 infra/.env.aws
+infra/terraform.tfvars
+infra/*.tfstate
+infra/*.tfstate.backup
+infra/.terraform/
 external/mitemshub-indices/NUL
 external/mitemshub-indices/e2e/
 external/mitemshub-indices/test-results/

@@ -28,7 +28,7 @@ function MultiTimeframeSkeleton() {
       <div className="hidden md:block mt-4 overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-[var(--border)]">
+            <tr className="border-b border-[var(--line-subtle)]">
               <th className="text-left py-2 px-3 utility-copy text-xs uppercase tracking-[0.1em]">Timeframe</th>
               <th className="text-left py-2 px-3 utility-copy text-xs uppercase tracking-[0.1em]">Regime</th>
               <th className="text-left py-2 px-3 utility-copy text-xs uppercase tracking-[0.1em]">Structure Bias</th>
@@ -62,7 +62,7 @@ function MultiTimeframeSkeleton() {
         ))}
       </div>
       <div className="mt-3 md:mt-4">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-gray-500 mb-2 md:mb-3">Alignment Summary</p>
+        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-[var(--text-muted)] mb-2 md:mb-3">Alignment Summary</p>
         <div className="grid gap-2 md:gap-3 grid-cols-1 md:grid-cols-3">
           <SkeletonCard />
           <SkeletonCard />
@@ -90,12 +90,12 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
   }
 
   const regimeColors: Record<string, string> = {
-    trend_up: "text-green-600 bg-green-50 border-green-200",
-    trend_down: "text-red-600 bg-red-50 border-red-200",
-    range: "text-blue-600 bg-blue-50 border-blue-200",
-    volatile: "text-purple-600 bg-purple-50 border-purple-200",
-    compression: "text-amber-600 bg-amber-50 border-amber-200",
-    unknown: "text-gray-500 bg-gray-50 border-gray-200",
+    trend_up: "text-[var(--accent-positive)] bg-[var(--accent-positive-soft)] border-[var(--accent-positive-soft)]",
+    trend_down: "text-[var(--accent-danger)] bg-[var(--accent-danger-soft)] border-[var(--accent-danger-soft)]",
+    range: "text-[var(--accent-ink)] bg-[var(--accent-ink-soft)] border-[var(--accent-ink-soft)]",
+    volatile: "text-[var(--accent-volatile)] bg-[var(--accent-volatile-soft)] border-[var(--accent-volatile-soft)]",
+    compression: "text-[var(--accent-warn)] bg-[var(--accent-warn-soft)] border-[var(--accent-warn-soft)]",
+    unknown: "text-[var(--text-muted)] bg-[var(--bg-panel-muted)] border-[var(--line-subtle)]",
   };
 
   return (
@@ -106,7 +106,7 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
       <div className="hidden md:block mt-4 overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-[var(--border)]">
+            <tr className="border-b border-[var(--line-subtle)]">
               <th className="text-left py-2 px-3 utility-copy text-xs uppercase tracking-[0.1em]">Timeframe</th>
               <th className="text-left py-2 px-3 utility-copy text-xs uppercase tracking-[0.1em]">Regime</th>
               <th className="text-left py-2 px-3 utility-copy text-xs uppercase tracking-[0.1em]">Structure Bias</th>
@@ -119,7 +119,7 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
           </thead>
           <tbody>
             {timeframes.map((tf) => (
-              <tr key={tf.timeframe} className="border-b border-[var(--border)]/50">
+              <tr key={tf.timeframe} className="border-b border-[var(--line-subtle)]">
                 <td className="py-2 px-3 utility-copy text-xs uppercase tracking-[0.1em] font-mono">{tf.timeframe}</td>
                 <td className="py-2 px-3">
                   <span className={`info-chip rounded-full px-2 py-0.5 text-xs ${regimeColors[tf.regime] || regimeColors.unknown}`}>
@@ -128,46 +128,43 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
                 </td>
                 <td className="py-2 px-3">
                   <div className="flex items-center gap-2">
-                    <div className="w-20 h-2 bg-[var(--border)] rounded-full overflow-hidden">
-                      <div className="h-full bg-blue-500" style={{ width: `${Math.abs(tf.structure_bias) * 100}%` }} />
+                    <div className="w-20 h-2 bg-[var(--line-subtle)] rounded-full overflow-hidden">
+                      <div className="h-full bg-[var(--accent-ink)]" style={{ width: `${Math.abs(tf.structure_bias) * 100}%` }} />
                     </div>
-                    <span className={tf.structure_bias > 0.3 ? "text-green-600" : tf.structure_bias < -0.3 ? "text-red-600" : "text-gray-600"}>
+                    <span className={tf.structure_bias > 0.3 ? "text-[var(--accent-positive)]" : tf.structure_bias < -0.3 ? "text-[var(--accent-danger)]" : "text-[var(--text-muted)]"}>
                       {tf.structure_bias > 0 ? "▲" : tf.structure_bias < 0 ? "▼" : "■"} {tf.structure_bias.toFixed(2)}
                     </span>
                   </div>
                 </td>
                 <td className="hidden lg:table-cell py-2 px-3 text-sm">
                   <div className="flex gap-1 text-xs">
-                    {tf.bos_up > 0 && <span className="px-1.5 py-0.5 rounded bg-green-100 text-green-700">BOS↑</span>}
-                    {tf.bos_down > 0 && <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-700">BOS↓</span>}
-                    {tf.liquidity_sweep_up > 0 && <span className="px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-800">Sweep↑</span>}
-                    {tf.liquidity_sweep_down > 0 && <span className="px-1.5 py-0.5 rounded bg-green-100 text-green-800">Sweep↓</span>}
-                    {!(tf.bos_up > 0) && !(tf.bos_down > 0) && !(tf.liquidity_sweep_up > 0) && !(tf.liquidity_sweep_down > 0) && <span className="text-gray-400">—</span>}
+                    {tf.bos_up > 0 && <span className="px-1.5 py-0.5 rounded bg-[var(--accent-positive-soft)] text-[var(--accent-positive)]">BOS↑</span>}
+                    {tf.bos_down > 0 && <span className="px-1.5 py-0.5 rounded bg-[var(--accent-danger-soft)] text-[var(--accent-danger)]">BOS↓</span>}
+                    {tf.liquidity_sweep_up > 0 && <span className="px-1.5 py-0.5 rounded bg-[var(--accent-warn-soft)] text-[var(--accent-warn)]">Sweep↑</span>}
+                    {tf.liquidity_sweep_down > 0 && <span className="px-1.5 py-0.5 rounded bg-[var(--accent-positive-soft)] text-[var(--accent-positive)]">Sweep↓</span>}
+                    {!(tf.bos_up > 0) && !(tf.bos_down > 0) && !(tf.liquidity_sweep_up > 0) && !(tf.liquidity_sweep_down > 0) && <span className="text-[var(--text-muted)]">—</span>}
                   </div>
                 </td>
                 <td className="hidden lg:table-cell py-2 px-3 text-sm">
                   <div className="flex gap-1 text-xs">
-                    {tf.fvg_bullish_active > 0 && <span className="px-1.5 py-0.5 rounded bg-green-100 text-green-700">FVG↑</span>}
-                    {tf.fvg_bearish_active > 0 && <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-700">FVG↓</span>}
-                    {!(tf.fvg_bullish_active > 0) && !(tf.fvg_bearish_active > 0) && <span className="text-gray-400">—</span>}
+                    {tf.fvg_bullish_active > 0 && <span className="px-1.5 py-0.5 rounded bg-[var(--accent-positive-soft)] text-[var(--accent-positive)]">FVG↑</span>}
+                    {tf.fvg_bearish_active > 0 && <span className="px-1.5 py-0.5 rounded bg-[var(--accent-danger-soft)] text-[var(--accent-danger)]">FVG↓</span>}
+                    {!(tf.fvg_bullish_active > 0) && !(tf.fvg_bearish_active > 0) && <span className="text-[var(--text-muted)]">—</span>}
                   </div>
                 </td>
                 <td className="py-2 px-3">
                   <div className="flex items-center gap-2">
-                    <div className="w-16 h-2 bg-gray-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-blue-500" style={{ width: `${Math.min(Math.abs(tf.displacement_atr) / 3, 1) * 100}%` }} />
+                    <div className="w-16 h-2 bg-[var(--line-subtle)] rounded-full overflow-hidden">
+                      <div className="h-full bg-[var(--accent-ink)]" style={{ width: `${Math.min(Math.abs(tf.displacement_atr) / 3, 1) * 100}%` }} />
                     </div>
                     <span className="text-sm font-mono font-medium">{tf.displacement_atr.toFixed(1)}</span>
                   </div>
                 </td>
-                <td className="py-2 px-3">
-                  <span className={tf.direction_bias === "bullish" ? "text-green-600" : tf.direction_bias === "bearish" ? "text-red-600" : "text-gray-500"}>
-                    {tf.direction_bias === "bullish" ? "▲ Bullish" : tf.direction_bias === "bearish" ? "▼ Bearish" : "■ Neutral"}
-                  </span>
+                <td className="py-2 px-3">                    <span className={tf.direction_bias === "bullish" ? "text-[var(--accent-positive)]" : tf.direction_bias === "bearish" ? "text-[var(--accent-danger)]" : "text-[var(--text-muted)]"}>
+                      {tf.direction_bias === "bullish" ? "▲ Bullish" : tf.direction_bias === "bearish" ? "▼ Bearish" : "■ Neutral"}
+                    </span>
                 </td>
-                <td className="py-2 px-3">
-                  <div className="w-20 h-2 bg-gray-100 rounded-full overflow-hidden">
-                    <div className="h-full bg-blue-500" style={{ width: `${tf.confidence * 100}%` }} />
+                <td className="py-2 px-3">                    <div className="w-20 h-2 bg-[var(--line-subtle)] rounded-full overflow-hidden">                      <div className="h-full bg-[var(--accent-ink)]" style={{ width: `${tf.confidence * 100}%` }} />
                   </div>
                 </td>
               </tr>
@@ -188,18 +185,17 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
                   {tf.regime.replace("_", " ")}
                 </span>
               </div>
-              <span className={`text-xs font-medium ${tf.direction_bias === "bullish" ? "text-green-600" : tf.direction_bias === "bearish" ? "text-red-600" : "text-gray-500"}`}>
+              <span className={`text-xs font-medium ${tf.direction_bias === "bullish" ? "text-[var(--accent-positive)]" : tf.direction_bias === "bearish" ? "text-[var(--accent-danger)]" : "text-[var(--text-muted)]"}`}>
                 {tf.direction_bias === "bullish" ? "▲ Bullish" : tf.direction_bias === "bearish" ? "▼ Bearish" : "■ Neutral"}
               </span>
             </div>
 
             {/* Structure bias bar */}
             <div className="mt-2 flex items-center gap-2">
-              <span className="text-[10px] text-[var(--text-muted)] w-16 flex-shrink-0">Structure</span>
-              <div className="flex-1 h-2 bg-[var(--border)] rounded-full overflow-hidden">
-                <div className="h-full bg-blue-500" style={{ width: `${Math.abs(tf.structure_bias) * 100}%` }} />
+              <span className="text-[10px] text-[var(--text-muted)] w-16 flex-shrink-0">Structure</span>                <div className="flex-1 h-2 bg-[var(--line-subtle)] rounded-full overflow-hidden">
+                <div className="h-full bg-[var(--accent-ink)]" style={{ width: `${Math.abs(tf.structure_bias) * 100}%` }} />
               </div>
-              <span className={`text-[10px] font-mono font-medium w-8 text-right ${tf.structure_bias > 0.3 ? "text-green-600" : tf.structure_bias < -0.3 ? "text-red-600" : "text-gray-500"}`}>
+              <span className={`text-[10px] font-mono font-medium w-8 text-right ${tf.structure_bias > 0.3 ? "text-[var(--accent-positive)]" : tf.structure_bias < -0.3 ? "text-[var(--accent-danger)]" : "text-[var(--text-muted)]"}`}>
                 {tf.structure_bias.toFixed(2)}
               </span>
             </div>
@@ -207,8 +203,8 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
             {/* Displacement bar */}
             <div className="mt-1.5 flex items-center gap-2">
               <span className="text-[10px] text-[var(--text-muted)] w-16 flex-shrink-0">Displacement</span>
-              <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
-                <div className="h-full bg-blue-500" style={{ width: `${Math.min(Math.abs(tf.displacement_atr) / 3, 1) * 100}%` }} />
+              <div className="flex-1 h-2 bg-[var(--line-subtle)] rounded-full overflow-hidden">
+                <div className="h-full bg-[var(--accent-ink)]" style={{ width: `${Math.min(Math.abs(tf.displacement_atr) / 3, 1) * 100}%` }} />
               </div>
               <span className="text-[10px] font-mono font-medium w-8 text-right">{tf.displacement_atr.toFixed(1)}</span>
             </div>
@@ -216,8 +212,8 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
             {/* Confidence bar */}
             <div className="mt-1.5 flex items-center gap-2">
               <span className="text-[10px] text-[var(--text-muted)] w-16 flex-shrink-0">Confidence</span>
-              <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
-                <div className="h-full bg-blue-500" style={{ width: `${tf.confidence * 100}%` }} />
+              <div className="flex-1 h-2 bg-[var(--line-subtle)] rounded-full overflow-hidden">
+                <div className="h-full bg-[var(--accent-ink)]" style={{ width: `${tf.confidence * 100}%` }} />
               </div>
               <span className="text-[10px] font-mono font-medium w-8 text-right">{(tf.confidence * 100).toFixed(0)}%</span>
             </div>
@@ -225,12 +221,12 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
             {/* BOS/FVG/Sweep chips — only show if any exist */}
             {(tf.bos_up > 0 || tf.bos_down > 0 || tf.liquidity_sweep_up > 0 || tf.liquidity_sweep_down > 0 || tf.fvg_bullish_active > 0 || tf.fvg_bearish_active > 0) && (
               <div className="mt-2 flex flex-wrap gap-1">
-                {tf.bos_up > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-green-100 text-green-700">BOS↑</span>}
-                {tf.bos_down > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-red-100 text-red-700">BOS↓</span>}
-                {tf.liquidity_sweep_up > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-yellow-100 text-yellow-800">Sweep↑</span>}
-                {tf.liquidity_sweep_down > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-green-100 text-green-800">Sweep↓</span>}
-                {tf.fvg_bullish_active > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-green-100 text-green-700">FVG↑</span>}
-                {tf.fvg_bearish_active > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-red-100 text-red-700">FVG↓</span>}
+                {tf.bos_up > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-[var(--accent-positive-soft)] text-[var(--accent-positive)]">BOS↑</span>}
+                {tf.bos_down > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-[var(--accent-danger-soft)] text-[var(--accent-danger)]">BOS↓</span>}
+                {tf.liquidity_sweep_up > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-[var(--accent-warn-soft)] text-[var(--accent-warn)]">Sweep↑</span>}
+                {tf.liquidity_sweep_down > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-[var(--accent-positive-soft)] text-[var(--accent-positive)]">Sweep↓</span>}
+                {tf.fvg_bullish_active > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-[var(--accent-positive-soft)] text-[var(--accent-positive)]">FVG↑</span>}
+                {tf.fvg_bearish_active > 0 && <span className="px-1.5 py-0.5 rounded text-[9px] bg-[var(--accent-danger-soft)] text-[var(--accent-danger)]">FVG↓</span>}
               </div>
             )}
           </div>
@@ -239,7 +235,7 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
 
       {/* ── Alignment Summary ───────────────────────────────────── */}
       <div className="mt-3 md:mt-4">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-gray-500 mb-2 md:mb-3">Alignment Summary</p>
+        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-[var(--text-muted)] mb-2 md:mb-3">Alignment Summary</p>
         <div className="grid gap-2 md:gap-3 grid-cols-1 md:grid-cols-3">
           <AlignmentMetric label="Bias Alignment" value={calculateBiasAlignment(timeframes)} hint="How aligned are the timeframes?" />
           <AlignmentMetric label="Regime Consistency" value={calculateRegimeConsistency(timeframes)} hint="Do regimes agree across timeframes?" />
@@ -281,10 +277,10 @@ function calculateStructureCoherence(timeframes: TimeframeAnalysis[]): string {
 
 function AlignmentMetric({ label, value, hint }: { label: string; value: string; hint: string }) {
   return (
-    <div className="p-3 md:p-4 rounded-lg bg-gray-50 border border-gray-200">
-      <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-gray-500 mb-1">{label}</p>
-      <p className="text-sm md:text-base font-semibold text-gray-900">{value}</p>
-      <p className="text-[10px] md:text-xs text-gray-500 mt-1">{hint}</p>
+    <div className="p-3 md:p-4 rounded-lg bg-[var(--bg-panel-muted)] border border-[var(--line-subtle)]">
+      <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-[var(--text-muted)] mb-1">{label}</p>
+      <p className="text-sm md:text-base font-semibold text-[var(--text-strong)]">{value}</p>
+      <p className="text-[10px] md:text-xs text-[var(--text-muted)] mt-1">{hint}</p>
     </div>
   );
 }

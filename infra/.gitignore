@@ -1,7 +1,8 @@
-# Terraform state and sensitive files
-.terraform/
+# Terraform state and secrets
 *.tfstate
 *.tfstate.backup
 *.tfvars
-.env.aws
+!terraform.tfvars.example
+.terraform/
 .terraform.lock.hcl
+crash.log

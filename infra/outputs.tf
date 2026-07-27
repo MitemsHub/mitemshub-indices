@@ -1,17 +1,11 @@
-# ── Outputs ────────────────────────────────────────────────────
-output "public_ip" {
-  description = "Public IP of the trading server"
-  value       = aws_eip.main.public_ip
+output "alb_dns_name" {
+  description = "DNS name of the ALB (point Cloudflare CNAME here)"
+  value       = aws_lb.trading_alb.dns_name
 }
 
-output "alb_dns" {
-  description = "ALB DNS name — access dashboard at http://<ALB-DNS>"
-  value       = aws_lb.main.dns_name
-}
-
-output "dashboard_url" {
-  description = "Direct URL to the trading dashboard"
-  value       = "http://${aws_lb.main.dns_name}"
+output "alb_zone_id" {
+  description = "Zone ID of the ALB (for Route53 alias records)"
+  value       = aws_lb.trading_alb.zone_id
 }
 
 output "instance_id" {
@@ -19,7 +13,40 @@ output "instance_id" {
   value       = aws_instance.trading_server.id
 }
 
-output "rdp_command" {
-  description = "RDP command to connect to the server"
-  value       = "mstsc /v:${aws_eip.main.public_ip}"
+output "instance_private_ip" {
+  description = "Private IP of the EC2 instance"
+  value       = aws_instance.trading_server.private_ip
+}
+
+output "security_group_id" {
+  description = "Security group ID (for manual rule updates)"
+  value       = aws_security_group.trading_server.id
+}
+
+output "setup_instructions" {
+  description = "Next steps after terraform apply"
+  value = <<-EOT
+
+    ======================================
+     DEPLOYMENT COMPLETE
+    ======================================
+
+    1. ALB DNS: ${aws_lb.trading_alb.dns_name}
+       → Point your Cloudflare CNAME to this address
+
+    2. Instance ID: ${aws_instance.trading_server.id}
+       → Connect via AWS Console → RDP (port 3389)
+
+    3. After connecting via RDP:
+       → Open PowerShell as Administrator
+       → Run: C:\deploy\setup.ps1
+       → This clones the repo, installs deps, and starts the app
+
+    4. Cloudflare Setup:
+       → Add CNAME record: @ → ${aws_lb.trading_alb.dns_name}
+       → Enable proxy (orange cloud)
+       → SSL/TLS mode: Full (Strict)
+
+    5. Access your dashboard at: https://mitemshub-indices.com
+  EOT
 }

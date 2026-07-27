@@ -21,7 +21,9 @@ import { IntelAccordion } from "./intel-accordion";
 import { IntelPanelToggles } from "./intel-panel-toggles";
 import { HealthDashboard } from "./health-dashboard";
 import { PipelineDiagnosticsPanel } from "./pipeline-diagnostics-panel";
+import { NotificationBell } from "./notification-bell";
 import { TABS, type IntelPanelId, resolveEnabledPanels, readIntelPanelOverrides } from "../../lib/constants";
+import { PriceChart } from "../charts/PriceChart";
 
 // Intelligence panels
 import { MarketIntelligencePanel } from "../intelligence/MarketIntelligencePanel";
@@ -195,6 +197,17 @@ export function OperatorShell() {
         className="shell-frame mx-auto max-w-7xl px-4 py-4 md:px-6 md:py-6"
         {...(!isDesktop ? pullHandlers : {})}
       >
+        {/* ── Notification bell ──────────────────────────────────── */}
+        <div className="flex items-center justify-end mb-2">
+          <NotificationBell
+            permission={workspace.notifications.permission}
+            prefs={workspace.notifications.prefs}
+            isSupported={workspace.notifications.isSupported}
+            onEnable={workspace.notifications.enable}
+            onTogglePref={workspace.notifications.togglePref}
+          />
+        </div>
+
         {/* ── Pull-to-refresh indicator (mobile only) ────────────── */}
         {!isDesktop && (
           <PullToRefreshIndicator
@@ -215,6 +228,11 @@ export function OperatorShell() {
             <HealthDashboard />
           </ErrorBoundary>
         </div>
+
+        {/* ── Live Price Chart ─────────────────────────────────── */}
+        <ErrorBoundary label="Live price chart">
+          <PriceChart />
+        </ErrorBoundary>
 
         {/* ── Command Bar ──────────────────────────────────────────── */}
         <CommandBar

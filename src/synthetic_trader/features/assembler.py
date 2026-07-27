@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from synthetic_trader.domain import Candle, FeatureSnapshot
+from synthetic_trader.domain import Candle, Tick, FeatureSnapshot
 from synthetic_trader.features.market_structure import market_structure_features
 from synthetic_trader.features.regimes import classify_regime
+from synthetic_trader.features.tick_integration import compute_tick_flow_features
 
 
 def build_snapshot(
@@ -11,6 +12,7 @@ def build_snapshot(
     candles: list[Candle],
     higher_timeframe_candles: list[Candle] | None = None,
     extra_timeframes: dict[str, list[Candle]] | None = None,
+    ticks: list[Tick] | None = None,
 ) -> FeatureSnapshot:
     regime, base_features, regime_notes = classify_regime(candles)
     structure = market_structure_features(candles)
@@ -36,6 +38,16 @@ def build_snapshot(
             features.update({f"{prefix}_{key}": value for key, value in extra_structure.items()})
             features[f"{prefix}_regime_{extra_regime.value}"] = 1.0
             notes.extend(f"{prefix.upper()} {note}" for note in extra_notes)
+
+    # ── Tick-level features ───────────────────────────────────────
+    # Feed raw ticks into TickFlowEngine to capture micro-structure
+    # dynamics (velocity, acceleration, impulse/retrace, exhaustion)
+    # that candle-derived features miss.
+    if ticks:
+        tick_features = compute_tick_flow_features(ticks)
+        features.update(tick_features)
+        if any(v != 0.0 for k, v in tick_features.items() if k != "tick_total"):
+            notes.append(f"tick_flow: vel={tick_features.get('tick_velocity', 0):.4f} accel={tick_features.get('tick_acceleration', 0):.4f}")
 
     epoch = candles[-1].open_time + timeframe_sec if candles else 0.0
     return FeatureSnapshot(

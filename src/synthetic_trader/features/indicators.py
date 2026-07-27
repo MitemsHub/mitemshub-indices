@@ -192,6 +192,113 @@ def donchian_channels(candles: list[Candle], period: int = 20) -> tuple[float, f
     return (upper, middle, lower)
 
 
+def bollinger_bands(closes: list[float], period: int = 20, num_std: float = 2.0) -> tuple[float, float, float]:
+    """Bollinger Bands: (upper, middle, lower)."""
+    if len(closes) < period:
+        mid = closes[-1] if closes else 0.0
+        return (mid, mid, mid)
+    window = closes[-period:]
+    mid = sum(window) / period
+    variance = sum((x - mid) ** 2 for x in window) / period
+    std = variance ** 0.5
+    return (mid + num_std * std, mid, mid - num_std * std)
+
+
+def macd(closes: list[float], fast: int = 12, slow: int = 26, signal_period: int = 9) -> tuple[float, float, float]:
+    """MACD: (macd_line, signal_line, histogram).
+
+    Uses a lightweight approximation for the signal line: the MACD line
+    value from ``signal_period`` bars ago, which is cheap to compute and
+    avoids the O(n²) full-series EMA recomputation.
+    """
+    if len(closes) < slow + signal_period:
+        return (0.0, 0.0, 0.0)
+    # Current MACD line
+    ema_fast = ema(closes, fast)
+    ema_slow = ema(closes, slow)
+    macd_line = ema_fast - ema_slow
+    # Signal line: MACD value from signal_period bars ago
+    past_closes = closes[:len(closes) - signal_period]
+    past_fast = ema(past_closes, fast)
+    past_slow = ema(past_closes, slow)
+    signal_line = past_fast - past_slow
+    histogram = macd_line - signal_line
+    return (macd_line, signal_line, histogram)
+
+
+def stochastic(candles: list[Candle], period: int = 14) -> tuple[float, float]:
+    """Stochastic oscillator: (%K, %D).  %D is 3-period SMA of %K."""
+    if len(candles) < period:
+        return (50.0, 50.0)
+    # Compute raw %K values over the last few periods for %D smoothing
+    k_values: list[float] = []
+    lookback = min(len(candles), period + 2)
+    for i in range(lookback):
+        start = max(0, len(candles) - lookback + i - period + 1)
+        end = len(candles) - lookback + i + 1
+        w = candles[start:end]
+        if len(w) < period:
+            k_values.append(50.0)
+            continue
+        hi = max(c.high for c in w)
+        lo = min(c.low for c in w)
+        rng = hi - lo
+        k_val = ((w[-1].close - lo) / rng * 100.0) if rng > 1e-10 else 50.0
+        k_values.append(k_val)
+    k = k_values[-1]
+    # %D = 3-period SMA of last 3 %K values
+    d = sum(k_values[-3:]) / len(k_values[-3:]) if k_values else k
+    return (k, d)
+
+
+def roc(closes: list[float], period: int = 10) -> float:
+    """Rate of Change: percentage change over period."""
+    if len(closes) <= period:
+        return 0.0
+    prev = closes[-period - 1]
+    if abs(prev) < 1e-10:
+        return 0.0
+    return (closes[-1] - prev) / prev * 100.0
+
+
+def cci(candles: list[Candle], period: int = 20) -> float:
+    """Commodity Channel Index."""
+    if len(candles) < period:
+        return 0.0
+    window = candles[-period:]
+    typical_prices = [c.typical_price for c in window]
+    sma_tp = sum(typical_prices) / period
+    mean_deviation = sum(abs(tp - sma_tp) for tp in typical_prices) / period
+    if mean_deviation < 1e-10:
+        return 0.0
+    return (typical_prices[-1] - sma_tp) / (0.015 * mean_deviation)
+
+
+def _compute_extended_indicators(closes: list[float], candles: list[Candle], atr_14: float) -> dict[str, float]:
+    """Compute extended indicators (Bollinger, MACD, Stochastic, ROC, CCI) and return as a flat dict."""
+    bb_upper, bb_mid, bb_lower = bollinger_bands(closes, 20, 2.0)
+    bb_width = safe_div(bb_upper - bb_lower, bb_mid)
+    bb_position = safe_div(closes[-1] - bb_lower, bb_upper - bb_lower) if (bb_upper - bb_lower) > 1e-10 else 0.5
+    macd_line, macd_signal, macd_hist = macd(closes, 12, 26, 9)
+    stoch_k, stoch_d = stochastic(candles, 14)
+    roc_10 = roc(closes, 10)
+    cci_20 = cci(candles, 20)
+    return {
+        "bb_upper": bb_upper,
+        "bb_mid": bb_mid,
+        "bb_lower": bb_lower,
+        "bb_width": bb_width,
+        "bb_position": clamp(bb_position, 0.0, 1.0),
+        "macd_line": safe_div(macd_line, atr_14),
+        "macd_signal": safe_div(macd_signal, atr_14),
+        "macd_histogram": safe_div(macd_hist, atr_14),
+        "stoch_k": stoch_k,
+        "stoch_d": stoch_d,
+        "roc_10": roc_10,
+        "cci_20": cci_20,
+    }
+
+
 def candle_feature_set(candles: list[Candle]) -> dict[str, float]:
     if not candles:
         return {}
@@ -263,4 +370,6 @@ def candle_feature_set(candles: list[Candle]) -> dict[str, float]:
         "volatility_clustering": vol_cluster,
         "kc_position": kc_position,
         "dc_position": dc_position,
+        # ── New indicators (Bollinger, MACD, Stochastic, ROC, CCI) ──
+        **_compute_extended_indicators(closes, candles, atr_14),
     }

@@ -82,7 +82,12 @@ type PipelineDiagnostics = {
   lastError: string | null;
   lastUpdatedAt: string | null;
   staleDataSince: number | null;
+  lastSubprocessDurationMs: number | null;
+  lastSubprocessLabel: string | null;
+  subprocessHistory: Array<{ label: string; durationMs: number; timestamp: number; success: boolean }>;
 };
+
+const SUBPROCESS_HISTORY_MAX = 20;
 
 const pipelineDiagnostics: PipelineDiagnostics = {
   lastGuardianReason: null,
@@ -91,6 +96,9 @@ const pipelineDiagnostics: PipelineDiagnostics = {
   lastError: null,
   lastUpdatedAt: null,
   staleDataSince: null,
+  lastSubprocessDurationMs: null,
+  lastSubprocessLabel: null,
+  subprocessHistory: [],
 };
 
 export function recordPipelineGuardianReason(reason: string | null | undefined): void {
@@ -126,8 +134,23 @@ export function recordPipelineStaleDataSince(epoch: number | null | undefined): 
   }
 }
 
+function recordSubprocessTiming(label: string, durationMs: number, success: boolean): void {
+  pipelineDiagnostics.lastSubprocessDurationMs = durationMs;
+  pipelineDiagnostics.lastSubprocessLabel = label;
+  pipelineDiagnostics.lastUpdatedAt = new Date().toISOString();
+  pipelineDiagnostics.subprocessHistory.push({
+    label,
+    durationMs,
+    timestamp: Date.now(),
+    success,
+  });
+  if (pipelineDiagnostics.subprocessHistory.length > SUBPROCESS_HISTORY_MAX) {
+    pipelineDiagnostics.subprocessHistory = pipelineDiagnostics.subprocessHistory.slice(-SUBPROCESS_HISTORY_MAX);
+  }
+}
+
 export function getPipelineDiagnostics() {
-  return { ...pipelineDiagnostics } as PipelineDiagnostics;
+  return { ...pipelineDiagnostics, subprocessHistory: [...pipelineDiagnostics.subprocessHistory] } as PipelineDiagnostics;
 }
 
 // ── TTL cache factory ─────────────────────────────────────────
@@ -324,21 +347,27 @@ export async function runPythonScript(options: RunPythonScriptOptions): Promise<
         },
       );
 
+      const durationMs = Date.now() - startedAt;
+
       if (result.stderr?.trim()) {
         console.error(`[python-runner] ${label} stderr:`, result.stderr);
         recordPipelineStderr(result.stderr);
       }
 
+      recordSubprocessTiming(label, durationMs, true);
+
       return {
         stdout: result.stdout,
         stderr: result.stderr,
-        durationMs: Date.now() - startedAt,
+        durationMs,
       };
     } catch (error) {
+      const durationMs = Date.now() - startedAt;
       const execError = error as { stderr?: string };
       if (execError?.stderr) {
         console.error(`[python-runner] ${label} stderr:`, execError.stderr);
       }
+      recordSubprocessTiming(label, durationMs, false);
       lastError = error;
     }
   }

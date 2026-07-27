@@ -19,7 +19,7 @@ function MarketThesisSkeleton() {
       </div>
 
       {/* Thesis block */}
-      <div className="mt-3 md:mt-4 p-3 md:p-4 rounded-lg bg-white/50 border border-gray-100">
+      <div className="mt-3 md:mt-4 p-3 md:p-4 rounded-lg bg-[var(--bg-panel-muted)] border border-[var(--line-subtle)]">
         <SkeletonBar width="4rem" height="0.625rem" className="mb-2" />
         <SkeletonBar width="100%" height="0.875rem" />
         <SkeletonBar width="85%" height="0.875rem" className="mt-1.5" />
@@ -48,7 +48,7 @@ function MarketThesisSkeleton() {
         <SkeletonBar width="8rem" height="0.625rem" className="mb-2" />
         <div className="space-y-1.5 md:space-y-2">
           {[1, 2].map((i) => (
-            <div key={i} className="flex items-start gap-2 md:gap-3 p-2 md:p-3 rounded-lg bg-green-50 border border-green-200">
+            <div key={i} className="flex items-start gap-2 md:gap-3 p-2 md:p-3 rounded-lg bg-[var(--accent-positive-soft)] border border-[var(--accent-positive-soft)]">
               <SkeletonBar width="1.25rem" height="1.25rem" className="rounded-full flex-shrink-0" />
               <div className="flex-1">
                 <SkeletonBar width={`${4 + i}rem`} height="0.875rem" />
@@ -62,7 +62,7 @@ function MarketThesisSkeleton() {
       {/* Counter evidence row */}
       <div className="mt-3 md:mt-4">
         <SkeletonBar width="7rem" height="0.625rem" className="mb-2" />
-        <div className="p-2 md:p-3 rounded-lg bg-red-50 border border-red-200">
+        <div className="p-2 md:p-3 rounded-lg bg-[var(--accent-danger-soft)] border border-[var(--accent-danger-soft)]">
           <div className="flex items-start gap-2 md:gap-3">
             <SkeletonBar width="1.25rem" height="1.25rem" className="rounded-full flex-shrink-0" />
             <div className="flex-1">
@@ -74,7 +74,7 @@ function MarketThesisSkeleton() {
       </div>
 
       {/* Confidence bar */}
-      <div className="mt-3 md:mt-4 p-3 md:p-4 rounded-lg bg-blue-50 border border-blue-200">
+      <div className="mt-3 md:mt-4 p-3 md:p-4 rounded-lg bg-[var(--accent-ink-soft)] border border-[var(--accent-ink-soft)]">
         <SkeletonBar width="6rem" height="0.625rem" className="mb-2" />
         <SkeletonBar width="100%" height="0.875rem" />
       </div>
@@ -97,9 +97,9 @@ export function MarketThesisPanel({ thesis, loading }: MarketThesisPanelProps) {
   }
 
   const directionColors = {
-    bullish: "text-green-700 bg-green-50 border-green-200",
-    bearish: "text-red-700 bg-red-50 border-red-200",
-    neutral: "text-gray-700 bg-gray-50 border-gray-200",
+    bullish: "text-[var(--accent-positive)] bg-[var(--accent-positive-soft)] border-[var(--accent-positive-soft)]",
+    bearish: "text-[var(--accent-danger)] bg-[var(--accent-danger-soft)] border-[var(--accent-danger-soft)]",
+    neutral: "text-[var(--text-muted)] bg-[var(--bg-panel-muted)] border-[var(--line-subtle)]",
   };
 
   return (
@@ -111,9 +111,9 @@ export function MarketThesisPanel({ thesis, loading }: MarketThesisPanelProps) {
         </span>
       </div>
 
-      <div className="mt-3 md:mt-4 p-3 md:p-4 rounded-lg bg-white/50 border border-gray-100">
-        <p className="text-[11px] md:text-sm font-medium text-gray-900 mb-1">Thesis</p>
-        <p className="text-sm md:text-base text-gray-700 leading-6 md:leading-7">{thesis.thesis}</p>
+      <div className="mt-3 md:mt-4 p-3 md:p-4 rounded-lg bg-[var(--bg-panel-muted)] border border-[var(--line-subtle)]">
+        <p className="text-[11px] md:text-sm font-medium text-[var(--text-strong)] mb-1">Thesis</p>
+        <p className="text-sm md:text-base text-[var(--text-body)] leading-6 md:leading-7">{thesis.thesis}</p>
       </div>
 
       <div className="mt-3 md:mt-4 grid gap-2 md:gap-4 grid-cols-1 sm:grid-cols-3">
@@ -123,8 +123,8 @@ export function MarketThesisPanel({ thesis, loading }: MarketThesisPanelProps) {
       </div>
 
       <div className="mt-3 md:mt-4">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-gray-500 mb-2">Timeframe Alignment</p>
-        <span className={`info-chip rounded-full px-2 md:px-3 py-0.5 md:py-1 text-xs md:text-sm ${thesis.timeframe_alignment === "full" ? "text-green-700 bg-green-50" : thesis.timeframe_alignment === "partial" ? "text-amber-700 bg-amber-50" : "text-red-700 bg-red-50"}`}>
+        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-[var(--text-muted)] mb-2">Timeframe Alignment</p>
+        <span className={`info-chip rounded-full px-2 md:px-3 py-0.5 md:py-1 text-xs md:text-sm ${thesis.timeframe_alignment === "full" ? "text-[var(--accent-positive)] bg-[var(--accent-positive-soft)]" : thesis.timeframe_alignment === "partial" ? "text-[var(--accent-warn)] bg-[var(--accent-warn-soft)]" : "text-[var(--accent-danger)] bg-[var(--accent-danger-soft)]"}`}>
           {thesis.timeframe_alignment.charAt(0).toUpperCase() + thesis.timeframe_alignment.slice(1)}
         </span>
       </div>
@@ -134,12 +134,12 @@ export function MarketThesisPanel({ thesis, loading }: MarketThesisPanelProps) {
           <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-gray-500 mb-2">Supporting Evidence</p>
           <div className="space-y-1.5 md:space-y-2">
             {thesis.key_evidence.map((ev, i) => (
-              <div key={i} className="flex items-start gap-2 md:gap-3 p-2 md:p-3 rounded-lg bg-green-50 border border-green-200">
-                <span className="flex-shrink-0 w-4 h-4 md:w-5 md:h-5 rounded-full bg-green-500 text-white text-[10px] md:text-xs flex items-center justify-center mt-0.5">✓</span>
+              <div key={i} className="flex items-start gap-2 md:gap-3 p-2 md:p-3 rounded-lg bg-[var(--accent-positive-soft)] border border-[var(--accent-positive-soft)]">
+                <span className="flex-shrink-0 w-4 h-4 md:w-5 md:h-5 rounded-full bg-[var(--accent-positive)] text-white text-[10px] md:text-xs flex items-center justify-center mt-0.5">✓</span>
                 <div className="min-w-0">
-                  <p className="text-xs md:text-sm font-medium text-green-900">{ev.name}</p>
-                  <p className="text-[10px] md:text-xs text-green-700 mt-0.5">{ev.description}</p>
-                  <p className="text-[10px] md:text-xs text-green-600 mt-1">Strength: {(ev.strength * 100).toFixed(0)}% • {ev.source}</p>
+                  <p className="text-xs md:text-sm font-medium text-[var(--text-strong)]">{ev.name}</p>
+                  <p className="text-[10px] md:text-xs text-[var(--text-body)] mt-0.5">{ev.description}</p>
+                  <p className="text-[10px] md:text-xs text-[var(--accent-positive)] mt-1">Strength: {(ev.strength * 100).toFixed(0)}% • {ev.source}</p>
                 </div>
               </div>
             ))}
@@ -152,13 +152,13 @@ export function MarketThesisPanel({ thesis, loading }: MarketThesisPanelProps) {
           <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-gray-500 mb-2">Counter Evidence</p>
           <div className="space-y-1.5 md:space-y-2">
             {thesis.counter_evidence.map((ev, i) => (
-              <div key={i} className="p-2 md:p-3 rounded-lg bg-red-50 border border-red-200">
+              <div key={i} className="p-2 md:p-3 rounded-lg bg-[var(--accent-danger-soft)] border border-[var(--accent-danger-soft)]">
                 <div className="flex items-start gap-2 md:gap-3">
-                  <span className="flex-shrink-0 w-4 h-4 md:w-5 md:h-5 rounded-full bg-red-500 text-white text-[10px] md:text-xs flex items-center justify-center mt-0.5">✗</span>
+                  <span className="flex-shrink-0 w-4 h-4 md:w-5 md:h-5 rounded-full bg-[var(--accent-danger)] text-white text-[10px] md:text-xs flex items-center justify-center mt-0.5">✗</span>
                   <div className="min-w-0">
-                    <p className="text-xs md:text-sm font-medium text-red-900">{ev.name}</p>
-                    <p className="text-[10px] md:text-xs text-red-700 mt-0.5">{ev.description}</p>
-                    <p className="text-[10px] md:text-xs text-red-600 mt-1">Strength: {(ev.strength * 100).toFixed(0)}% • {ev.source}</p>
+                    <p className="text-xs md:text-sm font-medium text-[var(--text-strong)]">{ev.name}</p>
+                    <p className="text-[10px] md:text-xs text-[var(--text-body)] mt-0.5">{ev.description}</p>
+                    <p className="text-[10px] md:text-xs text-[var(--accent-danger)] mt-1">Strength: {(ev.strength * 100).toFixed(0)}% • {ev.source}</p>
                   </div>
                 </div>
               </div>
@@ -167,9 +167,9 @@ export function MarketThesisPanel({ thesis, loading }: MarketThesisPanelProps) {
         </div>
       )}
 
-      <div className="mt-3 md:mt-4 p-3 md:p-4 rounded-lg bg-blue-50 border border-blue-200">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-blue-700 mb-2">Confidence: {(thesis.confidence * 100).toFixed(0)}%</p>
-        <p className="text-xs md:text-sm text-blue-800">Based on {thesis.key_evidence.length} supporting and {thesis.counter_evidence.length} counter factors</p>
+      <div className="mt-3 md:mt-4 p-3 md:p-4 rounded-lg bg-[var(--accent-ink-soft)] border border-[var(--accent-ink-soft)]">
+        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em] text-[var(--accent-ink)] mb-2">Confidence: {(thesis.confidence * 100).toFixed(0)}%</p>
+        <p className="text-xs md:text-sm text-[var(--text-body)]">Based on {thesis.key_evidence.length} supporting and {thesis.counter_evidence.length} counter factors</p>
       </div>
     </div>
   );

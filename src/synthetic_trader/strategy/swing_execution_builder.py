@@ -139,6 +139,7 @@ def build_swing_execution(
     setup_candles: list[Candle],
     confirmation_candles: list[Candle],
     bias_candles: list[Candle],
+    max_stop_distance_pct: float = 0.05,
 ) -> SwingSignal | None:
     if len(setup_candles) < 20:
         return None
@@ -184,6 +185,17 @@ def build_swing_execution(
 
     if atr_14 > 0 and risk > atr_14 * 6:
         return None
+
+    # Sanity cap: stop distance can never exceed max_stop_distance_pct of entry price.
+    # Prevents broken candle data from producing impossible TP/SL levels.
+    max_stop = entry * max_stop_distance_pct
+    if risk > max_stop:
+        # Re-center stop_loss within the cap
+        if direction == "buy":
+            stop_loss = entry - max_stop
+        else:
+            stop_loss = entry + max_stop
+        risk = abs(entry - stop_loss)
 
     bias_swings = detect_swings(bias_candles, left=3, right=3) if bias_candles else []
     bias_highs = sorted([s.price for s in bias_swings if s.kind == "high"]) if bias_swings else []

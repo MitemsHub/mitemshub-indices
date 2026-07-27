@@ -2,6 +2,13 @@
 
 import React, { useEffect, useState, useCallback } from "react";
 
+type SubprocessHistoryEntry = {
+  label: string;
+  durationMs: number;
+  timestamp: number;
+  success: boolean;
+};
+
 type DiagnosticsData = {
   lastGuardianReason: string | null;
   lastStderr: string | null;
@@ -9,6 +16,9 @@ type DiagnosticsData = {
   lastError: string | null;
   lastUpdatedAt: string | null;
   staleDataSince: number | null;
+  lastSubprocessDurationMs: number | null;
+  lastSubprocessLabel: string | null;
+  subprocessHistory: SubprocessHistoryEntry[];
 };
 
 function formatTimestamp(iso: string | null): string {
@@ -232,6 +242,23 @@ export function PipelineDiagnosticsPanel() {
                     </span>
                   ) : null;
                 })()}
+                {data.lastSubprocessDurationMs != null && (
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[var(--text-label)]">Response:</span>
+                    <span className={`font-mono font-semibold ${
+                      data.lastSubprocessDurationMs > 15000 ? "text-[var(--accent-danger)]" :
+                      data.lastSubprocessDurationMs > 8000 ? "text-[var(--accent-warn)]" :
+                      "text-[var(--accent-positive)]"
+                    }`}>
+                      {(data.lastSubprocessDurationMs / 1000).toFixed(1)}s
+                    </span>
+                    {data.lastSubprocessLabel && (
+                      <span className="text-[10px] text-[var(--text-muted)] font-mono">
+                        ({data.lastSubprocessLabel})
+                      </span>
+                    )}
+                  </span>
+                )}
                 {(data.lastStderr || data.lastError) && (
                   <span className="inline-flex items-center gap-1 rounded-full border border-[var(--accent-danger)] bg-[var(--accent-danger-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-danger)]">
                     <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--accent-danger)]" />
@@ -239,6 +266,24 @@ export function PipelineDiagnosticsPanel() {
                   </span>
                 )}
               </div>
+
+              {/* Subprocess Timing History */}
+              {data.subprocessHistory && data.subprocessHistory.length > 0 && (
+                <DiagnosticsRow
+                  label="Recent Subprocess Calls"
+                  value={data.subprocessHistory
+                    .slice(-5)
+                    .reverse()
+                    .map((e) => {
+                      const time = new Date(e.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+                      const status = e.success ? "✓" : "✗";
+                      const duration = `${(e.durationMs / 1000).toFixed(1)}s`;
+                      return `${status} ${time} ${duration} ${e.label}`;
+                    })
+                    .join("\n")}
+                  monospace
+                />
+              )}
 
               {/* Guardian Reason */}
               {data.lastGuardianReason && (

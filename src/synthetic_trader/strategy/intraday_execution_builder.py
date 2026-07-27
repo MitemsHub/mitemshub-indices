@@ -111,19 +111,36 @@ def select_execution_stop(
     direction: str,
     trigger: TriggerSignal,
     execution_candles: list[Candle],
+    max_stop_distance_pct: float = 0.05,
 ) -> float:
     recent = execution_candles[-6:]
+    entry = trigger.entry
+
     if trigger.trigger_type == "continuation_close":
-        return trigger.failure_level
-    if trigger.trigger_type == "reclaim_pullback":
+        stop = trigger.failure_level
+    elif trigger.trigger_type == "reclaim_pullback":
         if direction == "buy":
-            return min(candle.low for candle in recent[-3:])
-        return max(candle.high for candle in recent[-3:])
-    if trigger.trigger_type == "break_retest_hold":
-        return trigger.failure_level
-    if direction == "buy":
-        return min(candle.low for candle in recent[-4:])
-    return max(candle.high for candle in recent[-4:])
+            stop = min(candle.low for candle in recent[-3:])
+        else:
+            stop = max(candle.high for candle in recent[-3:])
+    elif trigger.trigger_type == "break_retest_hold":
+        stop = trigger.failure_level
+    elif direction == "buy":
+        stop = min(candle.low for candle in recent[-4:])
+    else:
+        stop = max(candle.high for candle in recent[-4:])
+
+    # Sanity cap: stop distance can never exceed max_stop_distance_pct of entry price.
+    # Prevents broken candle data from producing impossible stop levels.
+    max_stop = entry * max_stop_distance_pct
+    stop_distance = abs(entry - stop)
+    if stop_distance > max_stop:
+        if direction == "buy":
+            stop = entry - max_stop
+        else:
+            stop = entry + max_stop
+
+    return stop
 
 
 def select_primary_target(
@@ -152,6 +169,8 @@ def select_primary_target(
     # Sanity cap: travel budget can never exceed 5% of entry price.
     # Prevents broken candle data (e.g. 481-point ranges on a 258 instrument)
     # from producing impossible targets like TP=1,336.
+    # NOTE: This is a data-quality safeguard, NOT a risk management tool.
+    # Stop distance is capped separately via profile.max_stop_distance_pct.
     max_travel = entry * 0.05
     travel_budget = min(travel_budget, max_travel)
 
@@ -220,6 +239,7 @@ def build_intraday_execution(
         direction=direction,
         trigger=trigger,
         execution_candles=execution_candles,
+        max_stop_distance_pct=profile.max_stop_distance_pct,
     )
 
     primary_target = select_primary_target(

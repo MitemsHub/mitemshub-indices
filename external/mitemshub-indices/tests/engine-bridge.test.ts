@@ -86,6 +86,7 @@ describe("runFreshCall engine config", () => {
   });
 
   afterEach(() => {
+    engineBridge.resetTestOverrides();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
     vi.resetModules();
@@ -1125,6 +1126,7 @@ describe("runFreshCall engine config", () => {
 
 describe("prepared-call warmup", () => {
   afterEach(() => {
+    engineBridge.resetTestOverrides();
     vi.useRealTimers();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
@@ -1271,6 +1273,7 @@ describe("prepared-call warmup", () => {
 
 describe("getCurrentPropProfileForRequest", () => {
   afterEach(() => {
+    engineBridge.resetTestOverrides();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });

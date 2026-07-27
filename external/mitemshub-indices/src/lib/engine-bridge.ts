@@ -361,6 +361,14 @@ def _mt5(tp=None, lg=None, pw=None, sv=None):
         mt5.shutdown()
 `;
 
+// ── Fresh call result cache (10s TTL) ────────────────────────
+// Stores the last FreshCallResponse per (symbol, tradingMode, accountMode)
+// so that rapid polls within the same window (e.g. frontend every 10s +
+// guardian every 15s) reuse the fresh result without re-spawning Python.
+// Key: "${symbol}_${tradingMode}_${accountMode}".
+const FRESH_CALL_TTL_MS = 10_000;
+const freshCallCache = createTtlCache<FreshCallResponse>(FRESH_CALL_TTL_MS);
+
 // ── Warmup CSV-change cache (mtime only) ─────────────────────
 // Tracks the last-seen CSV modification time per (symbol,tradingMode)
 // across warmup cycles for the prepared-call re-use decision.
@@ -411,6 +419,7 @@ export { testOverrides };
 export function resetTestOverrides(): void {
   delete testOverrides.isMt5ProcessRunning;
   warmupCsvTimestamps.clear();
+  freshCallCache.clear();
   warmupCacheHits = { R_75: 0, R_100: 0 };
   warmupCacheMisses = { R_75: 0, R_100: 0 };
 }
@@ -2333,6 +2342,20 @@ export async function runFreshCall({
 }): Promise<FreshCallResponse> {
   void propConnection;
 
+  // ── Fresh call cache (10s TTL) ──────────────────────────────
+  // Reuse the last result when rapid polls arrive within the TTL
+  // window. This prevents re-spawning a Python subprocess every
+  // 10 seconds when both /api/calls/latest and /api/calls/guardian
+  // hit the same symbol+mode.  Abort-signal callers (POST /run)
+  // always bypass the cache to guarantee a fresh subprocess.
+  const cacheKey = `${symbol}_${tradingMode}_${accountMode}`;
+  if (!signal) {
+    const cached = freshCallCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+  }
+
   const engineRoot = getConfiguredEngineRoot();
   let result: FreshCallResponse;
 
@@ -2445,6 +2468,17 @@ export async function runFreshCall({
     // History should not break the live call path.
   }
 
+  // ── Cache store / invalidation ──────────────────────────────
+  // Non-signal callers (GET /latest, GET /guardian) store the result
+  // so rapid polls reuse it within the 10s TTL window.
+  // Signal callers (POST /run) invalidate the stale entry so the
+  // next poll spawns a fresh subprocess instead of returning old data.
+  if (!signal) {
+    freshCallCache.set(cacheKey, result);
+  } else {
+    freshCallCache.delete(cacheKey);
+  }
+
   return result;
 }
 
@@ -2452,11 +2486,17 @@ export async function getLatestCall(
   symbol: SymbolCode,
   tradingMode: TradingMode = "sniper",
 ) {
+  // Always run a fresh Python subprocess — never return stale journal data.
+  // The CSV-static fast path (reusePreparedCall: "eligible_only") returns
+  // the latest journal entry when the CSV hasn't changed for 5+ seconds,
+  // but that entry can be a stale "forming" result from an earlier state.
+  // The Refresh button already uses "never" and always works correctly.
   return runFreshCall({
     symbol,
     accountMode: "own_account",
     propAccountState: null,
     tradingMode,
+    reusePreparedCall: "never",
   });
 }
 

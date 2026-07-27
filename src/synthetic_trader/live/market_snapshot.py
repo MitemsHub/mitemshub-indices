@@ -109,6 +109,9 @@ class TradingModePreset:
     swing_execution_timeframe_sec: int = 900
     swing_hold_horizon_minutes: int = 360
     swing_take_profit_rr: float = 3.0
+    # Override per-symbol max_stop_distance_pct when set.  None keeps
+    # the symbol-level default; a float forces a mode-specific cap.
+    max_stop_distance_pct: float | None = None
 
 
 TRADING_MODE_PRESETS = {
@@ -128,6 +131,7 @@ TRADING_MODE_PRESETS = {
         swing_execution_timeframe_sec=900,
         swing_hold_horizon_minutes=360,
         swing_take_profit_rr=3.5,
+        max_stop_distance_pct=0.06,  # wider cap for swing trades
     ),
     "active_trader": TradingModePreset(
         confidence_above=0.34,
@@ -142,6 +146,7 @@ TRADING_MODE_PRESETS = {
         symbol_min_history_candles=15,
         symbol_min_primary_reward_risk=0.85,
         execution_mode="intraday",
+        max_stop_distance_pct=0.03,  # tighter cap for faster exits
     ),
 }
 
@@ -162,6 +167,7 @@ def build_mode_config(base: TraderConfig, preset: TradingModePreset) -> TraderCo
                     "hold_bars_setup",
                     "intraday_hold_horizon_minutes",
                     "take_profit_rr",
+                    "max_stop_distance_pct",
                 }
             },
             symbol=profile.symbol,
@@ -172,6 +178,11 @@ def build_mode_config(base: TraderConfig, preset: TradingModePreset) -> TraderCo
             hold_bars_setup=profile.hold_bars_bias,
             intraday_hold_horizon_minutes=preset.swing_hold_horizon_minutes,
             take_profit_rr=preset.swing_take_profit_rr,
+            max_stop_distance_pct=(
+                preset.max_stop_distance_pct
+                if preset.max_stop_distance_pct is not None
+                else profile.max_stop_distance_pct
+            ),
         )
         for symbol, profile in base.symbols.items()
     }
@@ -1157,7 +1168,17 @@ def analyze_live_snapshot(
     if csv_ticks and len(csv_ticks) > len(all_ticks):
         epoch_set = {t.epoch for t in all_ticks}
         fresh = [t for t in csv_ticks if t.epoch not in epoch_set]
-        all_ticks = sorted(all_ticks + fresh, key=lambda t: t.epoch)
+        all_ticks = all_ticks + fresh
+
+    # ── Sort ticks by epoch ──────────────────────────────────────
+    # CSV ticks can arrive out of chronological order (e.g. when
+    # _read_tail_ticks reads the file tail and ticks were written
+    # non-monotonically by MT5).  Out-of-order ticks cause the
+    # CandleBuilder to create a new candle for each backward jump,
+    # producing 4H candles with 481-point ranges on a 258-priced
+    # instrument.  Sorting once here is O(n log n) vs the O(n²)
+    # damage of per-tick candle creation.
+    all_ticks.sort(key=lambda t: t.epoch)
 
     # ── Price sanity check ───────────────────────────────────────
     price_check = validate_tick_prices(symbol, all_ticks)

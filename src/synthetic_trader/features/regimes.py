@@ -6,7 +6,7 @@ from synthetic_trader.features.indicators import candle_feature_set
 
 def classify_regime(candles: list[Candle]) -> tuple[Regime, dict[str, float], tuple[str, ...]]:
     features = candle_feature_set(candles)
-    if len(candles) < 30:
+    if len(candles) < 5:
         return Regime.UNKNOWN, features, ("insufficient regime history",)
 
     slope = features.get("slope_20_atr", 0.0)
