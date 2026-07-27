@@ -14,11 +14,6 @@ import {
 
 type Tick = { epoch: number; price: number };
 
-type TicksResponse = {
-  ticks: { R_75: Tick[]; R_100: Tick[] };
-  timestamp: number;
-};
-
 type ChartDataPoint = {
   time: string;
   V75: number | null;
@@ -26,7 +21,12 @@ type ChartDataPoint = {
   epoch: number;
 };
 
-const POLL_INTERVAL_MS = 3_000;
+type SSEEvent =
+  | { type: "initial"; symbol: string; ticks: Tick[]; timestamp: number }
+  | { type: "tick"; symbol: string; tick: Tick; timestamp: number }
+  | { type: "ready"; timestamp: number }
+  | { type: "heartbeat"; timestamp: number }
+  | { type: "error"; message: string };
 
 function formatTime(epoch: number): string {
   const d = new Date(epoch * 1000);
@@ -96,41 +96,155 @@ function findLastNonNull<T extends Record<string, unknown>>(arr: T[], key: keyof
   return null;
 }
 
-export function PriceChart() {
+/**
+ * Custom hook for streaming tick data via SSE.
+ * Falls back to polling if SSE connection fails,
+ * then retries SSE with exponential backoff (30s → 60s → 120s → 300s).
+ */
+function useTickStream(limit = 100) {
   const [data, setData] = useState<ChartDataPoint[]>([]);
   const [lastUpdate, setLastUpdate] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const fallbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptRef = useRef(0);
 
-  const fetchTicks = useCallback(async () => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
+  // Store accumulated ticks per symbol for incremental updates
+  const ticksRef = useRef<{ R_75: Tick[]; R_100: Tick[] }>({ R_75: [], R_100: [] });
 
+  const updateData = useCallback(() => {
+    const merged = mergeTicks(ticksRef.current.R_75, ticksRef.current.R_100, limit);
+    setData(merged);
+    setLastUpdate(new Date().toLocaleTimeString());
+  }, [limit]);
+
+  // Fallback polling function
+  const pollTicks = useCallback(async () => {
     try {
-      const res = await fetch("/api/ticks", { signal: controller.signal });
+      const res = await fetch("/api/ticks");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json: TicksResponse = await res.json();
-
-      const merged = mergeTicks(json.ticks.R_75, json.ticks.R_100);
-      setData(merged);
-      setLastUpdate(new Date().toLocaleTimeString());
+      const json = await res.json();
+      ticksRef.current = json.ticks;
+      updateData();
       setError(null);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
+    } catch {
       setError("Failed to load tick data");
     }
-  }, []);
+  }, [updateData]);
+
+  // Schedule SSE reconnection with exponential backoff
+  const scheduleReconnect = useCallback(() => {
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+
+    // Exponential backoff: 30s → 60s → 120s → 300s (max 5 minutes)
+    const delays = [30_000, 60_000, 120_000, 300_000];
+    const attempt = reconnectAttemptRef.current;
+    const delay = delays[Math.min(attempt, delays.length - 1)];
+
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectAttemptRef.current += 1;
+      startSSE();
+    }, delay);
+  }, []); // scheduleReconnect references startSSE via closure
+
+  // Start SSE connection
+  const startSSE = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+    }
+
+    const es = new EventSource(`/api/ticks?stream=true&limit=${limit}`);
+    eventSourceRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const data: SSEEvent = JSON.parse(event.data);
+
+        switch (data.type) {
+          case "initial":
+            // Replace ticks for this symbol with initial data
+            ticksRef.current[data.symbol as keyof typeof ticksRef.current] = data.ticks;
+            updateData();
+            setError(null);
+            break;
+
+          case "tick":
+            // Append new tick to the accumulator
+            const symbolKey = data.symbol as keyof typeof ticksRef.current;
+            const existingTicks = ticksRef.current[symbolKey];
+            // Avoid duplicates by checking epoch
+            if (existingTicks.length === 0 || existingTicks[existingTicks.length - 1].epoch < data.tick.epoch) {
+              existingTicks.push(data.tick);
+              // Keep only the last `limit` ticks
+              if (existingTicks.length > limit * 2) {
+                ticksRef.current[symbolKey] = existingTicks.slice(-limit);
+              }
+              updateData();
+              setError(null);
+            }
+            break;
+
+          case "ready":
+            setIsStreaming(true);
+            setError(null);
+            // Reset reconnect counter on successful connection
+            reconnectAttemptRef.current = 0;
+            // Stop polling fallback if it was running
+            if (fallbackIntervalRef.current) {
+              clearInterval(fallbackIntervalRef.current);
+              fallbackIntervalRef.current = null;
+            }
+            break;
+
+          case "heartbeat":
+            // Connection is alive
+            break;
+
+          case "error":
+            setError(data.message);
+            break;
+        }
+      } catch {
+        // Ignore parse errors
+      }
+    };
+
+    es.onerror = () => {
+      // SSE connection failed — fall back to polling
+      setIsStreaming(false);
+      es.close();
+      eventSourceRef.current = null;
+
+      // Start polling as fallback
+      if (!fallbackIntervalRef.current) {
+        void pollTicks();
+        fallbackIntervalRef.current = setInterval(() => void pollTicks(), 3000);
+      }
+
+      // Schedule SSE reconnection with backoff
+      scheduleReconnect();
+    };
+  }, [limit, updateData, pollTicks, scheduleReconnect]);
 
   useEffect(() => {
-    void fetchTicks();
-    const id = setInterval(() => void fetchTicks(), POLL_INTERVAL_MS);
+    // Try SSE first
+    startSSE();
+
     return () => {
-      clearInterval(id);
-      abortRef.current?.abort();
+      eventSourceRef.current?.close();
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (fallbackIntervalRef.current) clearInterval(fallbackIntervalRef.current);
     };
-  }, [fetchTicks]);
+  }, [startSSE]);
+
+  return { data, lastUpdate, error, isStreaming };
+}
+
+export function PriceChart() {
+  const { data, lastUpdate, error, isStreaming } = useTickStream(100);
+  const [collapsed, setCollapsed] = useState(false);
 
   // Compute price range for Y-axis domain (memoized to avoid re-computation on every render)
   const [yMin, yMax] = useMemo(() => {
@@ -151,8 +265,8 @@ export function PriceChart() {
   }, [data]);
 
   // Latest prices for collapsed view — find last non-null value for each symbol
-  const latestV75 = useMemo(() => findLastNonNull(data, "V75"), [data]);
-  const latestV100 = useMemo(() => findLastNonNull(data, "V100"), [data]);
+  const latestV75 = useMemo(() => findLastNonNull(data, "V75") as number | null, [data]);
+  const latestV100 = useMemo(() => findLastNonNull(data, "V100") as number | null, [data]);
 
   // Previous prices for change calculation — iterate backwards from data.length - 3
   const prevV75 = useMemo(() => {
@@ -212,9 +326,9 @@ export function PriceChart() {
               {lastUpdate}
             </span>
           )}
-          <span className="status-badge status-badge--confirmed">
-            <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent-positive)] animate-pulse" />
-            Live
+          <span className={`status-badge ${isStreaming ? "status-badge--confirmed" : "status-badge--warning"}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${isStreaming ? "bg-[var(--accent-positive)]" : "bg-[var(--accent-warn)]"} animate-pulse`} />
+            {isStreaming ? "Live" : "Polling"}
           </span>
         </div>
       </button>

@@ -469,6 +469,12 @@ body::after {
     border: 1px solid rgba(15, 107, 87, 0.18);
   }
 
+  .status-badge--warning {
+    background: rgba(184, 134, 11, 0.1);
+    color: var(--accent-warn);
+    border: 1px solid rgba(184, 134, 11, 0.18);
+  }
+
   .status-badge--actionable {
     background: rgba(31, 75, 153, 0.08);
     color: var(--accent-ink);
