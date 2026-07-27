@@ -260,7 +260,7 @@ export function TradeConfirmModal({
                 <span>
                   R:R{" "}
                   <span className="font-semibold text-[var(--text-strong)]">
-                    {editEntry !== editStopLoss ? Math.abs(editTakeProfit - editEntry) / Math.abs(editEntry - editStopLoss) : "—"}
+                    {editEntry !== editStopLoss ? (Math.abs(editTakeProfit - editEntry) / Math.abs(editEntry - editStopLoss)).toFixed(1) : "—"}
                   </span>
                 </span>
               </div>
