@@ -1,15 +1,18 @@
 import { NextResponse } from "next/server";
 import { getConfiguredEngineRoot } from "../../../src/lib/engine-bridge";
+import {
+  MAX_SSE_CONNECTIONS,
+  getActiveSseConnections,
+  incrementSseConnections,
+  decrementSseConnections,
+  recordSseStateChange,
+  recordCacheHit,
+  recordCacheMiss,
+} from "../../../src/lib/sse-state";
 import { open, stat, watch } from "node:fs/promises";
 import { join } from "node:path";
 
 type Tick = { epoch: number; price: number };
-
-// ── SSE connection limit ─────────────────────────────────────
-// Prevents resource exhaustion from many browser tabs or reconnection
-// loops each spawning file watchers and polling intervals.
-const MAX_SSE_CONNECTIONS = 5;
-let activeSseConnections = 0;
 
 // ── Byte-offset cache for incremental tick reads ─────────────
 // Tracks the last-known file size per CSV path so `readLastLine`
@@ -127,6 +130,13 @@ async function readLastLine(csvPath: string): Promise<Tick | null> {
 
       const tick = lastLine ? parseTickLine(lastLine) : null;
 
+      // Track cache hit/miss for diagnostics
+      if (cached && fileSize === cached.lastFileSize && mtime === cached.lastMtime) {
+        recordCacheHit();
+      } else {
+        recordCacheMiss();
+      }
+
       // Update cache
       tickByteCache.set(csvPath, {
         lastFileSize: fileSize,
@@ -225,11 +235,11 @@ export async function GET(request: Request) {
   // new ticks incrementally. Connection closes on client disconnect.
 
   // Reject if too many concurrent SSE connections
-  if (activeSseConnections >= MAX_SSE_CONNECTIONS) {
+  if (getActiveSseConnections() >= MAX_SSE_CONNECTIONS) {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       start(controller) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "error", message: `Too many SSE connections (${activeSseConnections}/${MAX_SSE_CONNECTIONS}). Close other tabs and try again.` })}\n\n`));
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "error", message: `Too many SSE connections (${getActiveSseConnections()}/${MAX_SSE_CONNECTIONS}). Close other tabs and try again.` })}\n\n`));
         controller.close();
       },
     });
@@ -243,7 +253,8 @@ export async function GET(request: Request) {
     });
   }
 
-  activeSseConnections += 1;
+  incrementSseConnections();
+  recordSseStateChange({ state: "connected", timestamp: Date.now() });
 
   const encoder = new TextEncoder();
   const symbols = ["R_75", "R_100"] as const;
@@ -257,14 +268,10 @@ export async function GET(request: Request) {
       const intervals: NodeJS.Timeout[] = [];
 
       // Register abort handler FIRST to ensure cleanup even if initial await throws
-      // Decrement counter when stream ends for any reason (abort, server error, etc.)
-      const releaseConnection = () => {
-        activeSseConnections = Math.max(0, activeSseConnections - 1);
-      };
-
       request.signal.addEventListener("abort", () => {
         for (const id of intervals) clearInterval(id);
-        releaseConnection();
+        decrementSseConnections();
+        recordSseStateChange({ state: "disconnected", timestamp: Date.now() });
         try {
           controller.close();
         } catch {

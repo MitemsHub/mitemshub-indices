@@ -21,6 +21,20 @@ type DiagnosticsData = {
   subprocessHistory: SubprocessHistoryEntry[];
 };
 
+type SseStateTransition = {
+  state: "connected" | "disconnected" | "error";
+  timestamp: number;
+  message?: string;
+};
+
+type SseStatusData = {
+  activeConnections: number;
+  maxConnections: number;
+  stateHistory: SseStateTransition[];
+  cacheStats: { hits: number; misses: number; hitRatio: number };
+  uptime: number;
+};
+
 function formatTimestamp(iso: string | null): string {
   if (!iso) return "Never";
   const d = new Date(iso);
@@ -87,6 +101,7 @@ export function PipelineDiagnosticsPanel() {
   const [fetchError, setFetchError] = useState(false);
   const [collecting, setCollecting] = useState(false);
   const [collectResult, setCollectResult] = useState<string | null>(null);
+  const [sseStatus, setSseStatus] = useState<SseStatusData | null>(null);
 
   // useCallback keeps a stable reference for the useEffect dependency.
   // Without it, the effect would re-run on every render.
@@ -104,7 +119,21 @@ export function PipelineDiagnosticsPanel() {
 
   useEffect(() => {
     void fetchDiagnostics();
-    const interval = setInterval(fetchDiagnostics, 10_000);
+    const fetchSseStatus = async () => {
+      try {
+        const res = await fetch("/api/system/sse-status");
+        if (res.ok) {
+          setSseStatus(await res.json());
+        }
+      } catch {
+        // SSE status unavailable — not critical
+      }
+    };
+    void fetchSseStatus();
+    const interval = setInterval(() => {
+      void fetchDiagnostics();
+      void fetchSseStatus();
+    }, 10_000);
     return () => clearInterval(interval);
   }, [fetchDiagnostics]);
 
@@ -312,6 +341,86 @@ export function PipelineDiagnosticsPanel() {
                   monospace
                   collapsed={data.lastStderr.length > 200}
                 />
+              )}
+
+              {/* SSE Connection Status */}
+              {sseStatus && (
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-label)] font-medium">
+                    SSE Streaming
+                  </p>
+                  <div className="flex flex-wrap items-center gap-3 text-[11px]">
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-[var(--text-label)]">Connections:</span>
+                      <span className={`font-mono font-semibold ${
+                        sseStatus.activeConnections >= sseStatus.maxConnections
+                          ? "text-[var(--accent-danger)]"
+                          : sseStatus.activeConnections > 0
+                            ? "text-[var(--accent-positive)]"
+                            : "text-[var(--text-body)]"
+                      }`}>
+                        {sseStatus.activeConnections}/{sseStatus.maxConnections}
+                      </span>
+                    </span>
+                    {sseStatus.cacheStats && (
+                      <span className="flex items-center gap-1.5">
+                        <span className="text-[var(--text-label)]">Cache:</span>
+                        <span className="font-mono text-[var(--text-body)]">
+                          {Math.round(sseStatus.cacheStats.hitRatio * 100)}% hit
+                        </span>
+                        <span className="text-[10px] text-[var(--text-muted)]">
+                          ({sseStatus.cacheStats.hits}h/{sseStatus.cacheStats.misses}m)
+                        </span>
+                      </span>
+                    )}
+                    {sseStatus.uptime > 0 && (
+                      <span className="flex items-center gap-1.5">
+                        <span className="text-[var(--text-label)]">Uptime:</span>
+                        <span className="font-mono text-[var(--text-body)]">
+                          {sseStatus.uptime < 60_000
+                            ? `${Math.floor(sseStatus.uptime / 1000)}s`
+                            : sseStatus.uptime < 3_600_000
+                              ? `${Math.floor(sseStatus.uptime / 60_000)}m`
+                              : `${(sseStatus.uptime / 3_600_000).toFixed(1)}h`}
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                  {sseStatus.stateHistory.length > 0 && (
+                    <div className="rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel-muted)] px-2.5 py-2">
+                      <p className="text-[10px] text-[var(--text-label)] mb-1.5 font-medium uppercase tracking-[0.12em]">
+                        Connection History
+                      </p>
+                      <div className="space-y-0.5">
+                        {sseStatus.stateHistory
+                          .slice(-8)
+                          .reverse()
+                          .map((entry, i) => {
+                            const time = new Date(entry.timestamp).toLocaleTimeString("en-US", {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                              second: "2-digit",
+                            });
+                            const icon = entry.state === "connected" ? "●" : entry.state === "disconnected" ? "○" : "✗";
+                            const color = entry.state === "connected"
+                              ? "text-[var(--accent-positive)]"
+                              : entry.state === "disconnected"
+                                ? "text-[var(--text-muted)]"
+                                : "text-[var(--accent-danger)]";
+                            return (
+                              <div key={i} className="flex items-center gap-2 text-[10px] font-mono">
+                                <span className={color}>{icon}</span>
+                                <span className="text-[var(--text-muted)]">{time}</span>
+                                <span className="text-[var(--text-body)]">
+                                  {entry.state === "connected" ? "Connected" : entry.state === "disconnected" ? "Disconnected" : entry.message || "Error"}
+                                </span>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
 
               {/* Collect Fresh Ticks button */}
