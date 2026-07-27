@@ -301,6 +301,25 @@ export function PriceChart() {
   const prevConnectionLostRef = useRef(false);
   const [toast, setToast] = useState<{ message: string; type: ToastType } | null>(null);
   const prevWasStreamingRef = useRef(false);
+  const [rollingUptime, setRollingUptime] = useState<number | null>(null);
+
+  // Fetch rolling uptime from /api/system/sse-status every 15 seconds
+  useEffect(() => {
+    const fetchUptime = async () => {
+      try {
+        const res = await fetch("/api/system/sse-status");
+        if (res.ok) {
+          const json = await res.json();
+          setRollingUptime(json.rollingUptime ?? null);
+        }
+      } catch {
+        // Uptime display is non-critical
+      }
+    };
+    void fetchUptime();
+    const interval = setInterval(fetchUptime, 15_000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Track connectionLost transitions (single effect to avoid ref race condition)
   const prevConnectionLost = prevConnectionLostRef.current;
@@ -421,6 +440,15 @@ export function PriceChart() {
               </button>
             ) : reconnecting ? "Reconnecting…" : isStreaming ? "Live" : "Polling"}
           </span>
+          {rollingUptime !== null && !connectionLost && (
+            <span className={`text-[10px] font-mono font-semibold ${
+              rollingUptime >= 95 ? "text-[var(--accent-positive)]" :
+              rollingUptime >= 70 ? "text-[var(--accent-warn)]" :
+              "text-[var(--accent-danger)]"
+            }`}>
+              {rollingUptime}%
+            </span>
+          )}
         </div>
       </button>
 
