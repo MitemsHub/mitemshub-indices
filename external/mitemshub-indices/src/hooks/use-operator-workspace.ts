@@ -143,6 +143,13 @@ export function useOperatorWorkspace() {
   const abortRef = useRef<AbortController | null>(null);
   const successToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Clean up success toast timer on unmount
+  useEffect(() => {
+    return () => {
+      if (successToastTimerRef.current) clearTimeout(successToastTimerRef.current);
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 

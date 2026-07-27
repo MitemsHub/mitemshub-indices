@@ -63,7 +63,13 @@ export function TradeConfirmModal({
   if (!open) return null;
 
   const isLive = executionMode === "live_mt5";
+  const isBuy = call.direction_bias === "buy";
   const direction = call.direction_bias?.toUpperCase() ?? "UNKNOWN";
+  const levelsValid = editEntry > 0 && editStopLoss > 0 && editTakeProfit > 0
+    ? isBuy
+      ? editStopLoss < editEntry && editTakeProfit > editEntry
+      : editStopLoss > editEntry && editTakeProfit < editEntry
+    : false;
   const directionColor =
     call.direction_bias === "buy"
       ? "var(--accent-positive)"
@@ -266,6 +272,17 @@ export function TradeConfirmModal({
               </div>
             )}
 
+            {/* Directional validation hint */}
+            {!levelsValid && editEntry > 0 && (
+              <div className="rounded-lg border border-[var(--accent-warn)] bg-[var(--accent-warn-soft)] px-4 py-2.5">
+                <p className="text-xs text-[var(--accent-warn)]">
+                  {isBuy
+                    ? "For a BUY: Stop Loss must be below Entry, Take Profit above Entry."
+                    : "For a SELL: Stop Loss must be above Entry, Take Profit below Entry."}
+                </p>
+              </div>
+            )}
+
             {/* Live warning */}
             {isLive && !executionError && (
               <div className="rounded-xl border border-[var(--accent-danger)] bg-[var(--accent-danger-soft)] px-4 py-3">
@@ -331,7 +348,7 @@ export function TradeConfirmModal({
             <button
               ref={confirmBtnRef}
               type="button"
-              disabled={!acknowledged || countdown > 0}
+              disabled={!acknowledged || countdown > 0 || !levelsValid}
               onClick={() => onConfirm({ entry: editEntry, stopLoss: editStopLoss, takeProfit: editTakeProfit })}
               className={`flex-1 rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition-all ${
                 isLive
