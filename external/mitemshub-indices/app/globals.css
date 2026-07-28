@@ -1713,10 +1713,8 @@ button:focus:not(:focus-visible) {
 
 /* Hamburger button — visible only on small screens */
 .hamburger-btn {
-  position: fixed;
-  top: 1rem;
-  right: 3.75rem;
-  z-index: 997;
+  position: relative;
+  z-index: 41;
   display: none;
   align-items: center;
   justify-content: center;
@@ -1728,7 +1726,7 @@ button:focus:not(:focus-visible) {
   color: var(--text-body);
   cursor: pointer;
   box-shadow: var(--shadow-card);
-  backdrop-filter: blur(8px);
+  flex-shrink: 0;
   transition:
     background 180ms var(--ease-out),
     border-color 180ms var(--ease-out),
@@ -1787,7 +1785,17 @@ button:focus:not(:focus-visible) {
 }
 
 .mobile-nav--open {
+  visibility: visible;
+  pointer-events: auto;
   transform: translateX(0);
+  transition: visibility 0s linear 0s, transform 420ms var(--ease-bounce);
+}
+
+.mobile-nav--hidden {
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(100%);
+  transition: visibility 0s linear 420ms, transform 420ms var(--ease-bounce);
 }
 
 .mobile-nav .close-btn {

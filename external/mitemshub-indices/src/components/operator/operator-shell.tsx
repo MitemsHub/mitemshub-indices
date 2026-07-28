@@ -22,8 +22,7 @@ import { IntelAccordion } from "./intel-accordion";
 import { IntelPanelToggles } from "./intel-panel-toggles";
 import { HealthDashboard } from "./health-dashboard";
 import { PipelineDiagnosticsPanel } from "./pipeline-diagnostics-panel";
-import { NotificationBell } from "./notification-bell";
-import { ThemeToggle } from "../theme-toggle";
+import { CombinedMenuButton } from "./combined-menu-button";
 import { TABS, type IntelPanelId, resolveEnabledPanels, readIntelPanelOverrides } from "../../lib/constants";
 import { PriceChart } from "../charts/PriceChart";
 
@@ -180,35 +179,42 @@ export function OperatorShell() {
   return (
     <main className="app-shell" aria-busy={isLoading}>
       {/* ── Hamburger Nav (mobile only) ──────────────────────────── */}
-      <HamburgerNav
-        open={mobileNavOpen}
-        activeSymbol={workspace.activeSymbol}
-        currentCall={workspace.currentCall}
-        accountMode={workspace.accountMode}
-        tradingMode={workspace.tradingMode}
-        executionMode={workspace.executionMode}
-        onOpen={() => setMobileNavOpen(true)}
-        onClose={() => setMobileNavOpen(false)}
-        onSetAccountMode={workspace.setAccountMode}
-        onRequestPropMode={workspace.requestPropMode}
-        onSetTradingMode={workspace.setTradingMode}
-        onSetExecutionMode={workspace.setExecutionMode}
-      />
-
       <div
         className="shell-frame mx-auto max-w-7xl px-4 py-4 md:px-6 md:py-6"
         {...(!isDesktop ? pullHandlers : {})}
       >
-        {/* ── Notification bell ──────────────────────────────────── */}
+        {/* ── Header: single combined menu button ── */}
         <div className="sticky top-0 z-40 flex items-center justify-end mb-2 py-1 -mx-4 px-4 md:mx-0 md:px-0 bg-[var(--bg-canvas)] md:bg-transparent backdrop-blur-sm md:backdrop-blur-none">
-          <NotificationBell
-            permission={workspace.notifications.permission}
-            prefs={workspace.notifications.prefs}
-            isSupported={workspace.notifications.isSupported}
-            onEnable={workspace.notifications.enable}
-            onTogglePref={workspace.notifications.togglePref}
+          <CombinedMenuButton
+            onOpenSettings={() => setMobileNavOpen(true)}
+            notificationPermission={workspace.notifications.permission}
+            notificationPrefs={workspace.notifications.prefs}
+            onEnableNotifications={workspace.notifications.enable}
+            onToggleNotificationPref={workspace.notifications.togglePref}
+            onToggleTheme={() => {
+              const html = document.documentElement;
+              const current = html.getAttribute("data-theme") || "light";
+              html.setAttribute("data-theme", current === "dark" ? "light" : "dark");
+            }}
+            currentTheme={typeof window !== "undefined" ? (document.documentElement.getAttribute("data-theme") || "light") : "light"}
           />
-          <ThemeToggle />
+        </div>
+        {/* Hidden HamburgerNav — renders settings drawer via portal */}
+        <div className="sr-only" aria-hidden="true">
+          <HamburgerNav
+            open={mobileNavOpen}
+            activeSymbol={workspace.activeSymbol}
+            currentCall={workspace.currentCall}
+            accountMode={workspace.accountMode}
+            tradingMode={workspace.tradingMode}
+            executionMode={workspace.executionMode}
+            onOpen={() => setMobileNavOpen(true)}
+            onClose={() => setMobileNavOpen(false)}
+            onSetAccountMode={workspace.setAccountMode}
+            onRequestPropMode={workspace.requestPropMode}
+            onSetTradingMode={workspace.setTradingMode}
+            onSetExecutionMode={workspace.setExecutionMode}
+          />
         </div>
 
         {/* ── Pull-to-refresh indicator (mobile only) ────────────── */}

@@ -12,6 +12,7 @@ from synthetic_trader.backtest.engine import BacktestEngine, load_ticks_csv
 from synthetic_trader.config import LiveMode, Mt5Config, PaperExecutionConfig, TraderConfig, Venue
 from synthetic_trader.data.collector import collect_history
 from synthetic_trader.data.tick_store import TickDatasetReport, inspect_ticks
+from synthetic_trader.data.migrate_csv import migrate_legacy_csv
 from synthetic_trader.execution.mt5 import (
     Mt5OrderRequest,
     evaluate_mt5_runtime,
