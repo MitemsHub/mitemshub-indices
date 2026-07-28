@@ -34,6 +34,67 @@ function StatusBadge({ state }: { state: FreshCallResponse["guardian_state"] }) 
   return <span className={`status-badge ${cls}`}>{formatGuardianState(state)}</span>;
 }
 
+function SignalStrengthBadge({ strength }: { strength: FreshCallResponse["signal_strength"] }) {
+  if (!strength) return null;
+  const config: Record<string, { label: string; cls: string; icon: string; tooltip: string }> = {
+    strong_buy: {
+      label: "STRONG BUY",
+      cls: "bg-emerald-100 text-emerald-800 border-emerald-300 ring-1 ring-emerald-200",
+      icon: "◆",
+      tooltip: "High-confidence long — full execution",
+    },
+    weak_buy: {
+      label: "WEAK BUY",
+      cls: "bg-amber-50 text-amber-700 border-amber-300",
+      icon: "⚠",
+      tooltip: "Moderate-confidence long — reduced position sizing",
+    },
+    wait: {
+      label: "MONITORING",
+      cls: "bg-gray-100 text-gray-500 border-gray-200",
+      icon: "○",
+      tooltip: "Confidence below threshold — monitoring market",
+    },
+    weak_sell: {
+      label: "WEAK SELL",
+      cls: "bg-amber-50 text-amber-700 border-amber-300",
+      icon: "⚠",
+      tooltip: "Moderate-confidence short — reduced position sizing",
+    },
+    strong_sell: {
+      label: "STRONG SELL",
+      cls: "bg-rose-100 text-rose-800 border-rose-300 ring-1 ring-rose-200",
+      icon: "◆",
+      tooltip: "High-confidence short — full execution",
+    },
+  };
+  const c = config[strength] ?? config.wait;
+  const isStrong = strength.startsWith("strong");
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${c.cls}${isStrong ? " animate-pulse" : ""}`}
+      title={c.tooltip}
+    >
+      <span className="text-xs">{c.icon}</span>
+      {c.label}
+    </span>
+  );
+}
+
+function PositionSizingBadge({ sizing }: { sizing: FreshCallResponse["position_sizing"] }) {
+  if (!sizing || sizing === "none") return null;
+  const config: Record<string, { label: string; cls: string }> = {
+    full: { label: "Full Size", cls: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+    half: { label: "Half Size", cls: "bg-amber-50 text-amber-700 border-amber-200" },
+  };
+  const c = config[sizing] ?? { label: sizing, cls: "bg-gray-100 text-gray-500 border-gray-200" };
+  return (
+    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${c.cls}`}>
+      {c.label}
+    </span>
+  );
+}
+
 export function TradeInstructionPanel({
   call,
   guardianStatus,
@@ -98,13 +159,64 @@ export function TradeInstructionPanel({
             {formatMarketCopy(call.decision_summary ?? call.why)}
           </p>
 
+          {/* ── Graduated signal strength banner ────────────────── */}
+          {call?.signal_strength && (
+            <div className={`rounded-xl border px-4 py-3 flex items-center gap-3 transition-colors ${
+              call.signal_strength === "strong_buy"
+                ? "border-emerald-300 bg-emerald-50/80"
+                : call.signal_strength === "strong_sell"
+                  ? "border-rose-300 bg-rose-50/80"
+                  : call.signal_strength === "wait"
+                    ? "border-gray-200 bg-gray-50/80"
+                    : "border-amber-200 bg-amber-50/80"
+            }`}>
+              <span className={`text-2xl ${
+                call.signal_strength === "strong_buy"
+                  ? "text-emerald-600"
+                  : call.signal_strength === "strong_sell"
+                    ? "text-rose-600"
+                    : call.signal_strength === "wait"
+                      ? "text-gray-400"
+                      : "text-amber-600"
+              }`}> {
+                call.signal_strength === "strong_buy" ? "▲" :
+                call.signal_strength === "strong_sell" ? "▼" :
+                call.signal_strength === "wait" ? "●" :
+                call.signal_strength.includes("buy") ? "△" : "▽"
+              }</span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <SignalStrengthBadge strength={call.signal_strength} />
+                  <PositionSizingBadge sizing={call?.position_sizing ?? null} />
+                </div>
+                <p className={`mt-1 text-xs ${
+                  call.signal_strength.startsWith("strong")
+                    ? "text-emerald-700"
+                    : call.signal_strength === "wait"
+                      ? "text-gray-500"
+                      : "text-amber-700"
+                }`}>
+                  {
+                    call.signal_strength.startsWith("strong")
+                      ? "Full execution ready — confidence meets threshold"
+                      : call.signal_strength === "wait"
+                        ? "No execution — monitoring market conditions"
+                        : "Caution — confidence below full threshold, reduced position sizing"
+                  }
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Setup status card */}
           <div className="info-card rounded-xl p-4">
             <p className="utility-copy text-[10px] uppercase tracking-[0.2em] text-[var(--text-label)]">
               Setup status
             </p>
-            <div className="mt-2 flex items-center gap-2">
+            <div className="mt-2 flex items-center gap-2 flex-wrap">
               <StatusBadge state={effectiveGuardianState} />
+              <SignalStrengthBadge strength={call?.signal_strength ?? null} />
+              <PositionSizingBadge sizing={call?.position_sizing ?? null} />
             </div>
             {guardianReason ? (
               <p className="mt-2 text-xs leading-5 text-[var(--text-body)]">

@@ -1655,6 +1655,8 @@ function mapLiveSnapshot(raw: Record<string, unknown>, symbol: SymbolCode): Base
     model_long_probability: normalizeNumber(raw.model_long_probability),
     risk_state: typeof raw.risk_state === "object" && raw.risk_state !== null ? raw.risk_state as Record<string, unknown> : null,
     trading_mode: normalizeTradingMode(raw.trading_mode),
+    signal_strength: normalizeText(raw.signal_strength) as FreshCallResponse["signal_strength"] ?? null,
+    position_sizing: normalizeText(raw.position_sizing) as FreshCallResponse["position_sizing"] ?? null,
   };
 
   return {
@@ -2086,7 +2088,24 @@ from pathlib import Path
 ${MT5_CTX}
 try:
     with _mt5(tp=${JSON.stringify(configuredTerminal || null)},lg=int(${configuredLogin}),pw=${JSON.stringify(configuredPassword)},sv=${JSON.stringify(configuredServer)}):
-        mt5_symbol = "Volatility ${symbol === "R_75" ? "75" : "100"} Index"
+        # Resolve MT5 symbol — try Blueberry Markets name first, then fallbacks
+        _vol = "75" if "${symbol}" == "R_75" else "100"
+        _candidates = [
+            f"Blueberry Volatility {_vol}",
+            f"Volatility {_vol} Index",
+            f"Volatility {_vol}",
+            f"Vol {_vol} Index",
+            f"Vol {_vol}",
+            f"R_{_vol}",
+        ]
+        mt5_symbol = None
+        for _name in _candidates:
+            if mt5.symbol_info(_name) is not None:
+                mt5_symbol = _name
+                break
+        if mt5_symbol is None:
+            print(json.dumps({"collected": 0, "error": f"Symbol not found. Tried: {', '.join(_candidates)}"}))
+            raise SystemExit(0)
         now = datetime.now()
         ticks = mt5.copy_ticks_from(mt5_symbol, now - timedelta(seconds=15), ${sampleCount})
 
@@ -2857,7 +2876,16 @@ except Exception as e:
   const configuredLogin = process.env.SYNTHETIC_MT5_LOGIN?.trim() ?? "";
   const configuredPassword = process.env.SYNTHETIC_MT5_PASSWORD?.trim() ?? "";
   const configuredTerminal = process.env.SYNTHETIC_MT5_TERMINAL_PATH?.trim() ?? "";
-  const mt5Symbol = `Volatility ${symbol === "R_75" ? "75" : "100"} Index`;
+  // Blueberry Markets uses 'Blueberry Volatility X' — try multiple names for compatibility
+  const volNum = symbol === "R_75" ? "75" : "100";
+  const mt5SymbolCandidates = [
+    `Blueberry Volatility ${volNum}`,
+    `Volatility ${volNum} Index`,
+    `Volatility ${volNum}`,
+    `Vol ${volNum} Index`,
+    `Vol ${volNum}`,
+    `R_${volNum}`,
+  ];
   const volume = mt5Volume ?? 0.01;
 
   const pythonScript = `
@@ -2867,14 +2895,20 @@ ${MT5_CTX}
 
 try:
     with _mt5(tp=${JSON.stringify(configuredTerminal || null)},lg=${configuredLogin},pw=${JSON.stringify(configuredPassword)},sv=${JSON.stringify(configuredServer)}):
-        symbol_info = mt5.symbol_info("${mt5Symbol}")
-        if symbol_info is None:
-            print(json.dumps({"accepted": False, "position_id": None, "entry_price": None, "stop_loss": None, "take_profit": None, "message": "Symbol ${mt5Symbol} not found"}))
+        # Resolve MT5 symbol — try Blueberry Markets name first, then fallbacks
+        _candidates = ${JSON.stringify(mt5SymbolCandidates)}
+        mt5_symbol = None
+        for _name in _candidates:
+            if mt5.symbol_info(_name) is not None:
+                mt5_symbol = _name
+                break
+        if mt5_symbol is None:
+            print(json.dumps({"accepted": False, "position_id": None, "entry_price": None, "stop_loss": None, "take_profit": None, "message": f"Symbol not found. Tried: {', '.join(_candidates)}"}))
             raise SystemExit(0)
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": "${mt5Symbol}",
+            "symbol": mt5_symbol,
             "volume": ${volume},
             "type": mt5.ORDER_TYPE_${direction === "buy" ? "BUY" : "SELL"},
             "price": ${entry},

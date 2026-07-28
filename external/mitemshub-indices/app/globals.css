@@ -2048,10 +2048,8 @@ button:focus:not(:focus-visible) {
   }
 }
 .theme-toggle {
-  position: fixed;
-  top: 1rem;
-  right: 1rem;
-  z-index: 999;
+  position: relative;
+  z-index: 41;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2063,6 +2061,7 @@ button:focus:not(:focus-visible) {
   color: var(--text-body);
   cursor: pointer;
   box-shadow: var(--shadow-card);
+  flex-shrink: 0;
   transition:
     background 180ms var(--ease-out),
     border-color 180ms var(--ease-out),

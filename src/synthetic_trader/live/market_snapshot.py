@@ -14,7 +14,7 @@ from pathlib import Path
 from synthetic_trader.config import ModelConfig, RiskConfig, SymbolProfile, TraderConfig
 from synthetic_trader.data.collector import deriv_credentials_from_env
 from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
-from synthetic_trader.domain import Tick
+from synthetic_trader.domain import Tick, FeatureSnapshot
 from synthetic_trader.execution.deriv_ws import DerivWebSocketClient
 from synthetic_trader.execution.venues import MarketDataClient
 from synthetic_trader.features.assembler import build_snapshot
@@ -28,9 +28,11 @@ from synthetic_trader.live.signal_guardian import (
 from synthetic_trader.models.online import OnlineLogisticModel
 from synthetic_trader.risk.engine import RiskEngine
 from synthetic_trader.strategy.decision_engine import DecisionEngine
+from synthetic_trader.models.advanced import ConfidenceScorer
 from synthetic_trader.data.tick_store import append_ticks_csv
 from synthetic_trader.execution.mt5_data import Mt5TickClient, is_mt5_configured
 from synthetic_trader.config import TraderConfig as _TraderConfig
+from synthetic_trader.live.missed_trade_tracker import MissedTradeTracker
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,123 @@ GUARDIAN_PRESETS = {
 }
 
 DEFAULT_GUARDIAN_THRESHOLDS = SNIPER_GUARDIAN_THRESHOLDS
+
+# ── Missed trade tracker ──────────────────────────────────────
+# Records every NO_TRADE decision and resolves it after 1 hour.
+# The resolved outcomes feed back into CalibrationState so the
+# model improves its probability calibration over time.
+_missed_trade_tracker = MissedTradeTracker()
+
+# Module-level ConfidenceScorer for missed-trade learning.
+# Updated when missed trades are resolved; feeds range-regime boost
+# into future confidence scores so the engine becomes more willing
+# to trade range-bound markets when it keeps missing opportunities.
+_confidence_scorer = ConfidenceScorer(
+    model=None,  # model not needed for range-boost learning
+)
+
+
+# Timestamp of the last missed-trade resolution attempt (module-level).
+_last_missed_resolution_at: float = 0.0
+_MISSED_RESOLUTION_INTERVAL_SEC = 60  # resolve once per minute
+
+
+def _get_atr_14(features: dict[str, float]) -> float:
+    """Extract ATR_14 from features, falling back to 1.0."""
+    return features.get("atr_14", 1.0)
+
+
+def _maybe_record_missed_trade(
+    *,
+    symbol: str,
+    model_long_probability: float | None,
+    confidence: float | None,
+    regime: str,
+    current_close: float | None,
+    features: dict[str, float],
+    bias_buy_threshold: float = 0.55,
+    bias_sell_threshold: float = 0.45,
+) -> None:
+    """Record a NO_TRADE decision for missed-trade calibration.
+
+    Called from analyze_live_snapshot when report.signal is None.
+    The tracker will resolve these records after 1 hour by checking
+    what the market actually did, and feed the results back into
+    CalibrationState.
+    """
+    if current_close is None or current_close <= 0:
+        return
+    if model_long_probability is None:
+        return
+    atr_14 = _get_atr_14(features)
+    direction_bias = _direction_bias_from_probability(
+        model_long_probability,
+        buy_threshold=bias_buy_threshold,
+        sell_threshold=bias_sell_threshold,
+    )
+    _missed_trade_tracker.record(
+        symbol=symbol,
+        model_long_probability=model_long_probability,
+        confidence=confidence,
+        regime=regime,
+        atr_14=atr_14,
+        current_price=current_close,
+        direction_bias=direction_bias,
+        features_summary={
+            k: features[k]
+            for k in (
+                "rsi_14", "slope_20_atr", "hurst_exponent",
+                "displacement_atr", "atr_ratio",
+            )
+            if k in features
+        },
+    )
+
+
+def _maybe_resolve_missed_trades(decision_engine: DecisionEngine) -> None:
+    """Resolve pending missed trade records and feed into calibration.
+
+    Runs at most once per _MISSED_RESOLUTION_INTERVAL_SEC to avoid
+    hammering the CSV on every snapshot.
+    """
+    global _last_missed_resolution_at
+    now = time.time()
+    if (now - _last_missed_resolution_at) < _MISSED_RESOLUTION_INTERVAL_SEC:
+        return
+    if _missed_trade_tracker.pending_count == 0:
+        return
+    _last_missed_resolution_at = now
+
+    def _price_lookup(symbol: str) -> list[tuple[float, float]]:
+        ticks = _load_csv_ticks(symbol)
+        if not ticks:
+            return []
+        return [(t.epoch, t.price) for t in ticks]
+
+    def _update_calibration(prediction: float, outcome: int) -> None:
+        decision_engine.update_calibration(prediction, outcome)
+
+    result = _missed_trade_tracker.resolve(
+        price_lookup=_price_lookup,
+        update_calibration=_update_calibration,
+    )
+    if result.resolved_count > 0:
+        # Feed missed trade stats into the ConfidenceScorer so it learns
+        # to boost range-regime scores when the engine keeps missing.
+        _confidence_scorer.update_missed_trade_stats(
+            missed_opportunities=result.missed_opportunities,
+            correct_stayouts=result.correct_stayouts,
+        )
+        boost = _confidence_scorer.missed_trade_boost
+        logging.info(
+            "[missed_trade] resolved %d records: %d missed opportunities, "
+            "%d correct stay-outs, %d failed | range_boost=%.3f",
+            result.resolved_count,
+            result.missed_opportunities,
+            result.correct_stayouts,
+            result.failed_resolutions,
+            boost,
+        )
 
 
 @dataclass(frozen=True)
@@ -1128,7 +1247,11 @@ def _read_tail_ticks(csv_path: Path, symbol: str, max_count: int) -> list[Tick]:
         if len(parts) < 3:
             continue
         try:
-            ticks.append(Tick(symbol=symbol, epoch=float(parts[0]), price=float(parts[2])))
+            # Support both legacy (3-col) and rich (6-col) CSV formats
+            spread = float(parts[3]) if len(parts) > 3 else 0.0
+            direction = int(parts[4]) if len(parts) > 4 else 0
+            vol_proxy = float(parts[5]) if len(parts) > 5 else 0.0
+            ticks.append(Tick(symbol=symbol, epoch=float(parts[0]), price=float(parts[2]), spread=spread, tick_direction=direction, volume_proxy=vol_proxy))
         except (ValueError, IndexError):
             continue
         if len(ticks) >= max_count:
@@ -1238,6 +1361,19 @@ def analyze_live_snapshot(
         regime = feature_snapshot.regime.value
         regime_explanation = "; ".join(feature_snapshot.notes) or "regime is still neutral"
         structure_summary = _summarize_structure(dict(feature_snapshot.structure))
+        # Inject missed-trade range boost into features so DecisionEngine
+        # can read it in _regime_component for the RANGE case.
+        _features_mut = dict(feature_snapshot.features)
+        _features_mut["range_miss_boost"] = _confidence_scorer.missed_trade_boost
+        feature_snapshot = FeatureSnapshot(
+            symbol=feature_snapshot.symbol,
+            epoch=feature_snapshot.epoch,
+            timeframe_sec=feature_snapshot.timeframe_sec,
+            features=_features_mut,
+            regime=feature_snapshot.regime,
+            structure=feature_snapshot.structure,
+            notes=feature_snapshot.notes,
+        )
         model_long_probability = round(
             decision_engine.model.predict_proba(dict(feature_snapshot.features)),
             3,
@@ -1274,8 +1410,9 @@ def analyze_live_snapshot(
             "call": "stand_aside",
             "trade_status": "not_valid",
             "direction_bias": direction_bias,
-            "signal_strength": "wait",
-            "briefing": "current movement is active but not a clean setup yet",
+        "signal_strength": "wait",
+        "position_sizing": "none",
+        "briefing": "current movement is active but not a clean setup yet",
             "symbol": symbol,
             "trading_mode": mode,
             "regime": regime,
@@ -1307,6 +1444,25 @@ def analyze_live_snapshot(
             snapshot["price_deviation"] = price_check["price_deviation"]
             snapshot["price_warning"] = price_check["price_warning"]
             snapshot["expected_price_range"] = price_check["expected_range"]
+        # ── Record missed trade for calibration feedback ────────
+        # When the engine decides not to trade (signal is None), record the
+        # decision so we can check later if the market moved in the predicted
+        # direction.  This feeds back into CalibrationState so the model
+        # learns from its conservatism over time.
+        try:
+            _maybe_record_missed_trade(
+                symbol=symbol,
+                model_long_probability=model_long_probability,
+                confidence=confidence,
+                regime=regime,
+                current_close=current_close,
+                features=dict(feature_snapshot.features) if primary_candles else {},
+                bias_buy_threshold=preset.bias_buy_threshold,
+                bias_sell_threshold=preset.bias_sell_threshold,
+            )
+            _maybe_resolve_missed_trades(decision_engine)
+        except Exception:
+            pass  # best-effort — never crash the snapshot
         return build_guardian_snapshot(snapshot, ticks, guardian_thresholds, trading_mode=mode)
 
     risk_engine = RiskEngine(config.risk)
@@ -1327,6 +1483,7 @@ def analyze_live_snapshot(
         "trade_status": "valid" if risk_decision.approved else "not_valid",
         "direction_bias": direction_bias,
         "signal_strength": getattr(report.signal, "signal_strength", "strong"),
+        "position_sizing": getattr(report.signal, "position_sizing", "full"),
         "briefing": "; ".join(report.signal.rationale[:2]),
         "decision_summary": "; ".join(report.signal.rationale),
         "symbol": symbol,

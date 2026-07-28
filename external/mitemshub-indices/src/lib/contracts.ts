@@ -146,6 +146,8 @@ export const freshCallResponseSchema = z.object({
   extended_target: z.number().nullable().optional(),
   hold_horizon_minutes: z.number().int().positive().nullable().optional(),
   execution_trigger_type: z.string().nullable().optional(),
+  signal_strength: z.enum(["strong_buy", "weak_buy", "wait", "weak_sell", "strong_sell"]).nullable().optional(),
+  position_sizing: z.enum(["full", "half", "none"]).nullable().optional(),
   reward_risk: z.number().nullable(),
   current_close: z.number().nullable(),
   guardian_state: z.enum(["forming", "actionable", "confirmed", "failing", "cancelled", "unavailable"]),

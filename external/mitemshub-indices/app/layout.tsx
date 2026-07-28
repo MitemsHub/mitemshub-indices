@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
-import { ThemeToggle } from "../src/components/theme-toggle";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -35,7 +34,7 @@ const themeScript = `
     if (stored === "light" || stored === "dark") {
       theme = stored;
     } else {
-      theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      theme = "light";
     }
     document.documentElement.setAttribute("data-theme", theme);
   } catch(e) {}
@@ -71,7 +70,6 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: transitionScript }} />
       </head>
       <body suppressHydrationWarning>
-        <ThemeToggle />
         {children}
       </body>
     </html>

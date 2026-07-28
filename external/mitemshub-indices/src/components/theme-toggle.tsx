@@ -185,7 +185,7 @@ function resolveLabel(mode: ThemeMode, effective: "light" | "dark"): string {
 }
 
 export function ThemeToggle() {
-  const [mode, setMode] = useState<ThemeMode>("auto");
+  const [mode, setMode] = useState<ThemeMode>("light");
   const [effectiveTheme, setEffectiveTheme] = useState<"light" | "dark">("light");
   const [osPulseKey, setOsPulseKey] = useState(0);
   const initialisedRef = useRef(false);
@@ -196,7 +196,7 @@ export function ThemeToggle() {
     initialisedRef.current = true;
 
     const stored = getStoredMode();
-    const initialMode: ThemeMode = stored ?? "auto";
+    const initialMode: ThemeMode = stored ?? "light";
     const effective = applyMode(initialMode);
     setMode(initialMode);
     setEffectiveTheme(effective);

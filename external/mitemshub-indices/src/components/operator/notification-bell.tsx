@@ -64,13 +64,13 @@ export function NotificationBell({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="relative flex items-center justify-center w-9 h-9 rounded-xl transition-all duration-180 hover:bg-[var(--bg-surface-hover)]"
+        className="relative flex items-center justify-center w-10 h-10 rounded-full transition-all duration-200 hover:bg-[var(--line-subtle)] active:scale-95"
         title="Notification settings"
         aria-label="Notification settings"
       >
         <svg
-          width="18"
-          height="18"
+          width="22"
+          height="22"
           viewBox="0 0 24 24"
           fill="none"
           stroke={bellColor}
@@ -82,10 +82,10 @@ export function NotificationBell({
           <path d="M13.73 21a2 2 0 0 1-3.46 0" />
         </svg>
         {permission === "granted" && hasAnyEnabled && (
-          <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[var(--accent-positive)]" />
+          <span className="absolute top-2 right-2 w-2.5 h-2.5 rounded-full bg-[var(--accent-positive)] ring-2 ring-[var(--bg-canvas)]" />
         )}
         {permission === "denied" && (
-          <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[var(--accent-danger)]" />
+          <span className="absolute top-2 right-2 w-2.5 h-2.5 rounded-full bg-[var(--accent-danger)] ring-2 ring-[var(--bg-canvas)]" />
         )}
       </button>
 

@@ -31,6 +31,13 @@ class Tick:
     symbol: str
     epoch: float
     price: float
+    # ── Rich tick columns (computed from consecutive ticks) ───────────
+    # spread: estimated bid-ask spread proxy (half the absolute price change)
+    spread: float = 0.0
+    # direction: +1 = up, -1 = down, 0 = flat from previous tick
+    tick_direction: int = 0
+    # volume_proxy: ticks-per-second (1 / time_delta), higher = more activity
+    volume_proxy: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -91,7 +98,21 @@ class TradeSignal:
     extended_target: float | None = None
     hold_horizon_minutes: int | None = None
     execution_trigger_type: str | None = None
-    signal_strength: str = "strong"  # "strong_buy" | "weak_buy" | "wait" | "strong_sell"
+    signal_strength: str = "strong"  # "strong_buy" | "weak_buy" | "wait" | "weak_sell" | "strong_sell"
+
+    @property
+    def position_sizing(self) -> str:
+        """Recommend position sizing based on signal strength.
+
+        - strong_buy / strong_sell → "full" (full risk allocation)
+        - weak_buy / weak_sell → "half" (reduced risk)
+        - wait → "none" (no execution)
+        """
+        if self.signal_strength.startswith("strong"):
+            return "full"
+        elif self.signal_strength.startswith("weak"):
+            return "half"
+        return "none"
 
     @property
     def reward_risk(self) -> float:

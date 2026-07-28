@@ -57,6 +57,8 @@ function buildUnavailableCall(
     extended_target: null,
     hold_horizon_minutes: null,
     reward_risk: null,
+    signal_strength: null,
+    position_sizing: null,
     current_close: null,
     guardian_state: "unavailable" as const,
     guardian_reason: `Live market read unavailable. ${detail}`,

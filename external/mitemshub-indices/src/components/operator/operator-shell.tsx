@@ -23,6 +23,7 @@ import { IntelPanelToggles } from "./intel-panel-toggles";
 import { HealthDashboard } from "./health-dashboard";
 import { PipelineDiagnosticsPanel } from "./pipeline-diagnostics-panel";
 import { NotificationBell } from "./notification-bell";
+import { ThemeToggle } from "../theme-toggle";
 import { TABS, type IntelPanelId, resolveEnabledPanels, readIntelPanelOverrides } from "../../lib/constants";
 import { PriceChart } from "../charts/PriceChart";
 
@@ -199,7 +200,7 @@ export function OperatorShell() {
         {...(!isDesktop ? pullHandlers : {})}
       >
         {/* ── Notification bell ──────────────────────────────────── */}
-        <div className="flex items-center justify-end mb-2">
+        <div className="sticky top-0 z-40 flex items-center justify-end mb-2 py-1 -mx-4 px-4 md:mx-0 md:px-0 bg-[var(--bg-canvas)] md:bg-transparent backdrop-blur-sm md:backdrop-blur-none">
           <NotificationBell
             permission={workspace.notifications.permission}
             prefs={workspace.notifications.prefs}
@@ -207,6 +208,7 @@ export function OperatorShell() {
             onEnable={workspace.notifications.enable}
             onTogglePref={workspace.notifications.togglePref}
           />
+          <ThemeToggle />
         </div>
 
         {/* ── Pull-to-refresh indicator (mobile only) ────────────── */}

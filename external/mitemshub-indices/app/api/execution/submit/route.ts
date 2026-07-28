@@ -28,6 +28,10 @@ export async function POST(request: Request) {
     if (error instanceof ZodError) {
       return NextResponse.json({ error: "Invalid submit payload." }, { status: 400 });
     }
-    throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json(
+      { accepted: false, position_id: null, entry_price: null, stop_loss: null, take_profit: null, message: `Execution failed: ${message}` },
+      { status: 500 },
+    );
   }
 }

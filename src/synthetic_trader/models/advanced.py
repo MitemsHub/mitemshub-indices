@@ -460,6 +460,11 @@ class ConfidenceScorer:
         self.model = model
         self.calibrator = calibrator
         self.feature_selector = feature_selector
+        # Missed-trade learning: when the engine frequently misses opportunities
+        # in range-bound markets, it becomes more willing to trade them.
+        self._missed_opportunities: int = 0
+        self._correct_stayouts: int = 0
+        self._range_miss_boost: float = 0.0  # cached boost for range regime
 
     def score(
         self,
@@ -508,17 +513,64 @@ class ConfidenceScorer:
 
         return clamp(confidence, 0.0, 1.0)
 
+    def update_missed_trade_stats(
+        self,
+        missed_opportunities: int,
+        correct_stayouts: int,
+    ) -> None:
+        """Update missed trade statistics from MissedTradeTracker resolution.
+
+        When the engine frequently misses opportunities (outcome=1), it means
+        the engine is too conservative in range-bound markets. This increases
+        the range regime boost so future scores are more favorable.
+
+        The boost decays over time — if the engine starts getting things right
+        (outcome=0), the boost decreases.
+        """
+        self._missed_opportunities += missed_opportunities
+        self._correct_stayouts += correct_stayouts
+
+        total = self._missed_opportunities + self._correct_stayouts
+        if total < 5:
+            # Need at least 5 resolved trades to form a pattern
+            self._range_miss_boost = 0.0
+            return
+
+        # Missed rate: what fraction of resolutions were missed opportunities
+        miss_rate = self._missed_opportunities / total
+
+        # Map miss rate to boost: 0% miss rate -> 0 boost, 50%+ -> max boost of 0.15
+        # This is a sigmoid-like curve: slow at first, then accelerating
+        # At 30% miss rate -> ~0.05 boost (mild willingness)
+        # At 50% miss rate -> ~0.12 boost (strong willingness)
+        # At 70%+ miss rate -> ~0.15 cap (aggressive in ranges)
+        self._range_miss_boost = min(miss_rate * 0.22, 0.15)
+
     def _regime_alignment(self, regime: str, is_long: bool) -> float:
         """Score regime alignment."""
         regime_scores = {
             "trend_up": 0.8 if is_long else 0.2,
             "trend_down": 0.2 if is_long else 0.8,
-            "range": 0.5,
+            "range": 0.5 + self._range_miss_boost,
             "volatile": 0.3,
             "compression": 0.4,
             "unknown": 0.5,
         }
         return regime_scores.get(regime, 0.5)
+
+    @property
+    def missed_trade_boost(self) -> float:
+        """Current range-regime boost from missed trade learning."""
+        return self._range_miss_boost
+
+    @property
+    def missed_trade_stats(self) -> dict[str, int]:
+        """Current missed trade statistics."""
+        return {
+            "missed_opportunities": self._missed_opportunities,
+            "correct_stayouts": self._correct_stayouts,
+            "total_resolved": self._missed_opportunities + self._correct_stayouts,
+        }
 
     def _structure_alignment(self, bias: float, is_long: bool) -> float:
         """Score structure alignment."""

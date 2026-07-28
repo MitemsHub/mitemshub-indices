@@ -21,6 +21,10 @@ export async function POST(request: Request) {
     if (error instanceof ZodError) {
       return NextResponse.json({ error: "Invalid close payload." }, { status: 400 });
     }
-    throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json(
+      { closed: false, message: `Close failed: ${message}` },
+      { status: 500 },
+    );
   }
 }

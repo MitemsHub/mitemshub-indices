@@ -230,11 +230,21 @@ function detectChanges(
 
 export function useNotifications(currentCall: FreshCallResponse | null) {
   const [prefs, setPrefsState] = useState<NotificationPreferences>(loadPrefs);
-  const [permission, setPermission] = useState<NotificationPermission>(
-    () => (isNotificationSupported() ? getPermissionStatus() : "denied"),
-  );
+  // Always start with "default" to match server render (no Notification API).
+  // The real permission is synced in the first useEffect.
+  const [permission, setPermission] = useState<NotificationPermission>("default");
+  const [supported, setSupported] = useState(false);
   const prevCallRef = useRef<CallSnapshot | null>(null);
   const initializedRef = useRef(false);
+
+  // Sync the real permission + support status on mount (client-only).
+  useEffect(() => {
+    const isSupported = isNotificationSupported();
+    setSupported(isSupported);
+    if (isSupported) {
+      setPermission(getPermissionStatus());
+    }
+  }, []);
 
   const setPrefs = useCallback((updater: (prev: NotificationPreferences) => NotificationPreferences) => {
     setPrefsState((prev) => {
@@ -282,18 +292,18 @@ export function useNotifications(currentCall: FreshCallResponse | null) {
 
   // ── Keep permission state in sync (every 30s — permission changes are rare) ──
   useEffect(() => {
-    if (!isNotificationSupported()) return;
+    if (!supported) return;
     const interval = setInterval(() => {
       setPermission(getPermissionStatus());
     }, 30_000);
     return () => clearInterval(interval);
-  }, []);
+  }, [supported]);
 
   return {
     permission,
     prefs,
     enable,
     togglePref,
-    isSupported: isNotificationSupported(),
+    isSupported: supported,
   };
 }

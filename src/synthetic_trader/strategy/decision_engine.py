@@ -571,6 +571,12 @@ class DecisionEngine:
             base = 0.55
             if entropy > 0.7:
                 base -= 0.05
+            # Missed-trade learning boost: when the engine frequently misses
+            # opportunities in range markets, increase the base score so it
+            # becomes more willing to take range trades.
+            range_miss_boost = features.get("range_miss_boost", 0.0)
+            if range_miss_boost > 0:
+                base = clamp(base + range_miss_boost, 0.0, 1.0)
         else:
             base = 0.50
         return clamp(base, 0.0, 1.0)
@@ -647,7 +653,11 @@ class DecisionEngine:
         """Score based on tick-level micro-structure features.
 
         Uses velocity, acceleration, exhaustion, impulse/retrace ratio,
-        and streak bias to estimate short-term directional pressure.
+        streak bias, spread analysis, direction streaks, and volume surge
+        detection to estimate short-term directional pressure.
+
+        The spread, direction, and volume features were added to capture
+        microstructure dynamics that price-only analysis misses.
         """
         velocity = features.get("tick_velocity", 0.0)
         acceleration = features.get("tick_acceleration", 0.0)
@@ -680,7 +690,53 @@ class DecisionEngine:
         # Exhaustion penalty: high exhaustion = reduce conviction
         exhaustion_penalty = exhaustion * 0.10
 
-        raw = 0.50 + velocity_score + accel_score + impulse_score + streak_score + ratio_score - exhaustion_penalty
+        # ── Spread features: wide spread = uncertainty = reduce conviction ──
+        spread_z = features.get("tick_spread_z_score", 0.0)
+        spread_penalty = clamp(spread_z * 0.05, -0.05, 0.05) if spread_z > 1.5 else 0.0
+
+        # ── Direction streak: strong directional streaks amplify conviction ──
+        dir_streak_bias = features.get("tick_dir_streak_bias", 0.0)
+        dir_switch_rate = features.get("tick_dir_switch_rate", 0.0)
+        dir_streak_score = clamp(dir_streak_bias * 0.12, -0.12, 0.12)
+        # High switch rate = choppy market = reduce conviction
+        chop_penalty = clamp((dir_switch_rate - 0.5) * 0.08, 0.0, 0.08)
+
+        # ── Volume surge: high volume confirms directional move ──
+        vol_surge = features.get("tick_vol_surge_ratio", 0.0)
+        vol_boost = 0.0
+        if vol_surge > 0.1 and velocity != 0:
+            # Volume surge + directional velocity = strong confirmation
+            aligned = (velocity > 0) == (direction is Direction.LONG)
+            vol_boost = clamp(vol_surge * 0.08 * (1.0 if aligned else -1.0), -0.08, 0.08)
+
+        # ── Tick frequency: high activity often precedes volatility ──
+        activity_regime = features.get("tick_activity_regime", 0.5)
+        freq_z = features.get("tick_freq_z_score", 0.0)
+        # Unusually high frequency + directional velocity = strong signal
+        freq_boost = 0.0
+        if abs(freq_z) > 1.5 and velocity != 0:
+            freq_direction = 1.0 if (velocity > 0) == (direction is Direction.LONG) else -1.0
+            freq_boost = clamp(freq_z * 0.04 * freq_direction, -0.06, 0.06)
+        # Very low frequency = quiet market, reduce conviction slightly
+        quiet_penalty = 0.0
+        if activity_regime < 0.2:
+            quiet_penalty = (0.2 - activity_regime) * 0.08
+
+        raw = (
+            0.50
+            + velocity_score
+            + accel_score
+            + impulse_score
+            + streak_score
+            + ratio_score
+            - exhaustion_penalty
+            - spread_penalty
+            + dir_streak_score
+            - chop_penalty
+            + vol_boost
+            + freq_boost
+            - quiet_penalty
+        )
 
         return clamp(raw, 0.0, 1.0)
 

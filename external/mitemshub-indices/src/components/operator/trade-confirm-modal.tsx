@@ -5,6 +5,64 @@ import { XIcon } from "../../lib/icons";
 import { formatPrice } from "../../lib/formatters";
 import type { ExecutionMode, FreshCallResponse } from "../../lib/contracts";
 
+/** Human-readable explanations for common MT5 retcodes */
+const MT5_ERROR_MESSAGES: Record<number, { title: string; fix: string }> = {
+  10026: {
+    title: "AutoTrading disabled by broker",
+    fix: "Contact Blueberry Markets support to enable automated/EAs trading on your account. Also verify you are using the Master Password, not the Investor (read-only) password.",
+  },
+  10027: {
+    title: "AutoTrading disabled in MT5 terminal",
+    fix: "Click the 'Algo Trading' button on the MT5 toolbar to enable it, or go to Tools > Options > Expert Advisors and check 'Allow automated trading'.",
+  },
+  10016: {
+    title: "Invalid Stop Loss / Take Profit",
+    fix: "Your SL or TP is too close to the current price. The broker requires a minimum distance (stops level). Adjust your levels further from the current price.",
+  },
+  10014: {
+    title: "Invalid lot size",
+    fix: "The trade volume is outside the allowed range for this symbol. Check the minimum and maximum lot size in MT5 Market Watch.",
+  },
+  10019: {
+    title: "Insufficient funds",
+    fix: "Not enough free margin to open this position. Reduce the lot size or deposit more funds.",
+  },
+  10018: {
+    title: "Market is closed",
+    fix: "Trading is not available right now — the market is closed (weekend or holiday). Wait until the market reopens.",
+  },
+  10017: {
+    title: "Trading is disabled",
+    fix: "Trading is disabled for this symbol or account type. Contact your broker to verify.",
+  },
+  10021: {
+    title: "No price quotes available",
+    fix: "The broker is not providing price data for this symbol right now. Check your MT5 connection and try again.",
+  },
+  10004: {
+    title: "Price has changed (requote)",
+    fix: "The price moved while the order was being placed. Click Execute again to retry with the latest price.",
+  },
+};
+
+/**
+ * Try to extract the MT5 retcode from an error message string.
+ * Handles formats like 'Retcode: 10026' or 'retcode: 10026' or 'code 10026'.
+ */
+function extractRetcode(msg: string): number | null {
+  const match = msg.match(/(?:retcode|code)[:\s]*(\d{4,5})/i);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+/** Get a user-friendly error display from a raw error string */
+function humanizeMt5Error(raw: string): { title: string; fix: string } | null {
+  const code = extractRetcode(raw);
+  if (code !== null && MT5_ERROR_MESSAGES[code]) {
+    return MT5_ERROR_MESSAGES[code];
+  }
+  return null;
+}
+
 type TradeConfirmModalProps = {
   open: boolean;
   call: FreshCallResponse;
@@ -102,7 +160,7 @@ export function TradeConfirmModal({
           className="w-full max-w-md rounded-2xl border border-[var(--line-subtle)] bg-[var(--bg-panel-strong)] shadow-[var(--shadow-elevated)] overflow-hidden flex flex-col my-auto"
           style={{
             animation: "modalSlideIn 300ms var(--ease-out)",
-            maxHeight: 'min(90vh, 560px)',
+            maxHeight: 'min(80vh, 480px)',
           }}
         >
           {/* Header */}
@@ -112,6 +170,22 @@ export function TradeConfirmModal({
                 <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[var(--accent-danger-soft)] text-[var(--accent-danger)] text-xs font-semibold">
                   <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent-danger)] animate-pulse" />
                   LIVE
+                </span>
+              )}
+              {call.position_sizing && call.position_sizing !== "none" && (
+                <span
+                  className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${
+                    call.position_sizing === "full"
+                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                      : "bg-amber-50 text-amber-700 border-amber-200"
+                  }`}
+                >
+                  {call.position_sizing === "full" ? "◆ Full Size" : "◇ Half Size"}
+                </span>
+              )}
+              {call.position_sizing === "none" && (
+                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500 border border-gray-200">
+                  ○ No Execution
                 </span>
               )}
               <h2 className="text-sm font-semibold text-[var(--text-strong)]">
@@ -297,16 +371,24 @@ export function TradeConfirmModal({
             )}
 
             {/* Execution error */}
-            {executionError && (
-              <div className="rounded-xl border border-[var(--accent-danger)] bg-[var(--accent-danger-soft)] px-4 py-3">
-                <p className="text-xs font-semibold text-[var(--accent-danger)]">
-                  ✗ Order Failed
-                </p>
-                <p className="mt-1 text-xs leading-5 text-[var(--text-body)]">
-                  {executionError}
-                </p>
-              </div>
-            )}
+            {executionError && (() => {
+              const friendly = humanizeMt5Error(executionError);
+              return (
+                <div className="rounded-xl border border-[var(--accent-danger)] bg-[var(--accent-danger-soft)] px-4 py-3">
+                  <p className="text-xs font-semibold text-[var(--accent-danger)]">
+                    ✗ {friendly?.title ?? "Order Failed"}
+                  </p>
+                  {friendly && (
+                    <p className="mt-1 text-xs leading-5 text-[var(--text-body)] font-medium">
+                      {friendly.fix}
+                    </p>
+                  )}
+                  <p className="mt-1 text-[10px] leading-4 text-[var(--text-muted)] font-mono">
+                    {executionError}
+                  </p>
+                </div>
+              );
+            })()}
 
             {/* Confirmation checkbox */}
             <label className="flex items-start gap-3 cursor-pointer group">
@@ -345,23 +427,41 @@ export function TradeConfirmModal({
             >
               Cancel
             </button>
-            <button
-              ref={confirmBtnRef}
-              type="button"
-              disabled={!acknowledged || countdown > 0 || !levelsValid}
-              onClick={() => onConfirm({ entry: editEntry, stopLoss: editStopLoss, takeProfit: editTakeProfit })}
-              className={`flex-1 rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition-all ${
-                isLive
-                  ? "bg-[var(--accent-danger)] hover:brightness-90"
-                  : "bg-[var(--accent-ink)] hover:bg-[var(--accent-ink-hover)]"
-              } disabled:opacity-40 disabled:cursor-not-allowed`}
-            >
-              {countdown > 0
-                ? `Wait ${countdown}s...`
-                : isLive
-                  ? "Execute Live Trade"
-                  : "Execute Paper Trade"}
-            </button>
+            <div className="flex-1">
+              <button
+                ref={confirmBtnRef}
+                type="button"
+                disabled={!acknowledged || countdown > 0 || !levelsValid}
+                onClick={() => onConfirm({ entry: editEntry, stopLoss: editStopLoss, takeProfit: editTakeProfit })}
+                className={`w-full rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition-all ${
+                  isLive
+                    ? "bg-[var(--accent-danger)] hover:brightness-90"
+                    : "bg-[var(--accent-ink)] hover:bg-[var(--accent-ink-hover)]"
+                } disabled:opacity-40 disabled:cursor-not-allowed`}
+              >
+                {countdown > 0
+                  ? `Wait ${countdown}s...`
+                  : isLive
+                    ? "Execute Live Trade"
+                    : "Execute Paper Trade"}
+              </button>
+              {/* Disabled reason hint */}
+              {countdown <= 0 && !acknowledged && !levelsValid && (
+                <p className="mt-1.5 text-center text-[10px] text-[var(--text-muted)]">
+                  Check the box above and fix price levels to enable
+                </p>
+              )}
+              {countdown <= 0 && !acknowledged && levelsValid && (
+                <p className="mt-1.5 text-center text-[10px] text-[var(--text-muted)]">
+                  Check the confirmation box above to enable
+                </p>
+              )}
+              {countdown <= 0 && acknowledged && !levelsValid && (
+                <p className="mt-1.5 text-center text-[10px] text-[var(--text-muted)]">
+                  Fix the price levels above to enable
+                </p>
+              )}
+            </div>
           </div>
         </div>
       </div>
