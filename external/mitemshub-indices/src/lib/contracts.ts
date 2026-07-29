@@ -565,11 +565,6 @@ export const systemPerformanceSchema = z.object({
   max_drawdown_pct: z.number(),
   max_drawdown_amount: z.number(),
   net_pnl: z.number(),
-  gross_profit: z.number(),
-  gross_loss: z.number(),
-  avg_win: z.number(),
-  avg_loss: z.number(),
-  expectancy_r: z.number(),
   time_span: z.string(),
 }).nullable();
 

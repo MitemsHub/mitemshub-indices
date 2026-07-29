@@ -1355,9 +1355,6 @@ function buildSystemPerformance(history: any[]) {
     }
 
     const netPnl = pnlSequence.reduce((a: number, b: number) => a + b, 0);
-    const avgWin = wins.length > 0 ? grossProfit / wins.length : 0;
-    const avgLoss = losses.length > 0 ? grossLoss / losses.length : 0;
-    const expectancyR = avgRMultiple;
 
     // Time span
     const firstEpoch = outcomes[0]?.epoch ?? outcomes[0]?.opened_at ?? 0;
@@ -1379,11 +1376,6 @@ function buildSystemPerformance(history: any[]) {
       max_drawdown_pct: maxDrawdownPct,
       max_drawdown_amount: maxDrawdownAmount,
       net_pnl: netPnl,
-      gross_profit: grossProfit,
-      gross_loss: grossLoss,
-      avg_win: avgWin,
-      avg_loss: avgLoss,
-      expectancy_r: expectancyR,
       time_span: timeSpan,
     };
   } catch {
