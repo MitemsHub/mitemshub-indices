@@ -191,13 +191,14 @@ class TestRiskEnginePropFirm:
         from synthetic_trader.config import RiskConfig
         from synthetic_trader.risk.engine import RiskEngine
 
-        config = RiskConfig(starting_equity=100_000, risk_per_trade=0.01)
+        config = RiskConfig(starting_equity=100_000, risk_per_trade=0.01, max_daily_loss_fraction=0.15)
         tracker = PropFirmBreachTracker(initial_balance=100_000)
         engine = RiskEngine(config, prop_firm=BLUEBERRY_FUNDED_2STEP, breach_tracker=tracker)
 
-        # Simulate equity dropped to 89.5k (10.5% loss > 10% limit)
+        # Simulate equity dropped to 89.5k (10.5% overall drawdown > 10% limit)
+        # Set day_start_equity to 89.5k so daily loss = 0% (avoids triggering daily_loss first)
         engine.state.initial_balance = 100_000
-        engine.state.day_start_equity = 100_000
+        engine.state.day_start_equity = 89_500
         engine.state.equity = 89_500
 
         signal = self._make_signal()

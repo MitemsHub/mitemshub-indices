@@ -17,6 +17,17 @@ _session_filters: dict[str, SessionVolatilityFilter] = {}
 _fingerprint_detectors: dict[str, GeneratorFingerprintDetector] = {}
 
 
+def clear_assembler_caches() -> None:
+    """Clear all module-level caches (GARCH, session filter, fingerprint).
+
+    Call this in test fixtures or when starting a fresh analysis session to
+    prevent stale state from previous runs leaking into new results.
+    """
+    _garch_forecasters.clear()
+    _session_filters.clear()
+    _fingerprint_detectors.clear()
+
+
 def _get_garch_forecaster(symbol: str) -> EGARCHVarianceForecaster:
     """Get or create the GARCH forecaster for a symbol.
 
