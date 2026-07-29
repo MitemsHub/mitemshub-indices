@@ -124,6 +124,13 @@ export function recordPipelineError(error: string | null | undefined): void {
   if (error && error.trim()) {
     pipelineDiagnostics.lastError = error;
     pipelineDiagnostics.lastUpdatedAt = new Date().toISOString();
+  } else {
+    // Clear stale error — bridge is working again.
+    // Without this, a single past failure keeps bridge_unavailable=true
+    // forever, even after subsequent calls succeed.
+    pipelineDiagnostics.lastError = null;
+    pipelineDiagnostics.staleDataSince = null;
+    pipelineDiagnostics.lastUpdatedAt = new Date().toISOString();
   }
 }
 
