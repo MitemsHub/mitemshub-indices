@@ -129,9 +129,12 @@ class DecisionEngine:
     ) -> DecisionReport:
         # Store trading mode for vol_harvest path activation
         self._trading_mode = trading_mode
-        # Activate harvest mode thresholds when in volatility_harvest mode
+        # Activate harvest mode thresholds when in volatility_harvest mode;
+        # restore defaults otherwise so thresholds don't persist across switches.
         if trading_mode == "volatility_harvest":
             self.volatility_harvester.set_harvest_mode()
+        else:
+            self.volatility_harvester.set_default_mode()
 
         profile = self._profile(symbol)
         execution_candles = role_candles.get("execution", candles) if role_candles else candles

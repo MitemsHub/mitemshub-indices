@@ -109,6 +109,16 @@ class VolatilityHarvester:
         self.min_atr_z = 0.8
         self.cooldown_bars = 6  # shorter cooldown in dedicated mode
         self.stop_loss_multiple = 2.0  # slightly tighter stops
+        self.hold_bars = 3  # faster exits for mean-reversion
+    
+    def set_default_mode(self) -> None:
+        """Restore default thresholds for sniper/active_trader modes."""
+        self.z_threshold = 2.5
+        self.mr_signal_threshold = 0.6
+        self.min_atr_z = 1.0
+        self.cooldown_bars = 10
+        self.stop_loss_multiple = 2.5
+        self.hold_bars = 4
     
     def evaluate(
         self,
