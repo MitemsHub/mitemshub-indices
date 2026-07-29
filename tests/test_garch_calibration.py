@@ -146,6 +146,45 @@ class TestCalibrationResult:
         assert state.observations == 500
         assert state.long_run_variance > 0
 
+    def test_to_garch_state_roundtrip_with_forecaster(self) -> None:
+        """Verify CalibrationResult.to_garch_state() feeds correctly into EGARCHVarianceForecaster."""
+        from synthetic_trader.models.garch import EGARCHVarianceForecaster
+
+        # Fit to real-ish data
+        rng = np.random.RandomState(42)
+        prices = np.exp(np.cumsum(rng.normal(0, 0.01, 300))) * 100
+        result = fit_egarch(prices, symbol="ROUNDTRIP")
+
+        # Convert to GARCHState
+        state = result.to_garch_state()
+        assert state.omega == result.omega
+        assert state.alpha == result.alpha
+        assert state.beta == result.beta
+        assert state.gamma == result.gamma
+        assert state.observations == result.n_observations
+        assert state.long_run_variance > 0
+
+        # Feed into forecaster
+        forecaster = EGARCHVarianceForecaster()
+        forecaster.state = state
+
+        # The forecaster should produce valid features immediately
+        features = forecaster.get_forecast()
+        assert "garch_sigma" in features
+        assert "garch_vol_regime" in features
+        assert "garch_mean_revert_signal" in features
+        assert features["garch_sigma"] > 0
+        assert features["garch_vol_regime"] in (0.0, 1.0, 2.0)
+        assert 0.0 <= features["garch_mean_revert_signal"] <= 1.0
+
+        # Forecaster should also work with streaming updates
+        rng2 = np.random.RandomState(99)
+        for _ in range(20):
+            ret = rng2.normal(0, 0.01)
+            feats = forecaster.update(ret)
+            assert feats["garch_sigma"] > 0
+            assert math.isfinite(feats["garch_forecast"])
+
 
 class TestSaveLoad:
     """Test calibration result persistence."""

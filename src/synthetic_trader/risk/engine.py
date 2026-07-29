@@ -63,6 +63,10 @@ class RiskEngine:
             reasons.append("current candle volatility is statistically extreme")
 
         # ── Prop firm constraints ──────────────────────────────
+        # Track the first prop-firm breach reason so we only record once per evaluation
+        prop_firm_breach_type: str | None = None
+        prop_firm_breach_msg: str | None = None
+
         if self.prop_firm is not None:
             initial = self.state.initial_balance
 
@@ -72,13 +76,9 @@ class RiskEngine:
                 reasons.append(
                     f"prop firm daily loss limit ({self.prop_firm.max_daily_loss_pct:.0%}) reached"
                 )
-                if self.breach_tracker is not None:
-                    self.breach_tracker.record_breach(
-                        "daily_loss",
-                        epoch=signal.snapshot.epoch,
-                        message=f"Daily drawdown {prop_daily_loss:.1%} >= {self.prop_firm.max_daily_loss_pct:.0%}",
-                        equity=self.state.equity,
-                    )
+                if prop_firm_breach_type is None:
+                    prop_firm_breach_type = "daily_loss"
+                    prop_firm_breach_msg = f"Daily drawdown {prop_daily_loss:.1%} >= {self.prop_firm.max_daily_loss_pct:.0%}"
 
             # 2) Overall drawdown limit (prop firm rule — static, not trailing)
             overall_drawdown = max(0.0, initial - self.state.equity) / max(initial, 1e-9)
@@ -86,13 +86,9 @@ class RiskEngine:
                 reasons.append(
                     f"prop firm max drawdown ({self.prop_firm.max_overall_drawdown_pct:.0%}) breached"
                 )
-                if self.breach_tracker is not None:
-                    self.breach_tracker.record_breach(
-                        "max_drawdown",
-                        epoch=signal.snapshot.epoch,
-                        message=f"Overall drawdown {overall_drawdown:.1%} >= {self.prop_firm.max_overall_drawdown_pct:.0%}",
-                        equity=self.state.equity,
-                    )
+                if prop_firm_breach_type is None:
+                    prop_firm_breach_type = "max_drawdown"
+                    prop_firm_breach_msg = f"Overall drawdown {overall_drawdown:.1%} >= {self.prop_firm.max_overall_drawdown_pct:.0%}"
 
             # 3) Risk per trade cap (prop firm rule)
             if self.prop_firm.risk_per_trade_pct > 0:
@@ -101,6 +97,14 @@ class RiskEngine:
                 # (stake check happens after reasons — we check intent below)
 
         if reasons:
+            # Record exactly one breach per evaluation (the most severe)
+            if self.breach_tracker is not None and prop_firm_breach_type is not None:
+                self.breach_tracker.record_breach(
+                    prop_firm_breach_type,
+                    epoch=signal.snapshot.epoch,
+                    message=prop_firm_breach_msg or prop_firm_breach_type,
+                    equity=self.state.equity,
+                )
             return RiskDecision(False, None, tuple(reasons))
 
         risk_budget = self.state.equity * self.config.risk_per_trade

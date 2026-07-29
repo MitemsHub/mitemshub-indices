@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from synthetic_trader.backtest.engine import BacktestEngine
 from synthetic_trader.backtest.prop_firm import PropFirmBreachTracker, PropFirmProfile
@@ -59,6 +60,7 @@ class CurveFittingReport:
     symbol: str
     n_episodes: int
     n_ticks_per_episode: int
+    ran_at: str = ""
     episodes: list[EpisodeResult]
 
     # Aggregate metrics
@@ -122,6 +124,7 @@ class CurveFittingReport:
                 "risk_per_trade_breaches": self.risk_per_trade_breaches,
                 "breach_rate": self.breach_rate,
             } if self.prop_firm_name else None,
+            "ran_at": self.ran_at,
             "verdict": self.verdict,
             "explanation": self.explanation,
             "episodes": [
@@ -386,10 +389,12 @@ class SyntheticBacktestRunner:
                 f"genuine generator properties."
             )
 
+        now = datetime.now(timezone.utc).isoformat()
         return CurveFittingReport(
             symbol=symbol,
             n_episodes=n,
             n_ticks_per_episode=self.ticks_per_episode,
+            ran_at=now,
             episodes=episodes,
             mean_win_rate=mean_wr,
             mean_profit_factor=mean_pf,

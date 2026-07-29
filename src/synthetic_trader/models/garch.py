@@ -54,12 +54,12 @@ class GARCHState:
     @property
     def conditional_variance(self) -> float:
         """Current conditional variance σ²."""
-        return math.exp(self.log_variance)
+        return math.exp(max(-30.0, min(5.0, self.log_variance)))
 
     @property
     def conditional_volatility(self) -> float:
         """Current conditional volatility σ."""
-        return math.exp(self.log_variance / 2.0)
+        return math.exp(max(-30.0, min(5.0, self.log_variance)) / 2.0)
 
     @property
     def persistence(self) -> float:
@@ -236,8 +236,8 @@ class EGARCHVarianceForecaster:
         self.state.gamma = max(-0.5, min(0.5, self.state.gamma + (lr / (math.sqrt(self._grad_sq_ema["gamma"]) + 1e-8)) * grad_gamma))
         self.state.beta = max(0.0, min(new_beta, 0.999))
 
-        # Update state
-        self.state.log_variance = log_var_new
+        # Update state — clip for numerical stability (same bounds as calibration)
+        self.state.log_variance = max(-30.0, min(5.0, log_var_new))
         self.state.long_run_variance = (
             math.exp(self.state.omega / (1.0 - self.state.persistence))
             if self.state.persistence < 1.0
