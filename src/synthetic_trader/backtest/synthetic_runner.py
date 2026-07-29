@@ -60,8 +60,8 @@ class CurveFittingReport:
     symbol: str
     n_episodes: int
     n_ticks_per_episode: int
-    ran_at: str = ""
     episodes: list[EpisodeResult]
+    ran_at: str = ""
 
     # Aggregate metrics
     mean_win_rate: float = 0.0
