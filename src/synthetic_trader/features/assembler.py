@@ -13,6 +13,9 @@ import time as _time
 
 # Module-level GARCH forecasters — one per symbol to maintain state across snapshots.
 _garch_forecasters: dict[str, EGARCHVarianceForecaster] = {}
+# Tracks whether each symbol's forecaster was initialized from a
+# market-calibrated calibration file (True) or from defaults (False).
+_garch_calibrated: dict[str, bool] = {}
 _session_filters: dict[str, SessionVolatilityFilter] = {}
 _fingerprint_detectors: dict[str, GeneratorFingerprintDetector] = {}
 
@@ -24,6 +27,7 @@ def clear_assembler_caches() -> None:
     prevent stale state from previous runs leaking into new results.
     """
     _garch_forecasters.clear()
+    _garch_calibrated.clear()
     _session_filters.clear()
     _fingerprint_detectors.clear()
 
@@ -54,8 +58,10 @@ def _get_garch_forecaster(symbol: str) -> EGARCHVarianceForecaster:
                 "gamma": 1e-3, "beta": 1e-3,
             }
             _garch_forecasters[symbol] = forecaster
+            _garch_calibrated[symbol] = True
         else:
             _garch_forecasters[symbol] = EGARCHVarianceForecaster()
+            _garch_calibrated[symbol] = False
     return _garch_forecasters[symbol]
 
 
@@ -78,6 +84,9 @@ def build_snapshot(
     # exploitable property of synthetic indices — their volatility
     # clusters due to the generator's variance scheduling.
     garch = _get_garch_forecaster(symbol)
+    # Flag whether the forecaster was initialized from a market-calibrated
+    # calibration file (True) or from generic defaults (False).
+    features["garch_calibrated"] = 1.0 if _garch_calibrated.get(symbol, False) else 0.0
     log_return = features.get("log_return", 0.0)
     if log_return != 0.0 and garch.state.observations > 0:
         garch_features = garch.update(log_return)

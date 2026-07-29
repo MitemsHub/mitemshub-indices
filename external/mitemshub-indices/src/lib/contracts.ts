@@ -522,6 +522,7 @@ export const garchForecastSchema = z.object({
   long_run_vol: z.number(),
   alpha: z.number(),
   gamma: z.number(),
+  calibrated: z.boolean().optional(),
   actionable: z.string(),
 }).nullable();
 

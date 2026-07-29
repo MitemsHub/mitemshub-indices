@@ -389,6 +389,7 @@ export function OperatorShell() {
                     intelligence={workspace.intelligence?.market_intelligence ?? null}
                     currentPrice={workspace.currentCall?.current_close ?? null}
                     loading={workspace.intelligenceLoading}
+                    garchCalibrated={workspace.intelligence?.garch_forecast?.calibrated}
                   />
                 )}
                 {(enabledPanels.includes("multi_timeframe") || enabledPanels.includes("evidence_summary")) && (

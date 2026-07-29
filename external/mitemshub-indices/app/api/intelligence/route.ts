@@ -1031,6 +1031,7 @@ function buildGarchForecast(call: any) {
     long_run_vol: longRunVol,
     alpha: features.garch_alpha ?? 0.08,
     gamma: features.garch_gamma ?? -0.04,
+    calibrated: features.garch_calibrated === 1.0,
     // Actionable insight for the user
     actionable: meanRevert > 0.6
       ? `Strong mean-reversion signal (${(meanRevert * 100).toFixed(0)}%) — vol likely compressing soon`

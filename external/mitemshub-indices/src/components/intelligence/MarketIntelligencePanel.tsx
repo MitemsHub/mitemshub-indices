@@ -18,12 +18,14 @@ type MarketIntelligencePanelProps = {
   intelligence: MarketIntelligence | null;
   currentPrice: number | null;
   loading?: boolean;
+  garchCalibrated?: boolean;
 };
 
 export function MarketIntelligencePanel({
   intelligence,
   currentPrice,
   loading,
+  garchCalibrated,
 }: MarketIntelligencePanelProps) {
   if (loading) {
     return <MarketIntelligenceSkeleton />;
@@ -92,9 +94,24 @@ export function MarketIntelligencePanel({
             </span>
           )}
         </div>
-        <span className={`info-chip rounded-full px-2 md:px-3 py-0.5 md:py-1 text-xs md:text-sm flex-shrink-0 ${regimeColors[intelligence.regime] || "text-[var(--accent-neutral)] bg-[var(--accent-neutral-soft)]"}`}>
-          {intelligence.regime.replace("_", " ")}
-        </span>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {garchCalibrated !== undefined && (
+            <span
+              className={`inline-flex items-center gap-1 rounded-full px-1.5 md:px-2 py-0.5 text-[9px] md:text-[10px] font-medium whitespace-nowrap ${
+                garchCalibrated
+                  ? "bg-[var(--accent-positive-soft)] text-[var(--accent-positive)] border border-[rgba(15,107,87,0.2)]"
+                  : "bg-[var(--accent-warn-soft)] text-[var(--accent-warn)] border border-[rgba(184,134,11,0.2)]"
+              }`}
+              title={garchCalibrated ? "EGARCH parameters calibrated from real market data" : "Using default EGARCH parameters — calibrate for better predictions"}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${garchCalibrated ? "bg-[var(--accent-positive)]" : "bg-[var(--accent-warn)]"}`} />
+              {garchCalibrated ? "Calibrated" : "Default params"}
+            </span>
+          )}
+          <span className={`info-chip rounded-full px-2 md:px-3 py-0.5 md:py-1 text-xs md:text-sm ${regimeColors[intelligence.regime] || "text-[var(--accent-neutral)] bg-[var(--accent-neutral-soft)]"}`}>
+            {intelligence.regime.replace("_", " ")}
+          </span>
+        </div>
       </div>
 
       {/* Metric cards — 2 cols on mobile, 2 on md, 4 on lg */}
