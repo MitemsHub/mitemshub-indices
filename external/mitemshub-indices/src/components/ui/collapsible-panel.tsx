@@ -45,13 +45,6 @@ export function CollapsiblePanel({
     }
   }, [expanded]);
 
-  // Sync with forceExpanded prop
-  useEffect(() => {
-    if (forceExpanded) {
-      setExpanded(true);
-    }
-  }, [forceExpanded]);
-
   const toggle = useCallback(() => {
     if (forceExpanded || !enabled) return;
     setExpanded((prev) => {
