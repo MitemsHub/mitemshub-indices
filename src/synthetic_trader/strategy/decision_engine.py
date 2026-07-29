@@ -16,6 +16,9 @@ from synthetic_trader.strategy.swing_execution_builder import build_swing_execut
 from synthetic_trader.strategy.setup_builder import classify_setup
 from synthetic_trader.strategy.top_down_bias import infer_top_down_bias
 from synthetic_trader.strategy.regime_models import regime_model
+import time as _time
+
+from synthetic_trader.strategy.volatility_harvesting import VolatilityHarvester
 from synthetic_trader.models.regime_detector import RegimeShiftDetector, MarketState
 
 
@@ -112,6 +115,7 @@ class DecisionEngine:
         self.model = model or OnlineLogisticModel(config.model)
         self.calibration = CalibrationState()
         self.regime_detector = RegimeShiftDetector()
+        self.volatility_harvester = VolatilityHarvester()
         self._call_lifecycle: dict[str, str] = {}
 
     def evaluate(
@@ -235,6 +239,73 @@ class DecisionEngine:
             confirmation.reason,
         )
 
+        # ── Volatility harvesting path ─────────────────────────────
+        # When GARCH detects an extreme z-score with high mean-revert
+        # probability, generate a mean-reversion trade exploiting the
+        # generator's variance scheduling (the ONE exploitable property).
+        # NOTE: Volatility harvesting BYPASSES the session filter — it
+        # explicitly exploits extreme moves that happen regardless of hour.
+        atr_14 = features.get("atr_14", 0.0)
+        vol_harvest_signal = self.volatility_harvester.evaluate(
+            features=features,
+            current_price=features.get("close", 0.0),
+            atr_14=atr_14,
+        )
+        if vol_harvest_signal is not None:
+            vol_signal = self.volatility_harvester.to_trade_signal(
+                signal=vol_harvest_signal,
+                symbol=symbol,
+                min_confidence=min_confidence,
+                position_scale=position_scale,
+                snapshot=snapshot,
+                model_version=self.model.version,
+            )
+            return DecisionReport(vol_signal, vol_signal.rationale)
+
+        # ── Session filter gate ────────────────────────────────────
+        # Block signal generation during low-volatility hours.
+        # The generator's server load balancing creates exploitable
+        # time-of-day effects — certain hours consistently produce
+        # more volatile moves with better risk/reward.
+        #
+        # NOTE: The assembler already computes session_quality and
+        # session_vol_rank in the feature snapshot.  We use those
+        # features directly instead of maintaining a separate filter
+        # instance, avoiding state duplication and inconsistency.
+        session_quality = features.get("session_quality", 0.5)
+        session_vol_rank = features.get("session_vol_rank", 0.5)
+        session_is_peak = features.get("session_is_peak", 0.0) == 1.0
+        session_observations = features.get("session_total_observations", 0.0)
+        min_quality = self.config.risk.min_session_quality
+        warmup = self.config.risk.session_filter_warmup
+
+        # During warmup, don't block — we need data to learn.
+        # When blocked, return a WAIT signal (not None) so the frontend
+        # shows the actual reason instead of a generic "Setup still forming".
+        if session_observations >= warmup and session_quality < min_quality:
+            wait_signal = TradeSignal(
+                symbol=symbol,
+                direction=direction,
+                confidence=confidence,
+                min_confidence=min_confidence,
+                entry=0.0,
+                stop_loss=0.0,
+                take_profit=0.0,
+                horizon_sec=0,
+                snapshot=snapshot,
+                rationale=(f"session filter: quality {session_quality:.2f} < {min_quality:.2f} — low-volatility hour (rank={session_vol_rank:.2f}, peak={session_is_peak})",),
+                model_version=self.model.version,
+                execution_stop=0.0,
+                thesis_invalidation=None,
+                primary_target=0.0,
+                extended_target=0.0,
+                hold_horizon_minutes=0,
+                execution_trigger_type="session_filter_block",
+                signal_strength="wait",
+                position_scale=position_scale,
+            )
+            return DecisionReport(wait_signal, wait_signal.rationale)
+
         # ── Mean-reversion scalp path for range regimes ──────────────
         # When the market is range-bound (Hurst < 0.4) and the regime model
         # produces a directional probability above threshold, generate a
@@ -321,6 +392,14 @@ class DecisionEngine:
         # Merge weak rationale into the main rationale so the user sees why it's weak.
         if is_weak and rationale_weak:
             rationale = rationale_weak + rationale
+
+        # Append session quality to rationale so user sees why we traded this hour.
+        # Placed AFTER all early-exit paths (vol harvest, session block, scalp)
+        # so it's never lost for any signal type.
+        if session_observations >= warmup:
+            rationale += (f"session quality {session_quality:.2f} (rank={session_vol_rank:.2f}, peak={session_is_peak})",)
+        else:
+            rationale += (f"session quality {session_quality:.2f} (warming up — {int(session_observations)}/{warmup} observations)",)
 
         # ── Regime shift warning ──────────────────────────────────
         if position_scale < 1.0:
@@ -495,6 +574,15 @@ class DecisionEngine:
         features: dict[str, float],
         model_long_probability: float,
     ) -> float:
+        """Score direction using 10 components with rebalanced weights.
+
+        Weight rebalancing rationale (from comprehensive review):
+        - Synthetic indices have a CSPRNG with GARCH-like variance scheduling
+        - Pattern features (structure, displacement, momentum, confluence) are
+          noise on random data → reduced weight
+        - Statistical features (regime, volatility, GARCH, tick_flow) exploit
+          the generator's real properties → increased weight
+        """
         model_component = model_long_probability if direction is Direction.LONG else 1.0 - model_long_probability
         structure_component = self._structure_component(direction, features)
         regime_component = self._regime_component(direction, regime, features)
@@ -504,18 +592,30 @@ class DecisionEngine:
         volatility_component = self._volatility_component(direction, features)
         confluence_component = self._confluence_component(direction, features)
         tick_flow_component = self._tick_flow_component(direction, features)
+        garch_component = self._garch_component(direction, features)
+        garch_mr_component = self._garch_mr_component(direction, features)
 
+        # ── Rebalanced weights ──────────────────────────────────────
+        # Pattern-based components reduced (noise on random data):
+        #   structure 0.20→0.10, displacement 0.06→0.03,
+        #   momentum 0.06→0.03, confluence 0.07→0.04
+        # Statistical components increased (exploitable on synthetic indices):
+        #   regime 0.15→0.25, volatility 0.05→0.10, tick_flow 0.08→0.12,
+        #   garch NEW 0.10, garch_mr NEW 0.03
         weights = {
-            "model": 0.25,
-            "structure": 0.20,
-            "regime": 0.15,
-            "mean_reversion": 0.08,
-            "displacement": 0.06,
-            "momentum": 0.06,
-            "volatility": 0.05,
-            "confluence": 0.07,
-            "tick_flow": 0.08,
+            "model": 0.15,          # reduced — learns from noise, not signal
+            "structure": 0.10,      # halved — patterns are noise on synthetic indices
+            "regime": 0.25,         # largest weight — regime clustering IS real
+            "mean_reversion": 0.05, # reduced — less reliable without GARCH context
+            "displacement": 0.03,   # halved — random on synthetic indices
+            "momentum": 0.03,       # halved — random on synthetic indices
+            "volatility": 0.10,     # doubled — volatility clustering is exploitable
+            "confluence": 0.04,     # halved — multi-TF structure is noise
+            "tick_flow": 0.12,      # increased — microstructure is real
+            "garch": 0.10,          # NEW — variance forecast from EGARCH(1,1)
+            "garch_mr": 0.03,       # NEW — mean-reversion signal from GARCH
         }
+        # Total = 1.00 — statistical features now dominate (0.60 vs 0.20 for patterns)
 
         confidence = (
             weights["model"] * model_component
@@ -527,6 +627,8 @@ class DecisionEngine:
             + weights["volatility"] * volatility_component
             + weights["confluence"] * confluence_component
             + weights["tick_flow"] * tick_flow_component
+            + weights["garch"] * garch_component
+            + weights["garch_mr"] * garch_mr_component
         )
         return clamp(confidence, 0.0, 1.0)
 
@@ -653,17 +755,40 @@ class DecisionEngine:
         return score
 
     def _volatility_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Volatility component — enhanced with GARCH forecast context.
+
+        On synthetic indices, volatility clustering is the ONE exploitable
+        property.  When the GARCH model forecasts high upcoming volatility,
+        we should be cautious about direction (vol expansion = uncertainty).
+        When it forecasts low vol (compression), a breakout is imminent.
+        """
         atr_ratio = features.get("atr_ratio", 1.0)
         atr_z = features.get("atr_z_20", 0.0)
-        realized_vol = features.get("realized_vol_20", 0.0)
+        garch_vol_ratio = features.get("garch_vol_ratio", 1.0)
+        garch_z = features.get("garch_z_score", 0.0)
 
+        # Base ATR-based score
         if atr_z > 2.0:
-            return 0.30
-        if atr_ratio > 1.5:
-            return 0.40
-        if atr_ratio < 0.7:
-            return 0.60
-        return 0.55
+            base = 0.30  # extreme vol = uncertain
+        elif atr_ratio > 1.5:
+            base = 0.40
+        elif atr_ratio < 0.7:
+            base = 0.60  # compression = opportunity
+        else:
+            base = 0.55
+
+        # GARCH adjustment: when forecast vol is high relative to long-run,
+        # reduce conviction (vol expansion = unpredictable)
+        if garch_vol_ratio > 1.5:
+            base = clamp(base - 0.10, 0.20, 0.80)
+        elif garch_vol_ratio < 0.7:
+            base = clamp(base + 0.05, 0.20, 0.80)  # compression = good
+
+        # Extreme z-score: generator will mean-revert volatility
+        if abs(garch_z) > 2.5:
+            base = clamp(base + 0.05, 0.20, 0.80)  # extreme = reversion coming
+
+        return base
 
     def _confluence_component(self, direction: Direction, features: dict[str, float]) -> float:
         htf_bias_up = features.get("bias_structure_bias", 0.0)
@@ -768,6 +893,96 @@ class DecisionEngine:
         )
 
         return clamp(raw, 0.0, 1.0)
+
+    def _garch_mr_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """GARCH mean-reversion component.
+
+        When the EGARCH model detects an extreme z-score (large price move
+        relative to forecast vol), it signals that the generator's variance
+        scheduling will pull vol back.  This component scores the direction
+        that aligns with this mean-reversion expectation.
+
+        On synthetic indices, extreme moves ARE followed by reversion because
+        the generator's GARCH-like variance scheduling is the one exploitable
+        property.
+        """
+        garch_z = features.get("garch_z_score", 0.0)
+        garch_mr_signal = features.get("garch_mean_revert_signal", 0.0)
+        garch_sigma = features.get("garch_sigma", 0.0)
+
+        if garch_sigma <= 0 or garch_mr_signal <= 0:
+            return 0.50  # neutral — no mean-reversion signal
+
+        abs_z = abs(garch_z)
+
+        if abs_z < 1.5:
+            return 0.50  # not extreme enough for reversion
+
+        # Score based on whether direction aligns with mean-reversion
+        # Mean-reversion says: after a big UP move (z>0), expect DOWN
+        #                     after a big DOWN move (z<0), expect UP
+        if direction is Direction.LONG and garch_z < -1.5:
+            # Aligned: big down move + long = reversion play
+            base = 0.50 + garch_mr_signal * 0.30  # up to 0.80
+            # Extra boost for very extreme z-scores
+            if abs_z > 3.0:
+                base = clamp(base + 0.05, 0.50, 0.85)
+            return base
+        elif direction is Direction.SHORT and garch_z > 1.5:
+            # Aligned: big up move + short = reversion play
+            base = 0.50 + garch_mr_signal * 0.30
+            if abs_z > 3.0:
+                base = clamp(base + 0.05, 0.50, 0.85)
+            return base
+        else:
+            # Opposed: direction doesn't align with reversion
+            # Penalize slightly — this is a trend-continuation bet during extreme vol
+            return clamp(0.50 - garch_mr_signal * 0.10, 0.35, 0.50)
+
+    def _garch_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """GARCH variance forecast component — the NEW statistical component.
+
+        This component uses the EGARCH(1,1) one-step-ahead variance forecast
+        to score directional confidence.  On synthetic indices, the generator's
+        variance scheduling IS predictable — high vol clusters, low vol clusters.
+
+        The component scores:
+        1. Vol regime alignment (high vol = trade with caution, low vol = prepare)
+        2. Mean-reversion signal (when GARCH detects extreme vol, bet on reversion)
+        3. Persistence (high persistence = regime will last, low = rapid change)
+        """
+        garch_sigma = features.get("garch_sigma", 0.0)
+        garch_persistence = features.get("garch_persistence", 0.9)
+        garch_vol_regime = features.get("garch_vol_regime", 1.0)
+        garch_z = features.get("garch_z_score", 0.0)
+        atr_14 = features.get("atr_14", 1.0)
+
+        if garch_sigma <= 0 or atr_14 <= 0:
+            return 0.50  # neutral during warmup
+
+        # Base score: volatility regime
+        if garch_vol_regime == 0.0:  # low vol
+            base = 0.55  # slightly bullish — compression often precedes expansion
+        elif garch_vol_regime == 2.0:  # high vol
+            base = 0.35  # cautious — extreme vol = unpredictable direction
+        else:  # normal
+            base = 0.50
+
+        # Persistence adjustment: high persistence = current vol regime will last
+        if garch_persistence > 0.95:
+            if garch_vol_regime == 0.0:
+                base = clamp(base + 0.03, 0.30, 0.80)  # low vol persists = calm trading
+            elif garch_vol_regime == 2.0:
+                base = clamp(base - 0.03, 0.30, 0.80)  # high vol persists = stay cautious
+
+        # Z-score extremity: very large |z| means the generator's variance
+        # scheduling will pull vol back — slight boost for any direction
+        # (the actual directional mean-reversion is in _garch_mr_component)
+        abs_z = abs(garch_z)
+        if abs_z > 3.0:
+            base = clamp(base + 0.03, 0.30, 0.80)
+
+        return base
 
     def _rationale(
         self,

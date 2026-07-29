@@ -68,6 +68,8 @@ export const confidenceBreakdownSchema = z.object({
   displacement: z.number(),
   momentum: z.number(),
   volatility: z.number(),
+  garch: z.number(),
+  session: z.number(),
   confluence: z.number(),
   weights: z.object({
     model: z.number(),
@@ -77,6 +79,8 @@ export const confidenceBreakdownSchema = z.object({
     displacement: z.number(),
     momentum: z.number(),
     volatility: z.number(),
+    garch: z.number(),
+    session: z.number(),
     confluence: z.number(),
   }),
   calibrated: z.number().optional(),
@@ -301,6 +305,11 @@ export const marketIntelligenceSchema = z.object({
   hurst_exponent: z.number(),
   entropy: z.number(),
   displacement_atr: z.number(),
+  garch_sigma: z.number().nullable().optional(),
+  garch_vol_regime: z.enum(["low", "normal", "high"]).nullable().optional(),
+  garch_mean_revert_signal: z.number().nullable().optional(),
+  session_quality: z.number().nullable().optional(),
+  session_is_peak: z.boolean().optional(),
   key_levels: z.object({
     recent_swing_high: z.number(),
     recent_swing_low: z.number(),
@@ -497,6 +506,128 @@ export const postTradeLearningSchema = z.object({
 
 export type PostTradeLearning = z.infer<typeof postTradeLearningSchema>;
 
+export const garchForecastSchema = z.object({
+  sigma: z.number(),
+  sigma_annualized: z.number(),
+  forecast_variance: z.number(),
+  vol_regime: z.string(),
+  vol_ratio: z.number(),
+  z_score: z.number(),
+  z_score_interpretation: z.string(),
+  mean_revert_signal: z.number(),
+  persistence: z.number(),
+  persistence_label: z.string(),
+  half_life: z.number(),
+  long_run_vol: z.number(),
+  alpha: z.number(),
+  gamma: z.number(),
+  actionable: z.string(),
+}).nullable();
+
+export type GarchForecast = z.infer<typeof garchForecastSchema>;
+
+export const sessionQualitySchema = z.object({
+  quality: z.number(),
+  quality_label: z.string(),
+  vol_rank: z.number(),
+  is_peak_hour: z.boolean(),
+  hour: z.number(),
+  hour_display: z.string(),
+  trend: z.number(),
+  trend_label: z.string(),
+  consistency: z.number(),
+  total_hours_tracked: z.number(),
+  total_observations: z.number(),
+  actionable: z.string(),
+}).nullable();
+
+export type SessionQuality = z.infer<typeof sessionQualitySchema>;
+
+export const generatorFingerprintSchema = z.object({
+  detected_index: z.number(),
+  detected_label: z.string(),
+  confidence: z.number(),
+  kurtosis: z.number(),
+  skewness: z.number(),
+  cluster_score: z.number(),
+}).nullable();
+
+export type GeneratorFingerprint = z.infer<typeof generatorFingerprintSchema>;
+
+export const missedTradeLearningSchema = z.object({
+  total_resolved: z.number(),
+  missed_opportunities: z.number(),
+  correct_stayouts: z.number(),
+  miss_rate: z.number(),
+  miss_rate_display: z.string(),
+  pending_count: z.number(),
+  range_miss_boost: z.number(),
+  range_miss_boost_display: z.string(),
+  recent_outcomes: z.array(z.object({
+    symbol: z.string(),
+    recorded_at: z.string().nullable(),
+    resolved_at: z.string().nullable(),
+    model_prediction: z.string(),
+    confidence_at_record: z.number(),
+    regime: z.string(),
+    outcome: z.string(),
+    price_at_record: z.number(),
+    price_at_resolution: z.number().nullable(),
+    price_move_atr: z.number().nullable(),
+  })),
+  status: z.enum(["no_data", "active"]),
+  insight: z.string(),
+}).nullable();
+
+export type MissedTradeLearning = z.infer<typeof missedTradeLearningSchema>;
+
+export const curveFittingTestSchema = z.object({
+  symbol: z.string(),
+  n_episodes: z.number(),
+  n_ticks_per_episode: z.number(),
+  aggregate: z.object({
+    mean_win_rate: z.number(),
+    mean_profit_factor: z.number(),
+    mean_expectancy_r: z.number(),
+    mean_net_pnl: z.number(),
+    mean_signals: z.number(),
+  }),
+  consistency: z.object({
+    win_rate_std: z.number(),
+    profit_factor_std: z.number(),
+    consistency_score: z.number(),
+  }),
+  curve_fitting: z.object({
+    deflated_sharpe: z.number(),
+    pbo_score: z.number(),
+    monte_carlo_p_value: z.number(),
+    edge_detected: z.boolean(),
+  }),
+  prop_firm: z.object({
+    name: z.string(),
+    total_breaches: z.number(),
+    daily_loss_breaches: z.number(),
+    drawdown_breaches: z.number(),
+    risk_per_trade_breaches: z.number(),
+    breach_rate: z.number(),
+  }).nullable(),
+  verdict: z.string(),
+  explanation: z.string(),
+  episodes: z.array(z.object({
+    episode: z.number(),
+    seed: z.number(),
+    trades: z.number(),
+    win_rate: z.number(),
+    profit_factor: z.number(),
+    expectancy_r: z.number(),
+    net_pnl: z.number(),
+    signals: z.number(),
+  })),
+  ran_at: z.string().nullable(),
+}).nullable();
+
+export type CurveFittingTest = z.infer<typeof curveFittingTestSchema>;
+
 export const intelligencePayloadSchema = z.object({
   market_intelligence: marketIntelligenceSchema.nullable(),
   evidence_summary: evidenceSummarySchema.nullable(),
@@ -511,6 +642,11 @@ export const intelligencePayloadSchema = z.object({
   ai_narrative: aiNarrativeSchema.nullable(),
   decision_history: decisionHistorySchema.nullable(),
   post_trade_learning: postTradeLearningSchema.nullable(),
+  garch_forecast: garchForecastSchema,
+  session_quality: sessionQualitySchema,
+  generator_fingerprint: generatorFingerprintSchema,
+  missed_trade_learning: missedTradeLearningSchema,
+  curve_fitting_test: curveFittingTestSchema,
 });
 
 export type IntelligencePayload = z.infer<typeof intelligencePayloadSchema>;

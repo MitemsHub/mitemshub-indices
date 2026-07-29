@@ -168,7 +168,11 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertEqual(report.signal.stop_loss, execution_plan.execution_stop)
         self.assertEqual(report.signal.take_profit, execution_plan.primary_target)
         self.assertEqual(report.signal.thesis_invalidation, execution_plan.thesis_invalidation)
-        self.assertEqual(report.reasons, (bias.reason, setup.reason, confirmation.reason))
+        # Rationale may include weak-signal explanation prepended before the
+        # bias/setup/confirmation reasons when confidence is below the strong threshold.
+        self.assertIn(bias.reason, report.reasons)
+        self.assertIn(setup.reason, report.reasons)
+        self.assertIn(confirmation.reason, report.reasons)
 
     def test_evaluate_prefers_named_role_candle_inputs_over_legacy_reuse(self) -> None:
         config = TraderConfig.default()

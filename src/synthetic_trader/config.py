@@ -58,6 +58,8 @@ class RiskConfig:
     min_reward_risk: float = 1.35
     max_volatility_z: float = 3.0
     stake_floor: float = 0.35
+    min_session_quality: float = 0.35  # session filter gate: block bottom-third low-vol hours
+    session_filter_warmup: int = 500  # minimum observations (~8 min at 1/sec) before filter activates
 
 
 @dataclass(frozen=True)

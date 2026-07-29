@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from synthetic_trader.config import RiskConfig
 from synthetic_trader.domain import OrderIntent, TradeOutcome, TradeSignal
 from synthetic_trader.features.indicators import clamp
+
+if TYPE_CHECKING:
+    from synthetic_trader.backtest.prop_firm import PropFirmBreachTracker, PropFirmProfile
 
 
 @dataclass
@@ -16,6 +20,7 @@ class RiskState:
     realized_pnl: float = 0.0
     trades_today: int = 0
     session_day: int | None = None
+    initial_balance: float = 0.0  # For prop firm drawdown tracking
 
 
 @dataclass(frozen=True)
@@ -26,11 +31,19 @@ class RiskDecision:
 
 
 class RiskEngine:
-    def __init__(self, config: RiskConfig) -> None:
+    def __init__(
+        self,
+        config: RiskConfig,
+        prop_firm: PropFirmProfile | None = None,
+        breach_tracker: PropFirmBreachTracker | None = None,
+    ) -> None:
         self.config = config
+        self.prop_firm = prop_firm
+        self.breach_tracker = breach_tracker
         self.state = RiskState(
             equity=config.starting_equity,
             day_start_equity=config.starting_equity,
+            initial_balance=config.starting_equity,
         )
 
     def evaluate(self, signal: TradeSignal) -> RiskDecision:
@@ -49,6 +62,44 @@ class RiskEngine:
         if signal.snapshot.features.get("range_z_50", 0.0) > self.config.max_volatility_z:
             reasons.append("current candle volatility is statistically extreme")
 
+        # ── Prop firm constraints ──────────────────────────────
+        if self.prop_firm is not None:
+            initial = self.state.initial_balance
+
+            # 1) Daily loss limit (prop firm rule)
+            prop_daily_loss = self.daily_drawdown_fraction()
+            if prop_daily_loss >= self.prop_firm.max_daily_loss_pct:
+                reasons.append(
+                    f"prop firm daily loss limit ({self.prop_firm.max_daily_loss_pct:.0%}) reached"
+                )
+                if self.breach_tracker is not None:
+                    self.breach_tracker.record_breach(
+                        "daily_loss",
+                        epoch=signal.snapshot.epoch,
+                        message=f"Daily drawdown {prop_daily_loss:.1%} >= {self.prop_firm.max_daily_loss_pct:.0%}",
+                        equity=self.state.equity,
+                    )
+
+            # 2) Overall drawdown limit (prop firm rule — static, not trailing)
+            overall_drawdown = max(0.0, initial - self.state.equity) / max(initial, 1e-9)
+            if overall_drawdown >= self.prop_firm.max_overall_drawdown_pct:
+                reasons.append(
+                    f"prop firm max drawdown ({self.prop_firm.max_overall_drawdown_pct:.0%}) breached"
+                )
+                if self.breach_tracker is not None:
+                    self.breach_tracker.record_breach(
+                        "max_drawdown",
+                        epoch=signal.snapshot.epoch,
+                        message=f"Overall drawdown {overall_drawdown:.1%} >= {self.prop_firm.max_overall_drawdown_pct:.0%}",
+                        equity=self.state.equity,
+                    )
+
+            # 3) Risk per trade cap (prop firm rule)
+            if self.prop_firm.risk_per_trade_pct > 0:
+                max_risk_amount = initial * self.prop_firm.risk_per_trade_pct
+                # The stake we're about to place must not exceed this
+                # (stake check happens after reasons — we check intent below)
+
         if reasons:
             return RiskDecision(False, None, tuple(reasons))
 
@@ -60,6 +111,20 @@ class RiskEngine:
         )
         stake = max(self.config.stake_floor, risk_budget * (0.55 + 0.70 * quality))
         stake = min(stake, risk_budget * 1.25)
+
+        # ── Enforce prop firm risk-per-trade cap ──────────────
+        if self.prop_firm is not None and self.prop_firm.risk_per_trade_pct > 0:
+            max_risk_amount = self.state.initial_balance * self.prop_firm.risk_per_trade_pct
+            if stake > max_risk_amount:
+                stake = max_risk_amount
+                if self.breach_tracker is not None:
+                    self.breach_tracker.record_breach(
+                        "risk_per_trade",
+                        epoch=signal.snapshot.epoch,
+                        message=f"Stake capped to {max_risk_amount:.2f} (1.5% of initial)",
+                        equity=self.state.equity,
+                    )
+
         intent = OrderIntent(
             signal=signal,
             stake=round(stake, 2),
@@ -68,6 +133,7 @@ class RiskEngine:
                 "equity": round(self.state.equity, 2),
                 "risk_budget": round(risk_budget, 2),
                 "quality": round(quality, 4),
+                "prop_firm_active": self.prop_firm is not None,
             },
         )
         return RiskDecision(True, intent, ("risk approved",))

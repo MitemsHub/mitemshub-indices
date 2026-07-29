@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from synthetic_trader.config import TraderConfig
 from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
@@ -18,6 +19,9 @@ from synthetic_trader.models.online import OnlineLogisticModel
 from synthetic_trader.reporting.serializers import dump_json_file
 from synthetic_trader.risk.engine import RiskEngine
 from synthetic_trader.strategy.decision_engine import DecisionEngine
+
+if TYPE_CHECKING:
+    from synthetic_trader.backtest.prop_firm import PropFirmBreachTracker, PropFirmProfile
 
 
 @dataclass(frozen=True)
@@ -36,10 +40,14 @@ class BacktestEngine:
         config: TraderConfig | None = None,
         model: OnlineLogisticModel | None = None,
         journal: TradeJournal | None = None,
+        prop_firm: PropFirmProfile | None = None,
+        breach_tracker: PropFirmBreachTracker | None = None,
     ) -> None:
         self.config = config or TraderConfig.default()
         self.model = model or OnlineLogisticModel(self.config.model)
         self.journal = journal
+        self.prop_firm = prop_firm
+        self.breach_tracker = breach_tracker
 
     def run_ticks(
         self,
@@ -66,7 +74,11 @@ class BacktestEngine:
         builders = MultiTimeframeCandleBuilder(symbol, [timeframe, higher_timeframe])
         histories: dict[int, list[Candle]] = {timeframe: [], higher_timeframe: []}
         decision_engine = DecisionEngine(config, self.model)
-        risk_engine = RiskEngine(config.risk)
+        risk_engine = RiskEngine(
+            config.risk,
+            prop_firm=self.prop_firm,
+            breach_tracker=self.breach_tracker,
+        )
         broker = PaperBroker(config.paper)
         outcomes: list[TradeOutcome] = []
         signals = 0

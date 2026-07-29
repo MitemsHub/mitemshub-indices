@@ -1,4 +1,7 @@
 import { NextResponse } from "next/server";
+import { readFile } from "node:fs/promises";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { getLatestCall, getSystemStatus, getRecentHistory, readPreparedCall } from "../../../src/lib/engine-bridge";
 
 function isCallUnavailable(call: any): boolean {
@@ -23,6 +26,11 @@ function intelligenceEmptyResponse(usingPrepared = false) {
     ai_narrative: null,
     decision_history: [],
     post_trade_learning: null,
+    garch_forecast: null,
+    session_quality: null,
+    generator_fingerprint: null,
+    missed_trade_learning: null,
+    curve_fitting_test: null,
     using_prepared_call: usingPrepared,
   };
 }
@@ -135,6 +143,11 @@ async function buildIntelligencePayload(
   const decisionHistory = buildDecisionHistory(history);
   const postTradeLearning = buildPostTradeLearning(history);
 
+  const garchForecast = buildGarchForecast(currentCall);
+  const sessionQuality = buildSessionQuality(currentCall);
+  const generatorFingerprint = buildGeneratorFingerprint(currentCall);    const missedTradeLearning = buildMissedTradeLearning();
+  const curveFittingTest = buildCurveFittingTest();
+
   return {
     market_intelligence: marketIntelligence,
     evidence_summary: evidenceSummary,
@@ -149,6 +162,11 @@ async function buildIntelligencePayload(
     ai_narrative: aiNarrative,
     decision_history: decisionHistory,
     post_trade_learning: postTradeLearning,
+    garch_forecast: garchForecast,
+    session_quality: sessionQuality,
+    generator_fingerprint: generatorFingerprint,
+    missed_trade_learning: missedTradeLearning,
+    curve_fitting_test: curveFittingTest,
   };
 }
 
@@ -268,6 +286,11 @@ function buildMarketIntelligence(call: any, symbol: string) {
       hurst_exponent: features.hurst_exponent || 0.5,
       entropy: features.entropy || 0.5,
       displacement_atr: features.displacement_atr || 0,
+      garch_sigma: features.garch_sigma ?? null,
+      garch_vol_regime: features.garch_vol_regime === 0 ? "low" : features.garch_vol_regime === 2 ? "high" : features.garch_vol_regime !== undefined ? "normal" : null,
+      garch_mean_revert_signal: features.garch_mean_revert_signal ?? null,
+      session_quality: features.session_quality ?? null,
+      session_is_peak: features.session_is_peak === 1.0,
       key_levels: {
         recent_swing_high: swingHigh || 0,
         recent_swing_low: swingLow || 0,
@@ -323,6 +346,25 @@ function buildEvidenceSummary(call: any) {
 
   const entropy = features.entropy || 0;
   if (entropy > 0.7) evidence.push({ factor: "High Entropy", type: "bearish", strength: 0.4, description: "Noisy, unpredictable price action", source: "regime" });
+
+  // ── GARCH evidence ──────────────────────────────────────────
+  const garchSigma = features.garch_sigma;
+  if (garchSigma !== undefined) {
+    const volRegime = features.garch_vol_regime ?? 1;
+    if (volRegime === 2) evidence.push({ factor: "EGARCH High Vol Regime", type: "bearish", strength: 0.6, description: `Elevated volatility forecast (σ=${garchSigma.toFixed(4)}) — whipsaw risk`, source: "volatility" });
+    else if (volRegime === 0) evidence.push({ factor: "EGARCH Low Vol Regime", type: "bullish", strength: 0.4, description: `Compressed volatility (σ=${garchSigma.toFixed(4)}) — breakout potential building`, source: "volatility" });
+  }
+  const meanRevert = features.garch_mean_revert_signal;
+  if (meanRevert !== undefined && meanRevert > 0.5) {
+    evidence.push({ factor: "Strong Mean-Reversion Signal", type: "neutral", strength: 0.5, description: `EGARCH mean-reversion probability ${(meanRevert * 100).toFixed(0)}% — vol likely compressing`, source: "volatility" });
+  }
+
+  // ── Session evidence ────────────────────────────────────────
+  if (features.session_is_peak === 1.0) {
+    evidence.push({ factor: "Peak Trading Window", type: "bullish", strength: 0.4, description: "Current hour is in the top 25% for volatility — optimal entry timing", source: "volatility" });
+  } else if (features.session_quality !== undefined && features.session_quality < 0.3) {
+    evidence.push({ factor: "Low Session Quality", type: "bearish", strength: 0.3, description: "Outside optimal trading hours — reduced opportunity", source: "volatility" });
+  }
 
   const bullish = evidence.filter(e => e.type === "bullish").sort((a, b) => b.strength - a.strength);
   const bearish = evidence.filter(e => e.type === "bearish").sort((a, b) => b.strength - a.strength);
@@ -573,6 +615,49 @@ function buildConfidenceBreakdown(call: any) {
 
   const calibratedProb = call.confidence ?? modelLongProb;
 
+  // Compute GARCH and session components for the weighted sum
+  // GARCH: high mean-reversion + directional bias = LOWER confidence
+  // (price likely to revert against the trade). Low vol = breakout potential.
+  const garchComponent = (() => {
+    const garchSigma = features.garch_sigma;
+    const meanRevert = features.garch_mean_revert_signal ?? 0;
+    const volRegime = features.garch_vol_regime ?? 1;
+    if (garchSigma === undefined) return 0.5;
+    let score = 0.5;
+    // Mean reversion working AGAINST a directional trade
+    if (meanRevert > 0.5 && directionBias !== "none") score -= 0.15;
+    // Mean reversion favorable when flat (no directional risk)
+    if (meanRevert > 0.5 && directionBias === "none") score += 0.10;
+    if (volRegime === 0) score += 0.10; // low vol = breakout potential
+    if (volRegime === 2) score -= 0.15; // high vol = whipsaw risk
+    return Math.max(0, Math.min(1, score));
+  })();
+
+  const sessionComponent = (() => {
+    const sq = features.session_quality;
+    if (sq === undefined) return 0.5;
+    return sq;
+  })();
+
+  // Weighted sum using ALL components (including new GARCH + session)
+  const w = {
+    model: 0.03, structure: 0.25, regime: 0.18,
+    mean_reversion: 0.08, displacement: 0.10, momentum: 0.08,
+    volatility: 0.06, garch: 0.12, session: 0.05, confluence: 0.05,
+  };
+  const weightedFinal = (
+    w.model * modelComponent
+    + w.structure * structureComponent
+    + w.regime * regimeComponent
+    + w.mean_reversion * ((features.position_in_20_range ?? 0.5) * 0.4 + 0.3)
+    + w.displacement * Math.min(1, Math.abs(displacement) / 2.5)
+    + w.momentum * momentumComponent
+    + w.volatility * volatilityComponent
+    + w.garch * garchComponent
+    + w.session * sessionComponent
+    + w.confluence * 0.5
+  );
+
   return {
     model: modelLongProb,
     structure: structureComponent,
@@ -581,19 +666,12 @@ function buildConfidenceBreakdown(call: any) {
     displacement: Math.min(1, Math.abs(displacement) / 2.5),
     momentum: momentumComponent,
     volatility: volatilityComponent,
+    garch: garchComponent,
+    session: sessionComponent,
     confluence: 0.5,
-    weights: {
-      model: 0.03,
-      structure: 0.28,
-      regime: 0.20,
-      mean_reversion: 0.10,
-      displacement: 0.12,
-      momentum: 0.10,
-      volatility: 0.07,
-      confluence: 0.10,
-    },
+    weights: w,
     calibrated: calibratedProb,
-    final: calibratedProb,
+    final: weightedFinal,
   };
 }
 
@@ -807,6 +885,20 @@ function buildAINarrative(call: any) {
   if (Math.abs(displacementAtR) > 1.0) keyDrivers.push(`Strong displacement (${displacementAtR.toFixed(1)} ATR)`);
   if (regime === "trend_up") keyDrivers.push("Market in uptrend regime");
   else if (regime === "trend_down") keyDrivers.push("Market in downtrend regime");
+  // GARCH-driven insights
+  const garchSigma = features.garch_sigma;
+  if (garchSigma !== undefined) {
+    const volRegime = features.garch_vol_regime ?? 1;
+    if (volRegime === 2) keyDrivers.push(`EGARCH detects elevated volatility (σ=${garchSigma.toFixed(4)})`);
+    else if (volRegime === 0) keyDrivers.push(`EGARCH detects low volatility — breakout potential building (σ=${garchSigma.toFixed(4)})`);
+  }
+  const meanRevert = features.garch_mean_revert_signal;
+  if (meanRevert !== undefined && meanRevert > 0.5) {
+    keyDrivers.push(`Strong mean-reversion signal (${(meanRevert * 100).toFixed(0)}%) — vol likely compressing`);
+  }
+  // Session insights
+  const isPeak = features.session_is_peak === 1.0;
+  if (isPeak) keyDrivers.push("Peak volatility window — optimal entry timing");
   if (keyDrivers.length === 0) keyDrivers.push("Structure signals are neutral — no dominant direction");
 
   const uncertainties = [];
@@ -814,6 +906,8 @@ function buildAINarrative(call: any) {
   if ((features.entropy ?? 0) > 0.7) uncertainties.push("High entropy = noisy, unpredictable price action");
   if (regime === "volatile") uncertainties.push("Volatile regime — price can move abruptly");
   if (regime === "range") uncertainties.push("Range-bound market can trap breakout trades");
+  if ((features.garch_persistence ?? 0.96) > 0.97) uncertainties.push("High GARCH persistence — regime shift may take longer to materialize");
+  if (features.session_is_peak !== 1.0 && features.session_quality !== undefined && features.session_quality < 0.4) uncertainties.push("Low session quality — outside optimal trading hours");
   if (call.trade_status !== "valid") uncertainties.push("No valid trade signal — thesis is unconfirmed");
   if (uncertainties.length === 0) uncertainties.push("Standard market risk applies");
 
@@ -882,4 +976,319 @@ function buildPostTradeLearning(history: any[]) {
     calibration_quality: 0,
     model_version: "v1",
   };
+}
+
+// ── GARCH Volatility Forecast ──────────────────────────────────────
+// Extracts EGARCH(1,1) features from raw_features.  These are the ONE
+// genuinely exploitable property of synthetic indices — their variance
+// clusters due to the generator's scheduling algorithm.
+
+function buildGarchForecast(call: any) {
+  const features = call.raw_features || {};
+  const garchSigma = features.garch_sigma;
+  if (garchSigma === undefined || garchSigma === null) return null;
+
+  const volRegime = features.garch_vol_regime ?? 1.0;
+  const volRegimeLabel = volRegime === 0 ? "low" : volRegime === 2 ? "high" : "normal";
+  const meanRevert = features.garch_mean_revert_signal ?? 0.0;
+  const zScore = features.garch_z_score ?? 0.0;
+  const persistence = features.garch_persistence ?? 0.96;
+  const halfLife = features.garch_half_life ?? 999.0;
+  const longRunVol = features.garch_long_run_vol ?? garchSigma;
+  const volRatio = features.garch_vol_ratio ?? 1.0;
+
+  // Interpret the GARCH z-score for the user
+  let zScoreInterpretation = "normal";
+  if (Math.abs(zScore) > 3.0) zScoreInterpretation = "extreme — strong mean-reversion likely";
+  else if (Math.abs(zScore) > 2.0) zScoreInterpretation = "elevated — vol likely to compress";
+  else if (Math.abs(zScore) > 1.5) zScoreInterpretation = "moderately high";
+
+  // Persistence interpretation
+  let persistenceLabel = "high — regime changes slowly";
+  if (persistence < 0.85) persistenceLabel = "low — rapid mean-reversion expected";
+  else if (persistence < 0.93) persistenceLabel = "moderate";
+
+  return {
+    sigma: garchSigma,
+    sigma_annualized: features.garch_sigma_annualized ?? garchSigma * Math.sqrt(252 * 24 * 4),
+    forecast_variance: features.garch_forecast ?? garchSigma * garchSigma,
+    vol_regime: volRegimeLabel,
+    vol_ratio: volRatio,
+    z_score: zScore,
+    z_score_interpretation: zScoreInterpretation,
+    mean_revert_signal: meanRevert,
+    persistence: persistence,
+    persistence_label: persistenceLabel,
+    half_life: halfLife,
+    long_run_vol: longRunVol,
+    alpha: features.garch_alpha ?? 0.08,
+    gamma: features.garch_gamma ?? -0.04,
+    // Actionable insight for the user
+    actionable: meanRevert > 0.6
+      ? `Strong mean-reversion signal (${(meanRevert * 100).toFixed(0)}%) — vol likely compressing soon`
+      : meanRevert > 0.3
+      ? `Moderate mean-reversion signal (${(meanRevert * 100).toFixed(0)}%) — watch for vol compression`
+      : volRegimeLabel === "high"
+      ? `High volatility regime — ${persistenceLabel}`
+      : volRegimeLabel === "low"
+      ? `Low volatility regime — potential breakout building`
+      : `Volatility normal — monitoring for regime shifts`,
+  };
+}
+
+// ── Session Quality ────────────────────────────────────────────────
+// Tracks which hours produce the most volatile moves.  The generator's
+// server load balancing creates time-dependent behavior that is
+// exploitable for timing entries.
+
+function buildSessionQuality(call: any) {
+  const features = call.raw_features || {};
+  const sessionQuality = features.session_quality;
+  if (sessionQuality === undefined || sessionQuality === null) return null;
+
+  const volRank = features.session_vol_rank ?? 0.5;
+  const isPeak = features.session_is_peak === 1.0;
+  const hour = features.session_hour ?? 0;
+  const trend = features.session_trend ?? 0.0;
+  const consistency = features.session_consistency ?? 0.5;
+  const totalHours = features.session_total_hours ?? 0;
+  const totalObs = features.session_total_observations ?? 0;
+
+  let qualityLabel = "average";
+  if (sessionQuality >= 0.7) qualityLabel = "excellent";
+  else if (sessionQuality >= 0.6) qualityLabel = "good";
+  else if (sessionQuality <= 0.3) qualityLabel = "poor";
+
+  let trendLabel = "stable";
+  if (trend > 0.2) trendLabel = "increasing";
+  else if (trend < -0.2) trendLabel = "decreasing";
+
+  const hourStr = `${String(Math.floor(hour)).padStart(2, "0")}:00 UTC`;
+
+  return {
+    quality: sessionQuality,
+    quality_label: qualityLabel,
+    vol_rank: volRank,
+    is_peak_hour: isPeak,
+    hour: Math.floor(hour),
+    hour_display: hourStr,
+    trend: trend,
+    trend_label: trendLabel,
+    consistency: consistency,
+    total_hours_tracked: totalHours,
+    total_observations: totalObs,
+    actionable: isPeak
+      ? `Peak volatility window (${hourStr}) — best time for entries`
+      : sessionQuality >= 0.6
+      ? `Good session quality (${hourStr}) — acceptable for entries`
+      : sessionQuality <= 0.3
+      ? `Low volatility hour (${hourStr}) — consider waiting for better window`
+      : `Average session quality (${hourStr})`,
+  };
+}
+
+// ── Generator Fingerprint ──────────────────────────────────────────
+// Detects which index is being traded by analyzing return statistics.
+// Useful for confirming the system is connected to the right symbol.
+
+function buildGeneratorFingerprint(call: any) {
+  const features = call.raw_features || {};
+  const detectedIndex = features.fp_detected_index;
+  if (detectedIndex === undefined || detectedIndex === null) return null;
+
+  const confidence = features.fp_confidence ?? 0.0;
+  const kurtosis = features.fp_kurtosis ?? 0.0;
+  const skewness = features.fp_skewness ?? 0.0;
+  const clusterScore = features.fp_cluster_score ?? 0.0;
+
+  const indexLabels: Record<number, string> = {
+    0: "Volatility 10 (R_10)",
+    1: "Volatility 25 (R_25)",
+    2: "Volatility 50 (R_50)",
+    3: "Volatility 75 (R_75)",
+    4: "Volatility 100 (R_100)",
+    5: "Boom 1000",
+    6: "Crash 1000",
+    7: "Boom 500",
+    8: "Crash 500",
+    9: "Boom 300",
+    10: "Crash 300",
+    11: "Step Index",
+  };
+
+  const label = indexLabels[Math.floor(detectedIndex)] ?? `Unknown (${detectedIndex})`;
+
+  return {
+    detected_index: Math.floor(detectedIndex),
+    detected_label: label,
+    confidence: confidence,
+    kurtosis: kurtosis,
+    skewness: skewness,
+    cluster_score: clusterScore,
+  };
+}
+
+// ── Missed Trade Learning ────────────────────────────────────────
+// Reads resolved outcomes from data/missed_trade_outcomes.jsonl.
+// Shows the engine's NO_TRADE history: what it predicted, what the
+// market actually did, and whether it was a correct stay-out or a
+// missed opportunity.  The range_miss_boost tracks how many missed
+// opportunities have pushed the engine toward more aggressive range
+// trading.
+
+function buildMissedTradeLearning() {
+  try {
+    const engineRoot = process.env.SYNTHETIC_ENGINE_ROOT || process.cwd();
+    const outcomesPath = join(engineRoot, "data", "missed_trade_outcomes.jsonl");
+    const pendingPath = join(engineRoot, "data", "missed_trades.jsonl");
+
+    let outcomes: any[] = [];
+    let pending: any[] = [];
+
+    if (existsSync(outcomesPath)) {
+      try {
+        const raw = readFileSync(outcomesPath, "utf-8");
+        outcomes = raw
+          .split("\n")
+          .filter((l: string) => l.trim())
+          .map((l: string) => { try { return JSON.parse(l); } catch { return null; } })
+          .filter(Boolean)
+          .slice(-20); // last 20 resolved trades
+      } catch {
+        // Read error — treat as empty
+      }
+    }
+
+    if (existsSync(pendingPath)) {
+      try {
+        const raw = readFileSync(pendingPath, "utf-8");
+        pending = raw
+          .split("\n")
+          .filter((l: string) => l.trim())
+          .map((l: string) => { try { return JSON.parse(l); } catch { return null; } })
+          .filter(Boolean);
+      } catch {
+        // Read error — treat as empty
+      }
+    }
+
+    const totalResolved = outcomes.length;
+    const missedOpportunities = outcomes.filter((o: any) => o.outcome === 1).length;
+    const correctStayouts = outcomes.filter((o: any) => o.outcome === 0).length;
+    const pendingCount = pending.length;
+    const missRate = totalResolved > 0 ? missedOpportunities / totalResolved : 0;
+
+    // Calculate the range_miss_boost: more missed opportunities = more aggressive in range
+    // Caps at 0.3 (30% boost to range-bound confidence)
+    const rangeMissBoost = Math.min(0.3, missRate * 0.5);
+
+    // Recent outcomes with display-friendly formatting
+    const recentOutcomes = outcomes.map((o: any) => ({
+      symbol: o.symbol,
+      recorded_at: o.recorded_at ? new Date(o.recorded_at * 1000).toISOString() : null,
+      resolved_at: o.resolved_at ? new Date(o.resolved_at * 1000).toISOString() : null,
+      model_prediction: o.model_long_probability > 0.5 ? "long" : o.model_long_probability < 0.5 ? "short" : "neutral",
+      confidence_at_record: o.confidence,
+      regime: o.regime,
+      outcome: o.outcome === 1 ? "missed_opportunity" : "correct_stayout",
+      price_at_record: o.current_price,
+      price_at_resolution: o.resolved_price,
+      price_move_atr: o.price_move_atr,
+    })).reverse(); // newest first
+
+    return {
+      total_resolved: totalResolved,
+      missed_opportunities: missedOpportunities,
+      correct_stayouts: correctStayouts,
+      miss_rate: missRate,
+      miss_rate_display: `${(missRate * 100).toFixed(1)}%`,
+      pending_count: pendingCount,
+      range_miss_boost: rangeMissBoost,
+      range_miss_boost_display: `${(rangeMissBoost * 100).toFixed(1)}%`,
+      recent_outcomes: recentOutcomes,
+      status: totalResolved === 0 ? "no_data" : "active",
+      insight: totalResolved === 0
+        ? "No resolved missed trades yet. The engine will start learning once NO_TRADE decisions are recorded and resolved."
+        : missRate > 0.4
+        ? `High miss rate (${(missRate * 100).toFixed(0)}%) — the engine has been overly cautious. Range-bound confidence boosted by ${(rangeMissBoost * 100).toFixed(0)}%.`
+        : missRate > 0.2
+        ? `Moderate miss rate (${(missRate * 100).toFixed(0)}%) — the engine is recalibrating. Range-bound confidence boosted by ${(rangeMissBoost * 100).toFixed(0)}%.`
+        : `Low miss rate (${(missRate * 100).toFixed(0)}%) — the engine is well-calibrated.`,
+    };
+  } catch {
+    return null;
+  }
+}
+// ── Curve-Fitting Test ──────────────────────────────────────────
+// Reads a cached synthetic backtest report from disk.  The report is
+// generated by `python -m synthetic_trader backtest-synth --symbol R_100 --artifact-output data/curve_fitting_report.json`
+// This function simply reads the cached JSON and returns it to the frontend.
+
+function buildCurveFittingTest() {
+  try {
+    const engineRoot = process.env.SYNTHETIC_ENGINE_ROOT || process.cwd();
+    const reportPath = join(engineRoot, "data", "curve_fitting_report.json");
+
+    if (!existsSync(reportPath)) return null;
+
+    const raw = readFileSync(reportPath, "utf-8");
+    const report = JSON.parse(raw);
+
+    // Extract the key fields the UI needs
+    const aggregate = report.aggregate || {};
+    const consistency = report.consistency || {};
+    const curveFitting = report.curve_fitting || {};
+    const propFirm = report.prop_firm || null;
+
+    const episodes = Array.isArray(report.episodes)
+      ? report.episodes.map((e: any) => ({
+          episode: e.episode,
+          seed: e.seed,
+          trades: e.trades,
+          win_rate: e.win_rate,
+          profit_factor: e.profit_factor,
+          expectancy_r: e.expectancy_r,
+          net_pnl: e.net_pnl,
+          signals: e.signals,
+        }))
+      : [];
+
+    return {
+      symbol: report.symbol || "unknown",
+      n_episodes: report.n_episodes || 0,
+      n_ticks_per_episode: report.n_ticks_per_episode || 0,
+      aggregate: {
+        mean_win_rate: aggregate.mean_win_rate ?? 0,
+        mean_profit_factor: aggregate.mean_profit_factor ?? 0,
+        mean_expectancy_r: aggregate.mean_expectancy_r ?? 0,
+        mean_net_pnl: aggregate.mean_net_pnl ?? 0,
+        mean_signals: aggregate.mean_signals ?? 0,
+      },
+      consistency: {
+        win_rate_std: consistency.win_rate_std ?? 0,
+        profit_factor_std: consistency.profit_factor_std ?? 0,
+        consistency_score: consistency.consistency_score ?? 0,
+      },
+      curve_fitting: {
+        deflated_sharpe: curveFitting.deflated_sharpe ?? 0,
+        pbo_score: curveFitting.pbo_score ?? 0,
+        monte_carlo_p_value: curveFitting.monte_carlo_p_value ?? 0,
+        edge_detected: curveFitting.edge_detected ?? false,
+      },
+      prop_firm: propFirm ? {
+        name: propFirm.name || "",
+        total_breaches: propFirm.total_breaches ?? 0,
+        daily_loss_breaches: propFirm.daily_loss_breaches ?? 0,
+        drawdown_breaches: propFirm.drawdown_breaches ?? 0,
+        risk_per_trade_breaches: propFirm.risk_per_trade_breaches ?? 0,
+        breach_rate: propFirm.breach_rate ?? 0,
+      } : null,
+      verdict: report.verdict || "No test run yet",
+      explanation: report.explanation || "Run the synthetic backtest to generate a curve-fitting report.",
+      episodes,
+      ran_at: report.ran_at || null,
+    };
+  } catch {
+    return null;
+  }
 }

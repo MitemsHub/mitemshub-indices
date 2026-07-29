@@ -43,6 +43,8 @@ import { RiskAssessmentPanel } from "../intelligence/RiskAssessmentPanel";
 import { ThesisInvalidationPanel } from "../intelligence/ThesisInvalidationPanel";
 import { DecisionHistoryPanel } from "../intelligence/DecisionHistoryPanel";
 import { TradeJournalDashboard } from "../intelligence/TradeJournalDashboard";
+import { MissedTradeLearningPanel } from "../intelligence/MissedTradeLearningPanel";
+import CurveFittingTestPanel from "../intelligence/CurveFittingTestPanel";
 
 /** Shared intelligence tab content — used by both desktop section and mobile accordion. */
 function IntelTabContent({
@@ -116,10 +118,46 @@ function IntelTabContent({
       );
     case "learning":
       return (
-        <TradeJournalDashboard
-          externalTrades={null}
-          confidenceTrend={intelligence?.confidence_trend ?? null}
-        />
+        <>
+          {intelligence?.curve_fitting_test && (
+            <CurveFittingTestPanel data={intelligence.curve_fitting_test} />
+          )}
+          {!intelligence?.curve_fitting_test && (
+            <div
+              className="info-card"
+              style={{ padding: "1.25rem", borderRadius: "0.75rem" }}
+            >
+              <div style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-strong)", marginBottom: "0.375rem" }}>
+                Curve-Fitting Test
+              </div>
+              <p style={{ margin: 0, fontSize: "0.75rem", lineHeight: 1.5, color: "var(--text-body)" }}>
+                No curve-fitting report found. Run the synthetic backtest to generate one:
+              </p>
+              <pre
+                style={{
+                  marginTop: "0.5rem",
+                  padding: "0.5rem 0.75rem",
+                  borderRadius: "0.375rem",
+                  background: "var(--bg-panel-muted)",
+                  fontSize: "0.6875rem",
+                  fontFamily: "monospace",
+                  color: "var(--text-body)",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-all",
+                  margin: 0,
+                }}
+              >{`python -m synthetic_trader backtest-synth --symbol R_100 --episodes 20 --ticks 5000 --prop-firm blueberry_2step --artifact-output data/curve_fitting_report.json`}</pre>
+            </div>
+          )}
+          <MissedTradeLearningPanel
+            data={intelligence?.missed_trade_learning ?? null}
+            loading={loading}
+          />
+          <TradeJournalDashboard
+            externalTrades={null}
+            confidenceTrend={intelligence?.confidence_trend ?? null}
+          />
+        </>
       );
   }
 }

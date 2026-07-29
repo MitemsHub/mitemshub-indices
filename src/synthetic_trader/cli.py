@@ -367,6 +367,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_system.add_argument("--symbol", required=True, help="symbol to validate")
     validate_system.add_argument("--artifact-output", help="optional validation JSON output path")
+
+    backtest_synth = subparsers.add_parser(
+        "backtest-synth",
+        help="run strategy against synthetic data to detect curve-fitting",
+    )
+    backtest_synth.add_argument(
+        "--symbol", default="SYN100",
+        help="symbol: Deriv (R_75, R_100, V75, V100) or Blueberry (SYN50/75/100, SURGE50/75/100, DROP50/75/100, LEAP50/75/100)",
+    )
+    backtest_synth.add_argument("--episodes", type=int, default=20, help="number of independent synthetic datasets")
+    backtest_synth.add_argument("--ticks", type=int, default=5000, help="ticks per episode")
+    backtest_synth.add_argument("--seed", type=int, default=42, help="base seed for reproducibility")
+    backtest_synth.add_argument("--no-learn", action="store_true", help="disable online learning during backtest")
+    backtest_synth.add_argument(
+        "--prop-firm",
+        choices=["blueberry_2step", "blueberry_synthetic", "none"],
+        default="none",
+        help="enforce prop firm rules during backtest (default: none)",
+    )
+    backtest_synth.add_argument("--artifact-output", help="optional path to save the report as JSON")
+
+    collect_ticks = subparsers.add_parser(
+        "collect-ticks",
+        help="collect real tick data from MT5 for EGARCH calibration",
+    )
+    collect_ticks.add_argument("--symbol", required=True, help="symbol (e.g., SYN100, R_100)")
+    collect_ticks.add_argument("--venue-symbol", help="MT5 venue symbol (auto-detected if omitted)")
+    collect_ticks.add_argument("--duration", type=int, default=300, help="collection duration in seconds")
+    collect_ticks.add_argument("--max-ticks", type=int, default=10000, help="maximum ticks to collect")
+    collect_ticks.add_argument("--output", default="data/calibration_ticks.csv", help="CSV output path")
+    collect_ticks.add_argument("--mt5-server")
+    collect_ticks.add_argument("--mt5-login", type=int)
+    collect_ticks.add_argument("--mt5-password")
+    collect_ticks.add_argument("--mt5-terminal-path")
+
+    calibrate_egarch = subparsers.add_parser(
+        "calibrate-egarch",
+        help="fit EGARCH(1,1) parameters to collected tick data",
+    )
+    calibrate_egarch.add_argument("--csv", required=True, help="tick CSV path")
+    calibrate_egarch.add_argument("--symbol", required=True, help="symbol name")
+    calibrate_egarch.add_argument("--output", help="optional JSON output path for fitted parameters")
+    calibrate_egarch.add_argument("--apply", action="store_true", help="apply fitted params to synthetic generator config")
+
     return parser
 
 
@@ -1048,6 +1092,157 @@ def main(argv: list[str] | None = None) -> int:
         print(render_validation_text(snapshot))
         if args.artifact_output:
             dump_json_file(args.artifact_output, snapshot)
+        return 0
+
+    if args.command == "backtest-synth":
+        from synthetic_trader.backtest.synthetic_runner import SyntheticBacktestRunner
+        from synthetic_trader.backtest.synthetic_generator import (
+            SyntheticIndexConfig,
+            BLUEBERRY_INDICES,
+        )
+        from synthetic_trader.backtest.synthetic_validation import validate_synthetic_data
+
+        # Auto-detect broker from symbol
+        symbol_upper = args.symbol.upper()
+        if symbol_upper in BLUEBERRY_INDICES:
+            gen_config = SyntheticIndexConfig.from_blueberry(symbol_upper)
+            broker_label = "Blueberry Markets"
+        elif symbol_upper.startswith("R_") or symbol_upper.startswith("V"):
+            gen_config = SyntheticIndexConfig.from_deriv(symbol_upper)
+            broker_label = "Deriv"
+        else:
+            gen_config = SyntheticIndexConfig(symbol=symbol_upper)
+            broker_label = "Deriv (default)"
+
+        print(f"symbol={args.symbol}")
+        print(f"broker={broker_label}")
+        print(f"episodes={args.episodes}")
+        print(f"ticks_per_episode={args.ticks}")
+        print(f"seed={args.seed}")
+        print()
+
+        # Quick validation of synthetic data quality
+        print("Validating synthetic data quality...")
+        from synthetic_trader.backtest.synthetic_generator import SyntheticPriceGenerator
+        gen = SyntheticPriceGenerator(config=gen_config, seed=args.seed)
+        sample_ticks = gen.generate_ticks(min(1000, args.ticks))
+        validation = validate_synthetic_data(sample_ticks)
+        print(f"data_validation={validation.summary}")
+        for t in validation.tests:
+            status = "PASS" if t.passed else "FAIL"
+            print(f"  {status} {t.name}: {t.description}")
+        print()
+
+        # Resolve prop firm profile
+        prop_firm = None
+        if args.prop_firm != "none":
+            from synthetic_trader.backtest.prop_firm import get_prop_firm_profile
+            prop_firm = get_prop_firm_profile(args.prop_firm)
+            if prop_firm:
+                print(f"prop_firm={prop_firm.name}")
+                print(f"  max_daily_loss={prop_firm.max_daily_loss_pct:.0%}")
+                print(f"  max_drawdown={prop_firm.max_overall_drawdown_pct:.0%}")
+                print(f"  risk_per_trade={prop_firm.risk_per_trade_pct:.1%}")
+                print(f"  leverage=1:{prop_firm.leverage}")
+                print()
+
+        # Run the synthetic backtest
+        print("Running synthetic backtest...")
+        runner = SyntheticBacktestRunner(
+            n_episodes=args.episodes,
+            ticks_per_episode=args.ticks,
+            base_seed=args.seed,
+            learn=not args.no_learn,
+            config_override=gen_config,
+            prop_firm=prop_firm,
+        )
+        report = runner.run(args.symbol)
+        print(runner.render_report(report))
+
+        if args.artifact_output:
+            dump_json_file(args.artifact_output, report.to_dict())
+            print(f"\nartifact_output={Path(args.artifact_output)}")
+        return 0
+
+    if args.command == "collect-ticks":
+        from synthetic_trader.calibration.mt5_collector import (
+            collect_ticks_from_mt5,
+            get_venue_symbol,
+        )
+
+        venue_sym = args.venue_symbol or get_venue_symbol(args.symbol)
+        print(f"Collecting ticks for {args.symbol} ({venue_sym})...")
+        print(f"Duration: {args.duration}s, Max ticks: {args.max_ticks}")
+        print(f"Output: {args.output}")
+        print()
+
+        try:
+            result = collect_ticks_from_mt5(
+                symbol=args.symbol,
+                venue_symbol=venue_sym,
+                duration_sec=args.duration,
+                max_ticks=args.max_ticks,
+                output_path=args.output,
+                server=args.mt5_server,
+                login=args.mt5_login,
+                password=args.mt5_password,
+                terminal_path=args.mt5_terminal_path,
+            )
+            print(result.summary())
+            return 0
+        except RuntimeError as exc:
+            print(f"Error: {exc}")
+            print("Make sure MT5 terminal is running and the symbol is available.")
+            return 1
+
+    if args.command == "calibrate-egarch":
+        from synthetic_trader.models.garch_calibration import (
+            calibrate_from_ticks_csv,
+            save_calibration_result,
+        )
+
+        print(f"Calibrating EGARCH(1,1) for {args.symbol}...")
+        print(f"Input: {args.csv}")
+        print()
+
+        result = calibrate_from_ticks_csv(
+            csv_path=args.csv,
+            symbol=args.symbol,
+        )
+
+        print(f"symbol={result.symbol}")
+        print(f"observations={result.n_observations}")
+        print(f"convergence={result.convergence}")
+        print(f"message={result.message}")
+        print()
+        print("Fitted Parameters:")
+        print(f"  omega  = {result.omega:.6f}")
+        print(f"  alpha  = {result.alpha:.6f}")
+        print(f"  beta   = {result.beta:.6f}")
+        print(f"  gamma  = {result.gamma:.6f}")
+        print()
+        print("Diagnostics:")
+        print(f"  persistence    = {result.persistence:.4f}")
+        print(f"  half_life      = {result.half_life:.1f} obs")
+        print(f"  long_run_vol   = {result.long_run_vol:.6f}")
+        print(f"  realized_vol   = {result.realized_vol:.6f}")
+        print(f"  vol_ratio      = {result.vol_ratio:.4f}")
+        print(f"  neg_log_lik    = {result.negative_log_likelihood:.2f}")
+        print(f"  ljung_box_p    = {result.ljung_box_p_value:.4f}")
+        print(f"  arch_test_p    = {result.arch_test_p_value:.4f}")
+
+        if args.output:
+            save_calibration_result(result, args.output)
+            print(f"\nSaved to {args.output}")
+
+        if args.apply:
+            print("\nApplying to synthetic generator config...")
+            print(f"  New GARCH params for {args.symbol}:")
+            print(f"    omega={result.omega:.6e}")
+            print(f"    alpha={result.alpha:.4f}")
+            print(f"    beta={result.beta:.4f}")
+            print(f"    gamma={result.gamma:.4f}")
+
         return 0
 
     parser.error(f"unknown command {args.command!r}")

@@ -26,6 +26,7 @@ from synthetic_trader.models.regime_detector import (
     AnomalyAlert,
     RegimeShiftState,
 )
+from synthetic_trader.models.garch import EGARCHVarianceForecaster, GARCHState
 
 __all__ = [
     "OnlineLogisticModel",
@@ -40,6 +41,8 @@ __all__ = [
     "MarketState",
     "AnomalyAlert",
     "RegimeShiftState",
+    "EGARCHVarianceForecaster",
+    "GARCHState",
     "FeatureSelector",
     "FeatureImportance",
     "FeatureImportanceReport",
