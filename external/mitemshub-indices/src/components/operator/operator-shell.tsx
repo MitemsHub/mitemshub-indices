@@ -71,6 +71,12 @@ function IntelTabContent({
             modelProbability={call?.confidence ?? undefined}
             loading={loading}
           />
+          <CollapsiblePanel title="Missed Trade Learning">
+            <MissedTradeLearningPanel
+              data={intelligence?.missed_trade_learning ?? null}
+              loading={loading}
+            />
+          </CollapsiblePanel>
           <CollapsiblePanel title="Alternative Scenario">
             <AlternativeScenarioPanel
               scenario={intelligence?.alternative_scenario || null}
@@ -164,13 +170,9 @@ function IntelTabContent({
               </div>
             )}
           </CollapsiblePanel>
-          <CollapsiblePanel title="Missed Trade Learning">
+          <CollapsiblePanel title="System Performance">
             <SystemPerformancePanel
               performance={intelligence.system_performance ?? null}
-              loading={intelligenceLoading}
-            />
-            <MissedTradeLearningPanel
-              data={intelligence?.missed_trade_learning ?? null}
               loading={loading}
             />
           </CollapsiblePanel>
