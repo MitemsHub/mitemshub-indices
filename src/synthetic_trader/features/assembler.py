@@ -62,6 +62,15 @@ def build_snapshot(
             effective_htf_regime = Regime.RANGE
         features[f"htf_regime_{effective_htf_regime.value}"] = 1.0
         features[f"htf_regime_unknown"] = 0.0
+        # Regime confidence: 1.0 = own candles, 0.5 = inherited from parent, 0.25 = RANGE fallback
+        if higher_regime != Regime.UNKNOWN and len(higher_timeframe_candles) >= 5:
+            features["htf_regime_confidence"] = 1.0
+        elif higher_regime != Regime.UNKNOWN:
+            features["htf_regime_confidence"] = 0.75  # own candles but < 5
+        elif regime != Regime.UNKNOWN:
+            features["htf_regime_confidence"] = 0.5   # inherited from primary
+        else:
+            features["htf_regime_confidence"] = 0.25  # RANGE fallback
         notes.extend(f"HTF {note}" for note in higher_notes)
 
     if extra_timeframes:
@@ -90,6 +99,15 @@ def build_snapshot(
                 effective_regime = Regime.RANGE
             features[f"{prefix}_regime_{effective_regime.value}"] = 1.0
             features[f"{prefix}_regime_unknown"] = 0.0
+            # Regime confidence: 1.0 = own candles, 0.5 = inherited from parent, 0.25 = RANGE fallback
+            if extra_regime != Regime.UNKNOWN and len(timeframe_candles) >= 5:
+                features[f"{prefix}regime_confidence"] = 1.0
+            elif extra_regime != Regime.UNKNOWN:
+                features[f"{prefix}regime_confidence"] = 0.75  # own candles but < 5
+            elif regime != Regime.UNKNOWN:
+                features[f"{prefix}regime_confidence"] = 0.5   # inherited from primary
+            else:
+                features[f"{prefix}regime_confidence"] = 0.25  # RANGE fallback
             if extra_regime == Regime.UNKNOWN:
                 notes.append(f"{prefix.upper()} regime set to {effective_regime.value} (inherited — {len(timeframe_candles)} candles insufficient)")
             else:
@@ -125,6 +143,12 @@ def build_snapshot(
         features.update(tick_features)
         if any(v != 0.0 for k, v in tick_features.items() if k != "tick_total"):
             notes.append(f"tick_flow: vel={tick_features.get('tick_velocity', 0):.4f} accel={tick_features.get('tick_acceleration', 0):.4f}")
+
+    # Primary timeframe regime confidence: 1.0 if >=5 candles, 0.75 if <5
+    features["regime_confidence"] = 1.0 if len(candles) >= 5 else 0.75
+
+    # Primary timeframe regime confidence: 1.0 if >=5 candles, 0.75 if <5
+    features["regime_confidence"] = 1.0 if len(candles) >= 5 else 0.75
 
     epoch = candles[-1].open_time + timeframe_sec if candles else 0.0
     return FeatureSnapshot(

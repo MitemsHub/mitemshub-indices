@@ -106,6 +106,7 @@ export type Evidence = z.infer<typeof evidenceSchema>;
 export const timeframeAnalysisSchema = z.object({
   timeframe: z.string(),
   regime: z.string(),
+  regime_confidence: z.number().optional(),
   structure_bias: z.number(),
   bos_up: z.number(),
   bos_down: z.number(),

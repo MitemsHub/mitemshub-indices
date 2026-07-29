@@ -179,6 +179,7 @@ function buildTfRow(
   overrideStructure: Record<string, number>,
   thesisInvalidation: number | null,
   primaryTarget: number | null,
+  regimeConfidence?: number,
 ): any {
   const sb = features[`${prefix}structure_bias`] ?? features.structure_bias ?? 0;
   const regime = features[`${prefix}regime_trend_up`]
@@ -200,6 +201,7 @@ function buildTfRow(
   return {
     timeframe,
     regime,
+    regime_confidence: regimeConfidence,
     structure_bias: sb,
     bos_up: features[`${prefix}bos_up`] ?? features.bos_up ?? 0,
     bos_down: features[`${prefix}bos_down`] ?? features.bos_down ?? 0,
@@ -265,8 +267,8 @@ function buildMarketIntelligence(call: any, symbol: string) {
       }
     }
 
-    const primaryTf = buildTfRow("1M", features, "", conf, regime, structure, thesisInvalidation, primaryTarget);
-    const higherTf = buildTfRow("5M", features, "htf_", conf * 0.95, regime, structure, thesisInvalidation, primaryTarget);
+    const primaryTf = buildTfRow("1M", features, "", conf, regime, structure, thesisInvalidation, primaryTarget, features.regime_confidence);
+    const higherTf = buildTfRow("5M", features, "htf_", conf * 0.95, regime, structure, thesisInvalidation, primaryTarget, features.htf_regime_confidence);
 
     const synth15M = buildRealTfRow("15M", features, "confirmation_", conf, structure, call);
     const synth1H = buildRealTfRow("1H", features, "setup_", conf, structure, call);
@@ -423,9 +425,12 @@ function buildRealTfRow(
 
     const dir = sb > 0.1 ? "bullish" : sb < -0.1 ? "bearish" : "neutral";
 
+    const regimeConfidence = (features as any)[`${prefix}regime_confidence`] ?? undefined;
+
     return {
         timeframe,
         regime,
+        regime_confidence: regimeConfidence,
         structure_bias: sb,
         bos_up: (features as any)[`${prefix}bos_up`] ?? features.bos_up ?? 0,
         bos_down: (features as any)[`${prefix}bos_down`] ?? features.bos_down ?? 0,

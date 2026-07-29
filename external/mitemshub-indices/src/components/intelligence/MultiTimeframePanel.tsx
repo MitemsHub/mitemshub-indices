@@ -102,6 +102,14 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
     unknown: "text-[var(--text-muted)] bg-[var(--bg-panel-muted)] border-[var(--line-subtle)]",
   };
 
+  // Regime confidence dot: green = own candles, yellow = inherited, red = RANGE fallback
+  function regimeConfidenceDot(rc?: number) {
+    if (rc === undefined || rc === null) return null;
+    if (rc >= 0.75) return <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--accent-positive)] flex-shrink-0" title="Regime from own candles (confident)" />;
+    if (rc >= 0.5) return <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--accent-warn)] flex-shrink-0" title="Regime inherited from parent timeframe" />;
+    return <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--accent-danger)] flex-shrink-0" title="Regime fell back to RANGE (lowest confidence)" />;
+  }
+
   return (
     <section className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
       <div className="flex items-center gap-2">
@@ -129,9 +137,12 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
               <tr key={tf.timeframe} className="border-b border-[var(--line-subtle)]">
                 <td className="py-2 px-3 utility-copy text-xs uppercase tracking-[0.1em] font-mono">{tf.timeframe}</td>
                 <td className="py-2 px-3">
-                  <span className={`info-chip rounded-full px-2 py-0.5 text-xs ${regimeColors[tf.regime] || regimeColors.unknown}`}>
-                    {tf.regime.replace("_", " ")}
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className={`info-chip rounded-full px-2 py-0.5 text-xs ${regimeColors[tf.regime] || regimeColors.unknown}`}>
+                      {tf.regime.replace("_", " ")}
+                    </span>
+                    {regimeConfidenceDot(tf.regime_confidence)}
+                  </div>
                 </td>
                 <td className="py-2 px-3">
                   <div className="flex items-center gap-2">
@@ -188,9 +199,12 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <span className="font-mono text-xs font-bold uppercase text-[var(--text-strong)]">{tf.timeframe}</span>
-                <span className={`info-chip rounded-full px-1.5 py-0.5 text-[10px] ${regimeColors[tf.regime] || regimeColors.unknown}`}>
-                  {tf.regime.replace("_", " ")}
-                </span>
+                <div className="flex items-center gap-1">
+                  <span className={`info-chip rounded-full px-1.5 py-0.5 text-[10px] ${regimeColors[tf.regime] || regimeColors.unknown}`}>
+                    {tf.regime.replace("_", " ")}
+                  </span>
+                  {regimeConfidenceDot(tf.regime_confidence)}
+                </div>
               </div>
               <span className={`text-xs font-medium ${tf.direction_bias === "bullish" ? "text-[var(--accent-positive)]" : tf.direction_bias === "bearish" ? "text-[var(--accent-danger)]" : "text-[var(--text-muted)]"}`}>
                 {tf.direction_bias === "bullish" ? "▲ Bullish" : tf.direction_bias === "bearish" ? "▼ Bearish" : "■ Neutral"}
