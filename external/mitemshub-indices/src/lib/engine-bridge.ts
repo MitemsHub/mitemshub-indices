@@ -213,6 +213,117 @@ let manualCallGate: Promise<void> | null = null;
 let lastWarmupAt: string | null = null;
 let mt5LastConnectedAt: string | null = null;
 
+// ── MT5 auto-retry with exponential backoff ─────────────────
+// When the MT5 terminal is running but the connection is stale
+// (no successful test in the last 30s), automatically retry the
+// connection. Uses exponential backoff: 30s → 60s → 120s → 240s
+// (max 5 minutes). Resets on success.
+const MT5_RETRY_BASE_MS = 30_000;
+const MT5_RETRY_MAX_MS = 300_000; // 5 minutes
+let mt5RetryState = {
+  consecutiveFailures: 0,
+  lastAttemptAt: 0, // epoch ms
+  nextRetryAt: 0,   // epoch ms
+  inProgress: false,
+  lastResult: null as { success: boolean; error: string | null; duration_ms: number } | null,
+};
+
+function getMt5RetryBackoffMs(): number {
+  const { consecutiveFailures } = mt5RetryState;
+  if (consecutiveFailures <= 0) return MT5_RETRY_BASE_MS;
+  // Exponential backoff: base * 2^(failures-1), capped at max
+  return Math.min(
+    MT5_RETRY_BASE_MS * Math.pow(2, consecutiveFailures - 1),
+    MT5_RETRY_MAX_MS,
+  );
+}
+
+/**
+ * Check whether an automatic MT5 reconnection attempt should be triggered.
+ * Returns true if:
+ * - MT5 is configured (credentials in .env.local)
+ * - MT5 terminal process is running (terminal64.exe detected)
+ * - Connection is stale (no successful test in the last 30s)
+ * - No retry is currently in progress
+ * - Enough time has passed since the last attempt (respecting backoff)
+ */
+async function shouldRetryMt5(): Promise<boolean> {
+  const cfg = getConfiguredLivePropProfile();
+  if (!cfg) return false; // MT5 not configured
+
+  const running = await isMt5ProcessRunning();
+  if (!running) return false; // Terminal not running
+
+  // Check if connection is stale (no successful test in 30s)
+  if (mt5LastConnectedAt) {
+    const elapsed = Date.now() - new Date(mt5LastConnectedAt).getTime();
+    if (elapsed < MT5_RETRY_BASE_MS) return false; // Recently connected
+  }
+
+  // Check backoff
+  if (mt5RetryState.inProgress) return false; // Already retrying
+  if (Date.now() < mt5RetryState.nextRetryAt) return false; // Backoff active
+
+  return true;
+}
+
+/**
+ * Execute an automatic MT5 reconnection attempt with exponential backoff.
+ * Called from getHealthMetrics() on each 15-second poll cycle.
+ * Fire-and-forget — doesn't block the health response.
+ */
+function triggerMt5AutoRetry(): void {
+  if (mt5RetryState.inProgress) return;
+
+  mt5RetryState.inProgress = true;
+  mt5RetryState.lastAttemptAt = Date.now();
+
+  // Fire-and-forget — don't await, let it run in background
+  retryMt5Connection().then((result) => {
+    mt5RetryState.lastResult = {
+      success: result.success,
+      error: result.error,
+      duration_ms: result.duration_ms,
+    };
+
+    if (result.success) {
+      // Reset backoff on success
+      mt5RetryState.consecutiveFailures = 0;
+      mt5RetryState.nextRetryAt = 0;
+    } else {
+      // Increment failures and set next retry time
+      mt5RetryState.consecutiveFailures += 1;
+      mt5RetryState.nextRetryAt = Date.now() + getMt5RetryBackoffMs();
+    }
+  }).catch((err) => {
+    console.warn("[mt5-auto-retry] Retry failed:", err instanceof Error ? err.message : err);
+    mt5RetryState.consecutiveFailures += 1;
+    mt5RetryState.nextRetryAt = Date.now() + getMt5RetryBackoffMs();
+    mt5RetryState.lastResult = {
+      success: false,
+      error: "Auto-retry failed",
+      duration_ms: 0,
+    };
+  }).finally(() => {
+    mt5RetryState.inProgress = false;
+  });
+}
+
+/**
+ * Get the current MT5 auto-retry status for the frontend.
+ * Called from getHealthMetrics() to include retry state in the response.
+ */
+function getMt5AutoRetryStatus() {
+  return {
+    consecutive_failures: mt5RetryState.consecutiveFailures,
+    last_attempt_at: mt5RetryState.lastAttemptAt || null,
+    next_retry_at: mt5RetryState.nextRetryAt || null,
+    in_progress: mt5RetryState.inProgress,
+    backoff_ms: getMt5RetryBackoffMs(),
+    last_result: mt5RetryState.lastResult,
+  };
+}
+
 /**
  * Warmup cycle counter — increments on every completed warmup pass.
  * Used to periodically trigger a live-tick collection (every 10th cycle)
@@ -646,6 +757,26 @@ export async function getHealthMetrics(): Promise<{
     lastUpdatedAt: string | null;
     staleDataSince: number | null;
   };
+  mt5_process_running: boolean;
+  mt5_last_connected_at: string | null;
+  mt5_last_test: {
+    success: boolean;
+    error: string | null;
+    server: string | null;
+    terminal_path: string | null;
+    duration_ms: number;
+    account_name: string | null;
+    account_balance: number | null;
+    tested_at: string;
+  } | null;
+  mt5_auto_retry: {
+    consecutive_failures: number;
+    last_attempt_at: number | null;
+    next_retry_at: number | null;
+    in_progress: boolean;
+    backoff_ms: number;
+    last_result: { success: boolean; error: string | null; duration_ms: number } | null;
+  };
 }> {
   const engineRoot = getConfiguredEngineRoot();
   if (!engineRoot) {
@@ -665,6 +796,13 @@ export async function getHealthMetrics(): Promise<{
         lastGuardianReason: null, lastStderr: null,
         lastRetryCount: 0, lastError: null, lastUpdatedAt: null,
         staleDataSince: null,
+      },
+      mt5_process_running: false,
+      mt5_last_connected_at: null,
+      mt5_last_test: null,
+      mt5_auto_retry: {
+        consecutive_failures: 0, last_attempt_at: null, next_retry_at: null,
+        in_progress: false, backoff_ms: MT5_RETRY_BASE_MS, last_result: null,
       },
     };
   }
@@ -785,7 +923,7 @@ export async function getHealthMetrics(): Promise<{
   const bridge_unavailable = getConfiguredEngineRoot() !== null
     && freshDiagnostics.lastError !== null;
 
-  // ── MT5 process check and last test (parallel reads) ──────
+  // ── MT5 process check, last test, and auto-retry (parallel reads) ──
   let mt5Running = false;
   let mt5LastTest: Mt5TestFileRecord | null = null;
   const mt5Config = getConfiguredLivePropProfile();
@@ -794,6 +932,14 @@ export async function getHealthMetrics(): Promise<{
       isMt5ProcessRunning().then((r) => { mt5Running = r; }),
       readMt5LastTest(engineRoot).then((r) => { mt5LastTest = r; }),
     ]);
+
+    // Auto-retry stale MT5 connection with exponential backoff.
+    // Fire-and-forget — doesn't block the health response.
+    // Uses the already-known mt5Running flag to avoid a redundant tasklist call.
+    const lastTestOk = mt5LastTest != null && (mt5LastTest as Mt5TestFileRecord).success;
+    if (mt5Running && !lastTestOk && !mt5RetryState.inProgress && Date.now() >= mt5RetryState.nextRetryAt) {
+      triggerMt5AutoRetry();
+    }
   }
 
   return {
@@ -804,6 +950,7 @@ export async function getHealthMetrics(): Promise<{
     mt5_process_running: mt5Running,
     mt5_last_connected_at: mt5LastConnectedAt,
     mt5_last_test: mt5LastTest,
+    mt5_auto_retry: getMt5AutoRetryStatus(),
     csv_size_bytes: csvSizeBytes,
     csv_ticks: csvTicks,
     health_history: healthHistory,
