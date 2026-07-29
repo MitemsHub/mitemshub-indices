@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { XIcon } from "../../lib/icons";
+import { XIcon, ChevronLeftIcon } from "../../lib/icons";
 import { useScrollLock } from "../../hooks/use-scroll-lock";
 import type { AccountMode, TradingMode, ExecutionMode } from "../../lib/contracts";
 import type { FreshCallResponse } from "../../lib/contracts";
@@ -47,14 +47,14 @@ export function HamburgerNav({
   onSetExecutionMode,
 }: HamburgerNavProps) {
   const [mounted, setMounted] = useState(false);
-  const [animPhase, setAnimPhase] = useState<"closed" | "entering" | "open">("closed");
+  const [animPhase, setAnimPhase] = useState<"closed" | "entering" | "open" | "closing">("closed");
 
   // Track mount state for portal
   useEffect(() => {
     setMounted(true);
   }, []);
 
-  // Two-step open animation: first remove --hidden, then add --open on next frame
+  // Two-step open/close animation
   useEffect(() => {
     if (open) {
       // Step 1: remove --hidden so the drawer is painted at translateX(100%)
@@ -65,8 +65,13 @@ export function HamburgerNav({
       });
       return () => cancelAnimationFrame(raf);
     } else {
-      // Closing: go directly to closed (CSS transition handles the slide-out)
-      setAnimPhase("closed");
+      // Step 1: remove --open so the drawer slides to translateX(100%)
+      setAnimPhase("closing");
+      // Step 2: after the 420ms CSS transition completes, add --hidden
+      const timer = setTimeout(() => {
+        setAnimPhase("closed");
+      }, 420);
+      return () => clearTimeout(timer);
     }
   }, [open]);
 
@@ -100,14 +105,17 @@ export function HamburgerNav({
         aria-label="Settings menu"
         aria-hidden={!open}
       >
-        <button
-          type="button"
-          className="close-btn"
-          onClick={onClose}
-          aria-label="Close menu"
-        >
-          <XIcon />
-        </button>
+        <div className="flex items-center gap-2 mb-4">
+          <button
+            type="button"
+            className="back-btn"
+            onClick={onClose}
+            aria-label="Go back"
+          >
+            <ChevronLeftIcon />
+          </button>
+          <span className="text-sm font-semibold text-[var(--text-strong)]">Settings</span>
+        </div>
 
         {/* Account mode */}
         <div className="mobile-nav-section">

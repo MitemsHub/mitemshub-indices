@@ -1,11 +1,14 @@
 "use client"
 
 import type { TradeProgress } from "../../lib/contracts";
+import { DataFreshnessDot } from "./DataFreshnessDot";
 import { formatPrice } from "../../lib/formatters";
+import { TradeProgressSkeleton } from "./TradeProgressSkeleton";
 
 type TradeProgressPanelProps = {
   progress: TradeProgress | null;
   currentPrice?: number | null;
+  loading?: boolean;
 };
 
 type TradeProgressEvent = {
@@ -17,20 +20,29 @@ type TradeProgressEvent = {
   confidence: number | null;
 };
 
-export function TradeProgressPanel({ progress, currentPrice }: TradeProgressPanelProps) {
+export function TradeProgressPanel({ progress, currentPrice, loading }: TradeProgressPanelProps) {
+  if (loading) {
+    return <TradeProgressSkeleton />;
+  }
+
   if (!progress || !progress.events.length) {
     return (
       <section className="intelligence-panel surface rounded-[1.5rem] p-4">
-        <p className="utility-copy text-xs uppercase tracking-[0.2em]">Trade Progress Timeline</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={false} />
+          <p className="utility-copy text-xs uppercase tracking-[0.2em]">Trade Progress Timeline</p>
+        </div>
         <p className="mt-4 text-base text-[var(--text-body)]">No trade events yet. Run a live read to start tracking.</p>
       </section>
     );
   }
 
   return (
-    <section className="intelligence-panel surface rounded-[1.5rem] p-4">
-      <div className="flex items-center justify-between">
-        <p className="utility-copy text-xs uppercase tracking-[0.2em]">Trade Progress Timeline</p>
+    <section className="intelligence-panel surface rounded-[1.5rem] p-4">        <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={true} />
+          <p className="utility-copy text-xs uppercase tracking-[0.2em]">Trade Progress Timeline</p>
+        </div>
         <div className="flex items-center gap-2">
           <span className="info-chip rounded-full px-2 py-1 text-xs">
             Phase: {progress.current_phase}

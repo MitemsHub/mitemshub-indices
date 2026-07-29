@@ -1,17 +1,27 @@
 "use client"
 
 import type { AlternativeScenario } from "../../lib/contracts";
+import { DataFreshnessDot } from "./DataFreshnessDot";
 import { formatPct } from "../../lib/formatters";
+import { AlternativeScenarioSkeleton } from "./AlternativeScenarioSkeleton";
 
 type AlternativeScenarioPanelProps = {
   scenario: AlternativeScenario | null;
+  loading?: boolean;
 };
 
-export function AlternativeScenarioPanel({ scenario }: AlternativeScenarioPanelProps) {
+export function AlternativeScenarioPanel({ scenario, loading }: AlternativeScenarioPanelProps) {
+  if (loading) {
+    return <AlternativeScenarioSkeleton />;
+  }
+
   if (!scenario) {
     return (
       <div className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Alternative Scenario</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={false} />
+          <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Alternative Scenario</p>
+        </div>
         <p className="mt-4 text-sm text-[var(--text-body)]">No alternative scenario available. Run a live read to generate.</p>
       </div>
     );
@@ -20,7 +30,10 @@ export function AlternativeScenarioPanel({ scenario }: AlternativeScenarioPanelP
   return (
     <div className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
       <div className="flex items-center justify-between">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Alternative Scenario</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={true} />
+          <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Alternative Scenario</p>
+        </div>
         <span className="info-chip rounded-full px-2 md:px-3 py-0.5 md:py-1 text-xs md:text-sm">
           Probability: {formatPct(scenario.probability)}
         </span>

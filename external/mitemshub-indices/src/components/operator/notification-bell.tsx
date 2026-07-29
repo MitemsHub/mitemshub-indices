@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 
 type NotificationPreferences = {
   newTradePlan: boolean;
@@ -36,9 +37,16 @@ export function NotificationBell({
   onTogglePref,
 }: NotificationBellProps) {
   const [open, setOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, right: 16 });
+
+  // Track mount state for portal
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Calculate dropdown position from button's bounding rect
   const updatePosition = useCallback(() => {
@@ -68,7 +76,9 @@ export function NotificationBell({
   useEffect(() => {
     if (!open) return;
     const handleClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
+      const clickedInsideBell = ref.current?.contains(e.target as Node);
+      const clickedInsideDropdown = dropdownRef.current?.contains(e.target as Node);
+      if (!clickedInsideBell && !clickedInsideDropdown) {
         setOpen(false);
       }
     };
@@ -94,45 +104,13 @@ export function NotificationBell({
       ? "var(--accent-ink)"
       : "var(--text-muted)";
 
-  return (
-    <div className="relative" ref={ref} suppressHydrationWarning>
-      {/* Bell button */}
-      <button
-        ref={btnRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="relative flex items-center justify-center w-10 h-10 rounded-full transition-all duration-200 hover:bg-[var(--line-subtle)] active:scale-95"
-        title="Notification settings"
-        aria-label="Notification settings"
-      >
-        <svg
-          width="22"
-          height="22"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke={bellColor}
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-        </svg>
-        {permission === "granted" && hasAnyEnabled && (
-          <span className="absolute top-2 right-2 w-2.5 h-2.5 rounded-full bg-[var(--accent-positive)] ring-2 ring-[var(--bg-canvas)]" />
-        )}
-        {permission === "denied" && (
-          <span className="absolute top-2 right-2 w-2.5 h-2.5 rounded-full bg-[var(--accent-danger)] ring-2 ring-[var(--bg-canvas)]" />
-        )}
-      </button>
-
-      {/* Dropdown — fixed positioning to escape sticky header stacking context */}
-      {open && (
-        <div
-          className="fixed z-[9999] w-72 rounded-2xl border border-[var(--line-subtle)] bg-[var(--bg-panel-strong)] shadow-[var(--shadow-elevated)] overflow-hidden"
-          style={{ top: dropdownPos.top, right: dropdownPos.right }}
-          role="menu"
-        >
+  const dropdown = (
+    <div
+      ref={dropdownRef}
+      className="fixed z-[9999] w-72 rounded-2xl border border-[var(--line-subtle)] bg-[var(--bg-panel-strong)] shadow-[var(--shadow-elevated)] overflow-hidden"
+      style={{ top: dropdownPos.top, right: dropdownPos.right }}
+      role="menu"
+    >
           {/* Header with title and close button */}
           <div className="flex items-center justify-between px-4 pt-4 pb-2">
             <p className="text-xs font-semibold uppercase tracking-[0.15em] text-[var(--text-muted)]">
@@ -218,7 +196,42 @@ export function NotificationBell({
             )}
           </div>
         </div>
-      )}
+  );
+
+  return (
+    <div className="relative" ref={ref} suppressHydrationWarning>
+      {/* Bell button */}
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="relative flex items-center justify-center w-10 h-10 rounded-full transition-all duration-200 hover:bg-[var(--line-subtle)] active:scale-95"
+        title="Notification settings"
+        aria-label="Notification settings"
+      >
+        <svg
+          width="22"
+          height="22"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={bellColor}
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+        {permission === "granted" && hasAnyEnabled && (
+          <span className="absolute top-2 right-2 w-2.5 h-2.5 rounded-full bg-[var(--accent-positive)] ring-2 ring-[var(--bg-canvas)]" />
+        )}
+        {permission === "denied" && (
+          <span className="absolute top-2 right-2 w-2.5 h-2.5 rounded-full bg-[var(--accent-danger)] ring-2 ring-[var(--bg-canvas)]" />
+        )}
+      </button>
+
+      {/* Dropdown — portaled to document.body to escape .app-shell stacking context */}
+      {mounted && open && createPortal(dropdown, document.body)}
     </div>
   );
 }

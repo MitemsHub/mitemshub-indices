@@ -1,16 +1,26 @@
 "use client"
 
 import type { ConfidenceTrend } from "../../lib/contracts";
+import { DataFreshnessDot } from "./DataFreshnessDot";
+import { ConfidenceTrendSkeleton } from "./ConfidenceTrendSkeleton";
 
 type ConfidenceTrendPanelProps = {
   trend: ConfidenceTrend | null;
+  loading?: boolean;
 };
 
-export function ConfidenceTrendPanel({ trend }: ConfidenceTrendPanelProps) {
+export function ConfidenceTrendPanel({ trend, loading }: ConfidenceTrendPanelProps) {
+  if (loading) {
+    return <ConfidenceTrendSkeleton />;
+  }
+
   if (!trend || !trend.history.length) {
     return (
       <div className="intelligence-panel surface rounded-[1.5rem] p-4">
-        <p className="utility-copy text-xs uppercase tracking-[0.2em]">Confidence Trend</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={false} />
+          <p className="utility-copy text-xs uppercase tracking-[0.2em]">Confidence Trend</p>
+        </div>
         <p className="mt-4 text-base text-[var(--text-body)]">Run live reads to build confidence history.</p>
       </div>
     );
@@ -23,9 +33,11 @@ export function ConfidenceTrendPanel({ trend }: ConfidenceTrendPanelProps) {
   };
 
   return (
-    <div className="intelligence-panel surface rounded-[1.5rem] p-4">
-      <div className="flex items-center justify-between">
-        <p className="utility-copy text-xs uppercase tracking-[0.2em]">Confidence Trend</p>
+    <div className="intelligence-panel surface rounded-[1.5rem] p-4">        <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={true} />
+          <p className="utility-copy text-xs uppercase tracking-[0.2em]">Confidence Trend</p>
+        </div>
         <span className={`info-chip rounded-full px-3 py-1 text-sm font-medium ${trendColors[trend.trend] || trendColors.stable}`}>
           Trend: {trend.trend.charAt(0).toUpperCase() + trend.trend.slice(1)}
         </span>

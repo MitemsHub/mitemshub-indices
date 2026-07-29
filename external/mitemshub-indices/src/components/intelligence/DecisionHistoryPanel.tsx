@@ -1,20 +1,30 @@
 "use client"
 
 import type { FreshCallResponse } from "../../lib/contracts";
+import { DataFreshnessDot } from "./DataFreshnessDot";
 import { formatPrice } from "../../lib/formatters";
+import { DecisionHistorySkeleton } from "./DecisionHistorySkeleton";
 
 type DecisionHistoryPanelProps = {
   history: FreshCallResponse[] | null;
   limit?: number;
+  loading?: boolean;
 };
 
-export function DecisionHistoryPanel({ history, limit = 15 }: DecisionHistoryPanelProps) {
+export function DecisionHistoryPanel({ history, limit = 15, loading }: DecisionHistoryPanelProps) {
+  if (loading) {
+    return <DecisionHistorySkeleton />;
+  }
+
   const items = history || [];
 
   if (!items.length) {
     return (
       <div className="intelligence-panel surface rounded-[1.5rem] p-4">
-        <p className="utility-copy text-xs uppercase tracking-[0.2em]">Decision History</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={false} />
+          <p className="utility-copy text-xs uppercase tracking-[0.2em]">Decision History</p>
+        </div>
         <p className="mt-4 text-base text-[var(--text-body)]">No decision history available.</p>
       </div>
     );
@@ -23,9 +33,11 @@ export function DecisionHistoryPanel({ history, limit = 15 }: DecisionHistoryPan
   const displayed = items.slice(0, limit);
 
   return (
-    <section className="intelligence-panel surface rounded-[1.5rem] p-4">
-      <div className="flex items-center justify-between">
-        <p className="utility-copy text-xs uppercase tracking-[0.2em]">Decision History</p>
+    <section className="intelligence-panel surface rounded-[1.5rem] p-4">        <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={true} />
+          <p className="utility-copy text-xs uppercase tracking-[0.2em]">Decision History</p>
+        </div>
         <span className="info-chip rounded-full px-2 py-1 text-xs">{displayed.length} entries</span>
       </div>
 

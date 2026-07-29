@@ -23,6 +23,9 @@ import { IntelPanelToggles } from "./intel-panel-toggles";
 import { HealthDashboard } from "./health-dashboard";
 import { PipelineDiagnosticsPanel } from "./pipeline-diagnostics-panel";
 import { CombinedMenuButton } from "./combined-menu-button";
+import { NotificationBell } from "./notification-bell";
+import { LotSizeCalculator } from "./lot-size-calculator";
+import { BridgeOfflineBanner } from "./bridge-offline-banner";
 import { TABS, type IntelPanelId, resolveEnabledPanels, readIntelPanelOverrides } from "../../lib/constants";
 import { PriceChart } from "../charts/PriceChart";
 
@@ -66,6 +69,7 @@ function IntelTabContent({
           />
           <AlternativeScenarioPanel
             scenario={intelligence?.alternative_scenario || null}
+            loading={loading}
           />
         </>
       );
@@ -78,14 +82,17 @@ function IntelTabContent({
           <div className="grid gap-5 md:grid-cols-2">
             <ConfidenceTrendPanel
               trend={intelligence?.confidence_trend || null}
+              loading={loading}
             />
             <RiskAssessmentPanel
               assessment={intelligence?.risk_assessment || null}
+              loading={loading}
             />
           </div>
           <ThesisInvalidationPanel
             invalidation={intelligence?.thesis_invalidation || null}
             currentPrice={call?.current_close ?? null}
+            loading={loading}
           />
         </>
       );
@@ -95,12 +102,15 @@ function IntelTabContent({
           <TradeProgressPanel
             progress={intelligence?.trade_progress || null}
             currentPrice={call?.current_close ?? null}
+            loading={loading}
           />
           <ConfidenceTrendPanel
             trend={intelligence?.confidence_trend || null}
+            loading={loading}
           />
           <DecisionHistoryPanel
             history={history}
+            loading={loading}
           />
         </>
       );
@@ -183,20 +193,23 @@ export function OperatorShell() {
         className="shell-frame mx-auto max-w-7xl px-4 py-4 md:px-6 md:py-6"
         {...(!isDesktop ? pullHandlers : {})}
       >
-        {/* ── Header: single combined menu button ── */}
-        <div className="sticky top-0 z-40 flex items-center justify-end mb-2 py-1 -mx-4 px-4 md:mx-0 md:px-0 bg-[var(--bg-canvas)] md:bg-transparent backdrop-blur-sm md:backdrop-blur-none">
+        {/* ── Header: hamburger LEFT, actions RIGHT (professional convention) ── */}
+        <div className="sticky top-0 z-40 flex items-center justify-between mb-2 py-1 -mx-4 px-4 md:mx-0 md:px-0 bg-[var(--bg-canvas)] md:bg-transparent backdrop-blur-sm md:backdrop-blur-none">
           <CombinedMenuButton
             onOpenSettings={() => setMobileNavOpen(true)}
-            notificationPermission={workspace.notifications.permission}
-            notificationPrefs={workspace.notifications.prefs}
-            onEnableNotifications={workspace.notifications.enable}
-            onToggleNotificationPref={workspace.notifications.togglePref}
             onToggleTheme={() => {
               const html = document.documentElement;
               const current = html.getAttribute("data-theme") || "light";
               html.setAttribute("data-theme", current === "dark" ? "light" : "dark");
             }}
             currentTheme={typeof window !== "undefined" ? (document.documentElement.getAttribute("data-theme") || "light") : "light"}
+          />
+          <NotificationBell
+            permission={workspace.notifications.permission}
+            prefs={workspace.notifications.prefs}
+            isSupported={workspace.notifications.isSupported}
+            onEnable={workspace.notifications.enable}
+            onTogglePref={workspace.notifications.togglePref}
           />
         </div>
         {/* Hidden HamburgerNav — renders settings drawer via portal */}
@@ -226,6 +239,13 @@ export function OperatorShell() {
             threshold={pullThreshold}
           />
         )}
+        {/* ── Bridge Offline Banner ───────────────────────────────── */}
+        <BridgeOfflineBanner
+          offline={workspace.currentCall?.guardian_state === "unavailable"}
+          onRetry={() => workspace.runSymbol(workspace.activeSymbol)}
+          retrying={isLoading}
+        />
+
         {/* ── Connection Status ────────────────────────────────────── */}
         <ErrorBoundary label="Connection status">
           <ConnectionStatus />
@@ -298,6 +318,7 @@ export function OperatorShell() {
                   <MarketIntelligencePanel
                     intelligence={workspace.intelligence?.market_intelligence ?? null}
                     currentPrice={workspace.currentCall?.current_close ?? null}
+                    loading={workspace.intelligenceLoading}
                   />
                 )}
                 {(enabledPanels.includes("multi_timeframe") || enabledPanels.includes("evidence_summary")) && (
@@ -418,6 +439,19 @@ export function OperatorShell() {
           ) : null}
           <HistoryPanel history={workspace.history} />
         </section>
+        {/* ── Lot Size Calculator ─────────────────────────────── */}
+        <section className="mt-6">
+          <ErrorBoundary label="Lot size calculator">
+            <LotSizeCalculator
+              accountEquity={workspace.propProfile?.currentBalance || 100_000}
+              entryPrice={workspace.currentCall?.entry ?? null}
+              stopLoss={workspace.currentCall?.stop_loss ?? null}
+              takeProfit={workspace.currentCall?.take_profit ?? null}
+              symbol={workspace.activeSymbol}
+            />
+          </ErrorBoundary>
+        </section>
+
         {/* ── Pipeline Diagnostics ────────────────────────────────── */}
         <section className="mt-6">
           <ErrorBoundary label="Pipeline diagnostics">

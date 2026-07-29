@@ -35,6 +35,25 @@ type SseStatusData = {
   uptime: number;
 };
 
+type ReplayBufferSymbolStats = {
+  buffer_size: number;
+  capacity: number;
+  fill_pct: number;
+  total_seen: number;
+  mini_batch_size: number;
+  replay_ratio: number;
+  label_0_count: number;
+  label_1_count: number;
+  label_balance: number;
+  model_updates: number;
+  model_version: string;
+} | null | { error: string };
+
+type ReplayBufferStats = {
+  r_75: ReplayBufferSymbolStats;
+  r_100: ReplayBufferSymbolStats;
+};
+
 function formatTimestamp(iso: string | null): string {
   if (!iso) return "Never";
   const d = new Date(iso);
@@ -102,6 +121,7 @@ export function PipelineDiagnosticsPanel() {
   const [collecting, setCollecting] = useState(false);
   const [collectResult, setCollectResult] = useState<string | null>(null);
   const [sseStatus, setSseStatus] = useState<SseStatusData | null>(null);
+  const [replayStats, setReplayStats] = useState<ReplayBufferStats | null>(null);
 
   // useCallback keeps a stable reference for the useEffect dependency.
   // Without it, the effect would re-run on every render.
@@ -129,10 +149,22 @@ export function PipelineDiagnosticsPanel() {
         // SSE status unavailable — not critical
       }
     };
+    const fetchReplayStats = async () => {
+      try {
+        const res = await fetch("/api/system/replay-buffer-stats");
+        if (res.ok) {
+          setReplayStats(await res.json());
+        }
+      } catch {
+        // Replay stats unavailable — not critical
+      }
+    };
     void fetchSseStatus();
+    void fetchReplayStats();
     const interval = setInterval(() => {
       void fetchDiagnostics();
       void fetchSseStatus();
+      void fetchReplayStats();
     }, 10_000);
     return () => clearInterval(interval);
   }, [fetchDiagnostics]);
@@ -420,6 +452,88 @@ export function PipelineDiagnosticsPanel() {
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Replay Buffer Stats */}
+              {replayStats && (
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-label)] font-medium">
+                    Replay Buffer
+                  </p>
+                  {(["r_75", "r_100"] as const).map((symbol) => {
+                    const stats = replayStats[symbol];
+                    const symbolLabel = symbol === "r_75" ? "V75" : "V100";
+                    // Model not loaded yet
+                    if (stats === null) {
+                      return (
+                        <div key={symbol} className="rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel-muted)] px-2.5 py-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-mono font-semibold text-[var(--text-strong)] uppercase">{symbolLabel}</span>
+                            <span className="text-[10px] text-[var(--text-muted)] italic">No model loaded</span>
+                          </div>
+                        </div>
+                      );
+                    }
+                    if (!stats || "error" in stats) {
+                      const errMsg = stats && "error" in stats ? (stats as { error: string }).error : "Unavailable";
+                      return (
+                        <div key={symbol} className="rounded-lg border border-[var(--accent-danger)] bg-[var(--accent-danger-soft)] px-2.5 py-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-mono font-semibold text-[var(--text-strong)] uppercase">{symbolLabel}</span>
+                            <span className="text-[10px] text-[var(--accent-danger)]">{errMsg}</span>
+                          </div>
+                        </div>
+                      );
+                    }
+                    const s = stats as { buffer_size: number; capacity: number; fill_pct: number; total_seen: number; mini_batch_size: number; replay_ratio: number; label_0_count: number; label_1_count: number; label_balance: number; model_updates: number; model_version: string };
+                    const fillColor = s.fill_pct > 80 ? "bg-[var(--accent-positive)]" : s.fill_pct > 50 ? "bg-[var(--accent-ink)]" : "bg-[var(--text-muted)]";
+                    return (
+                      <div key={symbol} className="rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel-muted)] px-2.5 py-2">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[10px] font-mono font-semibold text-[var(--text-strong)] uppercase">
+                            {symbol === "r_75" ? "V75" : "V100"}
+                          </span>
+                          <span className="text-[10px] text-[var(--text-muted)] font-mono">
+                            v{s.model_version} · {s.model_updates} updates
+                          </span>
+                        </div>
+                        {/* Fill bar */}
+                        <div className="h-1.5 rounded-full bg-[var(--line-subtle)] overflow-hidden mb-1.5">
+                          <div className={`h-full rounded-full ${fillColor} transition-all duration-500`} style={{ width: `${Math.min(s.fill_pct, 100)}%` }} />
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]">
+                          <span className="flex items-center gap-1">
+                            <span className="text-[var(--text-label)]">Fill:</span>
+                            <span className="font-mono font-semibold text-[var(--text-body)]">{s.buffer_size.toLocaleString()}/{s.capacity.toLocaleString()} ({s.fill_pct}%)</span>
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="text-[var(--text-label)]">Seen:</span>
+                            <span className="font-mono text-[var(--text-body)]">{s.total_seen.toLocaleString()}</span>
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="text-[var(--text-label)]">Batch:</span>
+                            <span className="font-mono text-[var(--text-body)]">{s.mini_batch_size}</span>
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="text-[var(--text-label)]">Ratio:</span>
+                            <span className="font-mono text-[var(--text-body)]">{s.replay_ratio}</span>
+                          </span>
+                        </div>
+                        {/* Label distribution */}
+                        <div className="mt-1.5 flex items-center gap-2">
+                          <span className="text-[10px] text-[var(--text-label)]">Labels:</span>
+                          <div className="flex-1 h-1 rounded-full bg-[var(--line-subtle)] overflow-hidden flex">
+                            <div className="h-full bg-[var(--accent-positive)]" style={{ width: `${(1 - s.label_balance) * 100}%` }} />
+                            <div className="h-full bg-[var(--accent-danger)]" style={{ width: `${s.label_balance * 100}%` }} />
+                          </div>
+                          <span className="text-[10px] font-mono text-[var(--text-muted)]">
+                            {s.label_1_count}↑ / {s.label_0_count}↓
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 

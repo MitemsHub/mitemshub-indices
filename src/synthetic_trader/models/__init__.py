@@ -12,9 +12,34 @@ from synthetic_trader.models.advanced import (
     ModelMonitor,
 )
 from synthetic_trader.models.online import OnlineLogisticModel
+from synthetic_trader.models.replay_buffer import ExperienceReplayBuffer, ReplayEntry
+from synthetic_trader.models.feature_monitor import (
+    FeatureImportanceMonitor,
+    FeatureSnapshot,
+    DriftAlert,
+)
+from synthetic_trader.models.regime_detector import (
+    CUSUMFilter,
+    HiddenMarkovRegimeDetector,
+    RegimeShiftDetector,
+    MarketState,
+    AnomalyAlert,
+    RegimeShiftState,
+)
 
 __all__ = [
     "OnlineLogisticModel",
+    "ExperienceReplayBuffer",
+    "ReplayEntry",
+    "FeatureImportanceMonitor",
+    "FeatureSnapshot",
+    "DriftAlert",
+    "CUSUMFilter",
+    "HiddenMarkovRegimeDetector",
+    "RegimeShiftDetector",
+    "MarketState",
+    "AnomalyAlert",
+    "RegimeShiftState",
     "FeatureSelector",
     "FeatureImportance",
     "FeatureImportanceReport",

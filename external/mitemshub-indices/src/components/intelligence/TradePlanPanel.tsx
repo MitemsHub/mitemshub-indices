@@ -1,11 +1,85 @@
-"use client"
+"use client";
 
+import { useState } from "react";
 import type { TradePlan } from "../../lib/contracts";
 import { formatPrice } from "../../lib/formatters";
 
 type TradePlanPanelProps = {
   plan: TradePlan | null;
 };
+
+function CopyToMt5Button({ plan }: { plan: TradePlan }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    const entry = plan.executionLevels?.entry ?? plan.entry;
+    const sl = plan.executionLevels?.executionStop ?? plan.executionStop;
+    const tp = plan.executionLevels?.primaryTarget ?? plan.primaryTarget;
+    const direction = plan.direction === "long" ? "BUY" : "SELL";
+    const orderType = plan.direction === "long" ? "Buy Limit" : "Sell Limit";
+
+    const text = [
+      `${direction} ${orderType}`,
+      `Entry: ${entry ? formatPrice(entry) : "—"}`,
+      `Stop Loss: ${sl ? formatPrice(sl) : "—"}`,
+      `Take Profit: ${tp ? formatPrice(tp) : "—"}`,
+      `Hold: ${plan.holdHorizonMinutes} min`,
+      `R:R: ${plan.rewardRisk != null ? `1:${plan.rewardRisk.toFixed(1)}` : "—"}`,
+    ].join("\n");
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback for older browsers
+      try {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch {
+        // Both methods failed — don't show false positive
+      }
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      aria-label="Copy trade levels to clipboard for MT5"
+      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10px] font-medium transition-all ${
+        copied
+          ? "border-[var(--accent-positive)] text-[var(--accent-positive)] bg-[var(--accent-positive-soft)]"
+          : "border-[var(--accent-ink)] text-[var(--accent-ink)] hover:bg-[var(--accent-ink)] hover:text-white"
+      }`}
+    >
+      {copied ? (
+        <>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+          Copied!
+        </>
+      ) : (
+        <>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+          Copy to MT5
+        </>
+      )}
+    </button>
+  );
+}
 
 export function TradePlanPanel({ plan }: TradePlanPanelProps) {
   if (!plan) {
@@ -21,9 +95,12 @@ export function TradePlanPanel({ plan }: TradePlanPanelProps) {
     <section className="intelligence-panel surface rounded-[1.5rem] p-4">
       <div className="flex items-center justify-between">
         <p className="utility-copy text-xs uppercase tracking-[0.2em]">Primary Trade Plan</p>
-        <span className={`info-chip rounded-full px-3 py-1 text-sm font-medium ${plan.direction === "long" ? "text-[var(--accent-positive)] bg-[var(--accent-positive-soft)]" : "text-[var(--accent-danger)] bg-[var(--accent-danger-soft)]"}`}>
-          {plan.direction.toUpperCase()}
-        </span>
+        <div className="flex items-center gap-2">
+          <CopyToMt5Button plan={plan} />
+          <span className={`info-chip rounded-full px-3 py-1 text-sm font-medium ${plan.direction === "long" ? "text-[var(--accent-positive)] bg-[var(--accent-positive-soft)]" : "text-[var(--accent-danger)] bg-[var(--accent-danger-soft)]"}`}>
+            {plan.direction.toUpperCase()}
+          </span>
+        </div>
       </div>
 
       <div className="mt-4 grid gap-4 md:grid-cols-4">

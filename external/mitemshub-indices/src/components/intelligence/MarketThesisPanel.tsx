@@ -1,6 +1,7 @@
 "use client"
 
 import type { MarketThesis } from "../../lib/contracts";
+import { DataFreshnessDot } from "./DataFreshnessDot";
 import { formatPrice } from "../../lib/formatters";
 import { SkeletonBar } from "../ui/skeleton";
 
@@ -90,7 +91,10 @@ export function MarketThesisPanel({ thesis, loading }: MarketThesisPanelProps) {
   if (!thesis) {
     return (
       <div className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Current Market Thesis</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={false} />
+          <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Current Market Thesis</p>
+        </div>
         <p className="mt-4 text-sm text-[var(--text-body)]">Market thesis is not available for the current call state.</p>
       </div>
     );
@@ -105,7 +109,10 @@ export function MarketThesisPanel({ thesis, loading }: MarketThesisPanelProps) {
   return (
     <div className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
       <div className="flex items-center justify-between">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Current Market Thesis</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={true} />
+          <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Current Market Thesis</p>
+        </div>
         <span className={`info-chip rounded-full px-2 md:px-3 py-0.5 md:py-1 text-xs md:text-sm font-medium ${directionColors[thesis.direction] || directionColors.neutral}`}>
           {thesis.direction.toUpperCase()}
         </span>

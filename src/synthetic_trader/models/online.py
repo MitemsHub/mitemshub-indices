@@ -8,6 +8,7 @@ from pathlib import Path
 
 from synthetic_trader.config import ModelConfig
 from synthetic_trader.features.indicators import clamp
+from synthetic_trader.models.replay_buffer import ExperienceReplayBuffer
 
 
 @dataclass
@@ -17,6 +18,7 @@ class OnlineLogisticModel:
     bias: float = 0.0
     updates: int = 0
     metadata: dict[str, str] = field(default_factory=dict)
+    replay_buffer: ExperienceReplayBuffer = field(default_factory=ExperienceReplayBuffer)
 
     @property
     def version(self) -> str:
@@ -30,6 +32,10 @@ class OnlineLogisticModel:
         return clamp(raw, 0.08, 0.92)
 
     def update(self, features: dict[str, float], label: int, sample_weight: float = 1.0) -> float:
+        """Update model weights with a single sample and store in replay buffer.
+
+        Returns the predicted probability before the update.
+        """
         if label not in (0, 1):
             raise ValueError("label must be 0 or 1")
 
@@ -45,6 +51,25 @@ class OnlineLogisticModel:
             self.weights[key] = regularized + lr * error * value
 
         self.updates += 1
+        return probability
+
+    def update_with_replay(self, features: dict[str, float], label: int, sample_weight: float = 1.0) -> float:
+        """Update model with new data AND replay past experiences.
+
+        This prevents catastrophic forgetting by blending replayed past
+        samples with the new incoming data during each update step.
+
+        Returns the predicted probability for the new sample.
+        """
+        # 1. Perform the normal online update on the new sample
+        probability = self.update(features, label, sample_weight)
+
+        # 2. Store the experience in the replay buffer
+        self.replay_buffer.add(features, label, sample_weight)
+
+        # 3. Replay past experiences to reinforce old patterns
+        self.replay_buffer.replay_updates(self)
+
         return probability
 
     def save(self, path: str | Path, metadata: dict[str, str] | None = None) -> None:

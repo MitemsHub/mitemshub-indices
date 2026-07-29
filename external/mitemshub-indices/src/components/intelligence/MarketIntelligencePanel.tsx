@@ -2,6 +2,8 @@
 
 import type { MarketIntelligence } from "../../lib/contracts";
 import { formatNumber, formatPrice } from "../../lib/formatters";
+import { DataFreshnessDot } from "./DataFreshnessDot";
+import { MarketIntelligenceSkeleton } from "./MarketIntelligenceSkeleton";
 
 /** Normalize various direction string formats to canonical "bullish" | "bearish" | "neutral". */
 function normalizeDirection(dir: string | null | undefined): "bullish" | "bearish" | "neutral" {
@@ -15,16 +17,25 @@ function normalizeDirection(dir: string | null | undefined): "bullish" | "bearis
 type MarketIntelligencePanelProps = {
   intelligence: MarketIntelligence | null;
   currentPrice: number | null;
+  loading?: boolean;
 };
 
 export function MarketIntelligencePanel({
   intelligence,
   currentPrice,
+  loading,
 }: MarketIntelligencePanelProps) {
+  if (loading) {
+    return <MarketIntelligenceSkeleton />;
+  }
+
   if (!intelligence) {
     return (
       <div className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
-        <p className="utility-copy text-xs uppercase tracking-[0.2em]">AI Market Intelligence</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={false} />
+          <p className="utility-copy text-xs uppercase tracking-[0.2em]">AI Market Intelligence</p>
+        </div>
         <p className="mt-4 text-sm text-[var(--text-body)]">Market intelligence is not available for the current call state.</p>
       </div>
     );
@@ -61,6 +72,7 @@ export function MarketIntelligencePanel({
       <div className="p-3 md:p-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 min-w-0">
+          <DataFreshnessDot live={true} />
           <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">AI Market Intelligence</p>
           {diverges && (
             <span

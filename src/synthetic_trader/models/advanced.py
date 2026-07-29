@@ -849,10 +849,15 @@ class EnsembleModel:
         return clamp(ensemble_prob, 1e-7, 1 - 1e-7)
 
     def update(self, features: dict[str, float], label: int, sample_weight: float = 1.0) -> list[float]:
-        """Update all models in ensemble."""
+        """Update all models in ensemble using experience replay.
+
+        Each constituent model is updated via ``update_with_replay`` so
+        that past experiences are replayed alongside the new sample,
+        preventing catastrophic forgetting across the ensemble.
+        """
         probs = []
         for model in self.models:
-            prob = model.update(features, label, sample_weight)
+            prob = model.update_with_replay(features, label, sample_weight)
             probs.append(prob)
         return probs
 

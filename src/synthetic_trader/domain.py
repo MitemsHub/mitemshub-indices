@@ -99,19 +99,25 @@ class TradeSignal:
     hold_horizon_minutes: int | None = None
     execution_trigger_type: str | None = None
     signal_strength: str = "strong"  # "strong_buy" | "weak_buy" | "wait" | "weak_sell" | "strong_sell"
+    position_scale: float = 1.0  # 0.0-1.0, reduced by regime shift detector during anomalies
 
     @property
     def position_sizing(self) -> str:
-        """Recommend position sizing based on signal strength.
+        """Recommend position sizing based on signal strength and regime position_scale.
 
-        - strong_buy / strong_sell → "full" (full risk allocation)
-        - weak_buy / weak_sell → "half" (reduced risk)
-        - wait → "none" (no execution)
+        The regime shift detector can reduce position_scale below 1.0 when
+        it detects anomalies (CUSUM shift, HMM regime change, variance spike).
+
+        - strong + position_scale >= 0.8 → "full"
+        - strong + position_scale < 0.8 → "reduced" (regime anomaly)
+        - weak + position_scale >= 0.8 → "half"
+        - weak + position_scale < 0.8 → "minimal"
+        - wait → "none"
         """
         if self.signal_strength.startswith("strong"):
-            return "full"
+            return "full" if self.position_scale >= 0.8 else "reduced"
         elif self.signal_strength.startswith("weak"):
-            return "half"
+            return "half" if self.position_scale >= 0.8 else "minimal"
         return "none"
 
     @property

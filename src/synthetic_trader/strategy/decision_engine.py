@@ -16,6 +16,7 @@ from synthetic_trader.strategy.swing_execution_builder import build_swing_execut
 from synthetic_trader.strategy.setup_builder import classify_setup
 from synthetic_trader.strategy.top_down_bias import infer_top_down_bias
 from synthetic_trader.strategy.regime_models import regime_model
+from synthetic_trader.models.regime_detector import RegimeShiftDetector, MarketState
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class DecisionEngine:
         self.config = config
         self.model = model or OnlineLogisticModel(config.model)
         self.calibration = CalibrationState()
+        self.regime_detector = RegimeShiftDetector()
         self._call_lifecycle: dict[str, str] = {}
 
     def evaluate(
@@ -154,6 +156,22 @@ class DecisionEngine:
         features = dict(snapshot.features)
         model_long_probability = self.model.predict_proba(features)
         calibrated_prob = self.calibration.calibrate(model_long_probability)
+
+        # ── Regime shift detection (HMM + CUSUM) ──────────────────────
+        # Feed the latest log-return into the regime detector.  If it
+        # detects an anomaly (CUSUM shift, HMM regime change, or variance
+        # spike) the position_scale will be reduced to protect capital.
+        log_return = features.get("log_return", 0.0)
+        hmm_state, position_scale, regime_alerts = self.regime_detector.update(log_return)
+        if position_scale < 1.0:
+            logging.info(
+                "[%s] regime shift detected: state=%s position_scale=%.2f alerts=%d",
+                symbol, hmm_state.name, position_scale, len(regime_alerts),
+            )
+        features["regime_position_scale"] = position_scale
+        features["regime_hmm_state"] = float(hmm_state.value)
+        for alert in regime_alerts:
+            features[f"regime_alert_{alert.alert_type}"] = 1.0
 
         # ── Regime-specific probabilistic model (direction-agnostic) ──
         regime_out = regime_model(features, snapshot.regime, Direction.FLAT)
@@ -268,6 +286,7 @@ class DecisionEngine:
                     hold_horizon_minutes=30,
                     execution_trigger_type="mean_reversion_scalp",
                     signal_strength=signal_strength,
+                    position_scale=position_scale,
                 )
                 return DecisionReport(signal, scalp_rationale)
 
@@ -303,6 +322,13 @@ class DecisionEngine:
         if is_weak and rationale_weak:
             rationale = rationale_weak + rationale
 
+        # ── Regime shift warning ──────────────────────────────────
+        if position_scale < 1.0:
+            regime_state = MarketState(int(features.get("regime_hmm_state", 1)))
+            rationale = (
+                f"⚠ regime shift detected — position_scale={position_scale:.0%} (HMM: {regime_state.name})",
+            ) + rationale
+
         execution_plan = None
         if role_candles and trading_mode == "sniper":
             swing_signal = build_swing_execution(
@@ -333,6 +359,7 @@ class DecisionEngine:
                     hold_horizon_minutes=swing_signal.hold_hours * 60,
                     execution_trigger_type="liquidity_sweep_reversal" if swing_signal.setup_type == "liquidity_sweep_reversal" else "structure_continuation",
                     signal_strength=signal_strength,
+                    position_scale=position_scale,
                 )
                 return DecisionReport(signal, rationale)
         elif role_candles:
@@ -401,6 +428,7 @@ class DecisionEngine:
                 extended_target=take_profit,
                 hold_horizon_minutes=profile.intraday_hold_horizon_minutes,
                 signal_strength=signal_strength,
+                position_scale=position_scale,
             )
             return DecisionReport(signal, rationale)
 
@@ -423,6 +451,7 @@ class DecisionEngine:
             hold_horizon_minutes=execution_plan.hold_horizon_minutes,
             execution_trigger_type=execution_plan.trigger_type,
             signal_strength=signal_strength,
+            position_scale=position_scale,
         )
         return DecisionReport(signal, rationale)
 
@@ -792,8 +821,15 @@ class DecisionEngine:
         return {
             "direction": signal.direction.value,
             "confidence": signal.confidence,
+            "position_scale": signal.position_scale,
+            "position_sizing": signal.position_sizing,
             "model_probability": signal.snapshot.features.get("model_long_probability", 0.5),
             "regime": signal.snapshot.regime.value,
+            "regime_shift": {
+                "hmm_state": MarketState(int(features.get("regime_hmm_state", 1))).name,
+                "position_scale": features.get("regime_position_scale", 1.0),
+                "alerts": [k for k in features if k.startswith("regime_alert_")],
+            },
             "structure_bias": features.get("structure_bias", 0.0),
             "key_factors": {
                 "model_component": features.get("model_long_probability", 0.5),

@@ -638,8 +638,18 @@ def build_guardian_snapshot(
             # Engine analyzed the data and produced a signal, but risk rejected it.
             enriched["guardian_state"] = "actionable"
             enriched["guardian_reason"] = "Signal generated but blocked by risk controls. Review risk state."
+        elif snapshot.get("raw_features") or snapshot.get("snapshot_structure"):
+            # Engine HAS analyzed data (features exist) but couldn't produce a
+            # clean signal — typically because candle count is below threshold.
+            wait_detail = (snapshot.get("wait_for") or "").strip()
+            enriched["guardian_state"] = "actionable"
+            if wait_detail:
+                # Capitalize first letter so the sentence reads naturally
+                enriched["guardian_reason"] = f"Engine analyzed the market but setup is incomplete — {wait_detail[0].upper()}{wait_detail[1:]}"
+            else:
+                enriched["guardian_reason"] = "Engine analyzed the market but setup is incomplete. Waiting for stronger directional confirmation."
         else:
-            # Only show "forming" when there's truly no data to analyze.
+            # Truly no data at all — CSV empty, live ticks failed.
             enriched["guardian_state"] = "forming"
             enriched["guardian_reason"] = "Waiting for market data — no candle history available for analysis."
         return enriched

@@ -1,6 +1,7 @@
 "use client"
 
 import type { ConfidenceBreakdown } from "../../lib/contracts";
+import { DataFreshnessDot } from "./DataFreshnessDot";
 import { formatPct } from "../../lib/formatters";
 import { SkeletonBar, SkeletonCard } from "../ui/skeleton";
 
@@ -71,7 +72,10 @@ export function ConfidenceBreakdownPanel({
   if (!breakdown) {
     return (
       <div className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Confidence Breakdown</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={false} />
+          <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Confidence Breakdown</p>
+        </div>
         <p className="mt-4 text-sm md:text-base text-[var(--text-body)]">Run a live read to load confidence breakdown.</p>
       </div>
     );
@@ -102,7 +106,10 @@ export function ConfidenceBreakdownPanel({
   return (
     <div className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
       <div className="flex items-center justify-between">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Confidence Breakdown</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={true} />
+          <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Confidence Breakdown</p>
+        </div>
         <div className="flex items-center gap-2 md:gap-3 flex-wrap justify-end">
           <span className="info-chip rounded-full px-2 md:px-3 py-0.5 md:py-1 text-xs md:text-sm">
             Final: {formatPct(breakdown.final || breakdown.calibrated)}

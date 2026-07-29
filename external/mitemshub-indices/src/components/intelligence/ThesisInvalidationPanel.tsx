@@ -1,18 +1,28 @@
 "use client"
 
 import type { ThesisInvalidation } from "../../lib/contracts";
+import { DataFreshnessDot } from "./DataFreshnessDot";
 import { formatPrice, formatNumber, formatPct } from "../../lib/formatters";
+import { ThesisInvalidationSkeleton } from "./ThesisInvalidationSkeleton";
 
 type ThesisInvalidationPanelProps = {
   invalidation: ThesisInvalidation | null;
   currentPrice?: number | null;
+  loading?: boolean;
 };
 
-export function ThesisInvalidationPanel({ invalidation, currentPrice }: ThesisInvalidationPanelProps) {
+export function ThesisInvalidationPanel({ invalidation, currentPrice, loading }: ThesisInvalidationPanelProps) {
+  if (loading) {
+    return <ThesisInvalidationSkeleton />;
+  }
+
   if (!invalidation) {
     return (
       <section className="intelligence-panel surface rounded-[1.5rem] p-4">
-        <p className="utility-copy text-xs uppercase tracking-[0.2em]">Thesis Invalidation</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={false} />
+          <p className="utility-copy text-xs uppercase tracking-[0.2em]">Thesis Invalidation</p>
+        </div>
         <p className="mt-4 text-base text-[var(--text-body)]">Run a live read to load invalidation analysis.</p>
       </section>
     );
@@ -25,9 +35,11 @@ export function ThesisInvalidationPanel({ invalidation, currentPrice }: ThesisIn
   const direction = isLong ? "below" : "above";
 
   return (
-    <section className="intelligence-panel surface rounded-[1.5rem] p-4">
-      <div className="flex items-center justify-between">
-        <p className="utility-copy text-xs uppercase tracking-[0.2em]">Thesis Invalidation</p>
+    <section className="intelligence-panel surface rounded-[1.5rem] p-4">        <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={true} />
+          <p className="utility-copy text-xs uppercase tracking-[0.2em]">Thesis Invalidation</p>
+        </div>
         <span className="info-chip rounded-full px-3 py-1 text-sm font-medium text-red-700 bg-red-50">
           ⚠ Invalidation Level
         </span>

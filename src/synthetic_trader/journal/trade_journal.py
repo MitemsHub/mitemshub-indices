@@ -203,8 +203,15 @@ class TradeJournal:
         return metrics_from_outcomes(outcomes)
 
     def teach(self, model: OnlineLogisticModel, outcome: TradeOutcome) -> float:
+        """Teach the model from a trade outcome using experience replay.
+
+        Uses ``update_with_replay`` instead of ``update`` so that each new
+        outcome also replays a mini-batch of past experiences from the
+        replay buffer.  This prevents catastrophic forgetting and keeps
+        the model's weights anchored to historical patterns.
+        """
         label = 1 if outcome.won else 0
-        return model.update(dict(outcome.features), label=label, sample_weight=min(2.0, max(0.25, abs(outcome.return_r))))
+        return model.update_with_replay(dict(outcome.features), label=label, sample_weight=min(2.0, max(0.25, abs(outcome.return_r))))
 
     def _append(self, payload: dict[str, object]) -> None:
         with self.path.open("a", encoding="utf-8") as handle:

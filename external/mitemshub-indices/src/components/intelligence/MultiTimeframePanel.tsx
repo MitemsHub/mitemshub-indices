@@ -2,6 +2,7 @@
 
 import type { MarketIntelligence, TimeframeAnalysis } from "../../lib/contracts";
 import { SkeletonBar, SkeletonRow, SkeletonCard } from "../ui/skeleton";
+import { DataFreshnessDot } from "./DataFreshnessDot";
 
 type MultiTimeframePanelProps = {
   multiTimeframe?: TimeframeAnalysis[];
@@ -83,7 +84,10 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
   if (!timeframes.length) {
     return (
       <section className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Multi-Timeframe Alignment</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={false} />
+          <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Multi-Timeframe Alignment</p>
+        </div>
         <p className="mt-4 text-sm text-[var(--text-body)]">Multi-timeframe analysis is not available for the current call state.</p>
       </section>
     );
@@ -100,7 +104,10 @@ export function MultiTimeframePanel({ multiTimeframe, marketIntelligence, loadin
 
   return (
     <section className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
-      <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Multi-Timeframe Alignment</p>
+      <div className="flex items-center gap-2">
+        <DataFreshnessDot live={true} />
+        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Multi-Timeframe Alignment</p>
+      </div>
 
       {/* ── Desktop table (md+) ─────────────────────────────────── */}
       <div className="hidden md:block mt-4 overflow-x-auto">

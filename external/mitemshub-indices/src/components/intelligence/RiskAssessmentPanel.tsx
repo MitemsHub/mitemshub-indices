@@ -1,17 +1,27 @@
 "use client"
 
 import type { RiskAssessment } from "../../lib/contracts";
+import { DataFreshnessDot } from "./DataFreshnessDot";
 import { formatPct, formatNumber } from "../../lib/formatters";
+import { RiskAssessmentSkeleton } from "./RiskAssessmentSkeleton";
 
 type RiskAssessmentPanelProps = {
   assessment: RiskAssessment | null;
+  loading?: boolean;
 };
 
-export function RiskAssessmentPanel({ assessment }: RiskAssessmentPanelProps) {
+export function RiskAssessmentPanel({ assessment, loading }: RiskAssessmentPanelProps) {
+  if (loading) {
+    return <RiskAssessmentSkeleton />;
+  }
+
   if (!assessment) {
     return (
       <section className="intelligence-panel surface rounded-[1.5rem] p-4">
-        <p className="utility-copy text-xs uppercase tracking-[0.2em]">Risk Assessment</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={false} />
+          <p className="utility-copy text-xs uppercase tracking-[0.2em]">Risk Assessment</p>
+        </div>
         <p className="mt-4 text-base text-[var(--text-body)]">No risk data available.</p>
       </section>
     );
@@ -21,9 +31,11 @@ export function RiskAssessmentPanel({ assessment }: RiskAssessmentPanelProps) {
   const drawdownStatus = drawdownPct > 70 ? "critical" : drawdownPct > 40 ? "warning" : "good";
 
   return (
-    <section className="intelligence-panel surface rounded-[1.5rem] p-4">
-      <div className="flex items-center justify-between">
-        <p className="utility-copy text-xs uppercase tracking-[0.2em]">Risk Assessment</p>
+    <section className="intelligence-panel surface rounded-[1.5rem] p-4">        <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={true} />
+          <p className="utility-copy text-xs uppercase tracking-[0.2em]">Risk Assessment</p>
+        </div>
         <span className={`info-chip rounded-full px-3 py-1 text-sm font-medium ${
           drawdownStatus === "critical" ? "text-[var(--accent-danger)] bg-[var(--accent-danger-soft)]" :
           drawdownStatus === "warning" ? "text-[var(--accent-warn)] bg-[var(--accent-warn-soft)]" :

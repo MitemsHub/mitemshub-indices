@@ -2,6 +2,7 @@
 
 import type { EvidenceSummary, Evidence } from "../../lib/contracts";
 import { SkeletonBar } from "../ui/skeleton";
+import { DataFreshnessDot } from "./DataFreshnessDot";
 
 type EvidencePanelProps = {
   evidence: EvidenceSummary | null;
@@ -78,7 +79,10 @@ export function EvidencePanel({ evidence, loading }: EvidencePanelProps) {
   if (!evidence) {
     return (
       <section className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Bullish vs Bearish Evidence</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={false} />
+          <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Bullish vs Bearish Evidence</p>
+        </div>
         <p className="mt-4 text-sm text-[var(--text-body)]">Evidence analysis is not available for the current call state.</p>
       </section>
     );
@@ -93,7 +97,10 @@ export function EvidencePanel({ evidence, loading }: EvidencePanelProps) {
   return (
     <section className="intelligence-panel surface rounded-[1.5rem] p-3 md:p-4">
       <div className="flex items-center justify-between">
-        <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Bullish vs Bearish Evidence</p>
+        <div className="flex items-center gap-2">
+          <DataFreshnessDot live={true} />
+          <p className="utility-copy text-[10px] md:text-xs uppercase tracking-[0.2em]">Bullish vs Bearish Evidence</p>
+        </div>
         <div className="flex items-center gap-2 md:gap-3">
           <div className="flex items-center gap-1">
             <span className="w-2.5 h-2.5 md:w-3 md:h-3 rounded-full bg-[var(--accent-positive)]" />

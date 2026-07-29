@@ -1745,6 +1745,36 @@ button:focus:not(:focus-visible) {
   transform: scale(0.92);
 }
 
+/* Back button in settings drawer */
+.back-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--line-subtle);
+  background: var(--bg-panel);
+  color: var(--text-body);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background 180ms var(--ease-out),
+    border-color 180ms var(--ease-out),
+    color 180ms var(--ease-out),
+    transform 120ms var(--ease-out);
+}
+
+.back-btn:hover {
+  background: var(--bg-panel-strong);
+  color: var(--text-strong);
+  border-color: var(--line-strong);
+}
+
+.back-btn:active {
+  transform: scale(0.92);
+}
+
 /* Mobile nav drawer — slides in from the right */
 .mobile-nav-overlay {
   position: fixed;
@@ -1765,14 +1795,14 @@ button:focus:not(:focus-visible) {
 .mobile-nav {
   position: fixed;
   top: 0;
-  right: 0;
+  left: 0;
   bottom: 0;
   width: min(20rem, 85vw);
   z-index: 999;
   background: rgba(255, 253, 249, 0.97);
-  border-left: 1px solid var(--line-subtle);
+  border-right: 1px solid var(--line-subtle);
   box-shadow: var(--shadow-elevated);
-  transform: translateX(100%);
+  transform: translateX(-100%);
   transition:
     transform 420ms var(--ease-bounce),
     background 400ms ease,
@@ -1789,6 +1819,11 @@ button:focus:not(:focus-visible) {
   pointer-events: auto;
   transform: translateX(0);
   transition: visibility 0s linear 0s, transform 420ms var(--ease-bounce);
+}
+
+.mobile-nav--hidden {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .mobile-nav--hidden {

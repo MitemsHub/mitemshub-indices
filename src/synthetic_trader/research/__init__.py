@@ -1,6 +1,14 @@
 """Research package - quantitative research framework."""
 
 from synthetic_trader.research.walk_forward import run_walk_forward, render_walk_forward_report, save_walk_forward_report
+from synthetic_trader.research.wfo import (
+    WalkForwardOptimizer,
+    WFOResult,
+    WFOFold,
+    WindowSpec,
+    HyperparameterGrid,
+    render_wfo_report,
+)
 from synthetic_trader.research.knowledge import KnowledgeBase
 from synthetic_trader.research.experiments.runner import ExperimentConfig, ExperimentResult, ExperimentRunner
 from synthetic_trader.research.improvement.monitor import ContinuousImprovementMonitor, ImprovementSignal, ModelHealthReport
@@ -10,6 +18,12 @@ __all__ = [
     "run_walk_forward",
     "render_walk_forward_report",
     "save_walk_forward_report",
+    "WalkForwardOptimizer",
+    "WFOResult",
+    "WFOFold",
+    "WindowSpec",
+    "HyperparameterGrid",
+    "render_wfo_report",
     "KnowledgeBase",
     "ExperimentConfig",
     "ExperimentResult",

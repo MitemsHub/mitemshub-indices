@@ -3,8 +3,30 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 
-type CombinedMenuButtonProps = {
+type DrawerView = "menu" | "notifications";
+
+type NotificationPreferences = {
+  newTradePlan: boolean;
+  targetHit: boolean;
+  stopHit: boolean;
+  entryFilled: boolean;
+  guardianUpdates: boolean;
+};
+
+const PREF_LABELS: Record<keyof NotificationPreferences, { label: string; icon: string }> = {
+  newTradePlan: { label: "New Trade Plan", icon: "📈" },
+  targetHit: { label: "Target Hit", icon: "🎯" },
+  stopHit: { label: "Stop Hit", icon: "🛑" },
+  entryFilled: { label: "Entry Filled", icon: "✅" },
+  guardianUpdates: { label: "Guardian Updates", icon: "🟢" },
+};
+
+type HamburgerMenuButtonProps = {
   onOpenSettings: () => void;
+  notificationPermission: "granted" | "denied" | "default";
+  notificationPrefs: NotificationPreferences;
+  onEnableNotifications: () => Promise<boolean>;
+  onToggleNotificationPref: (key: keyof NotificationPreferences) => void;
   onToggleTheme: () => void;
   currentTheme: string;
 };
@@ -36,17 +58,39 @@ function ChevronRightIcon() {
   );
 }
 
-export function CombinedMenuButton({
+function BackArrowIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="19" y1="12" x2="5" y2="12" />
+      <polyline points="12 19 5 12 12 5" />
+    </svg>
+  );
+}
+
+export function HamburgerMenuButton({
   onOpenSettings,
+  notificationPermission,
+  notificationPrefs,
+  onEnableNotifications,
+  onToggleNotificationPref,
   onToggleTheme,
   currentTheme,
-}: CombinedMenuButtonProps) {
+}: HamburgerMenuButtonProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const [isClosing, setIsClosing] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [view, setView] = useState<DrawerView>("menu");
+
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  // Reset view when drawer closes
+  useEffect(() => {
+    if (!isOpen) {
+      const timer = setTimeout(() => setView("menu"), 300);
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen]);
 
   // Prevent body scroll when drawer is open
   useEffect(() => {
@@ -61,25 +105,25 @@ export function CombinedMenuButton({
   useEffect(() => {
     if (!isOpen) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeDrawer();
+      if (e.key === "Escape") setIsOpen(false);
     };
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
   }, [isOpen]);
 
+  const hasAnyEnabled = Object.values(notificationPrefs).some(Boolean);
+  const bellColor =
+    notificationPermission === "granted" && hasAnyEnabled
+      ? "var(--accent-ink)"
+      : "var(--text-muted)";
+
   const openDrawer = useCallback(() => {
-    setIsClosing(false);
     setIsOpen(true);
+    setView("menu");
   }, []);
 
   const closeDrawer = useCallback(() => {
-    // Step 1: Start closing animation (removes --open, slides to translateX(-100%))
-    setIsClosing(true);
-    // Step 2: After animation completes, hide the drawer completely
-    setTimeout(() => {
-      setIsOpen(false);
-      setIsClosing(false);
-    }, 350); // Match the CSS transition duration
+    setIsOpen(false);
   }, []);
 
   const menuSections = [
@@ -98,6 +142,19 @@ export function CombinedMenuButton({
         // Delay settings drawer until menu drawer animation completes
         setTimeout(() => onOpenSettings(), 350);
       },
+    },
+    {
+      id: "notifications",
+      label: "Notifications",
+      subtitle: hasAnyEnabled ? "Manage alerts" : "All disabled",
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={bellColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+      ),
+      badge: notificationPermission === "granted" && hasAnyEnabled,
+      onClick: () => setView("notifications"),
     },
     {
       id: "theme",
@@ -131,57 +188,144 @@ export function CombinedMenuButton({
   ];
 
   const drawerContent = (
-    <div className="combined-drawer-root">
+    <div className="hamburger-drawer-root">
       {/* Backdrop */}
       <div
-        className={`combined-drawer-backdrop ${isOpen && !isClosing ? "combined-drawer-backdrop--open" : ""}`}
+        className={`hamburger-drawer-backdrop ${isOpen ? "hamburger-drawer-backdrop--open" : ""}`}
         onClick={closeDrawer}
         aria-hidden="true"
       />
 
-      {/* Drawer panel */}
+      {/* Drawer panel - opens from LEFT */}
       <aside
-        className={`combined-drawer-panel ${isOpen && !isClosing ? "combined-drawer-panel--open" : ""}`}
+        className={`hamburger-drawer-panel ${isOpen ? "hamburger-drawer-panel--open" : ""}`}
         role="dialog"
         aria-modal={isOpen ? "true" : undefined}
         aria-label="Menu"
       >
         {/* Header */}
-        <div className="combined-drawer-header">
-          <button
-            type="button"
-            onClick={closeDrawer}
-            className="combined-drawer-close"
-            aria-label="Close menu"
-          >
-            <CloseIcon />
-          </button>
-          <h2 className="combined-drawer-title">Menu</h2>
-          <div className="combined-drawer-spacer" />
+        <div className="hamburger-drawer-header">
+          {view === "menu" ? (
+            <button
+              type="button"
+              onClick={closeDrawer}
+              className="hamburger-drawer-close"
+              aria-label="Close menu"
+            >
+              <CloseIcon />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setView("menu")}
+              className="hamburger-drawer-close"
+              aria-label="Back to menu"
+            >
+              <BackArrowIcon />
+            </button>
+          )}
+          <h2 className="hamburger-drawer-title">
+            {view === "menu" ? "Menu" : "Notifications"}
+          </h2>
+          {view === "menu" ? (
+            <div className="hamburger-drawer-spacer" />
+          ) : (
+            <button
+              type="button"
+              onClick={closeDrawer}
+              className="hamburger-drawer-close"
+              aria-label="Close menu"
+            >
+              <CloseIcon />
+            </button>
+          )}
         </div>
 
         {/* Content */}
-        <div className="combined-drawer-content">
-          <div className="combined-drawer-sections">
-            {menuSections.map((section, index) => (
-              <button
-                key={section.id}
-                type="button"
-                onClick={section.onClick}
-                className="combined-drawer-section"
-                style={{ animationDelay: `${index * 60}ms` }}
-              >
-                <div className="combined-drawer-section-icon">
-                  {section.icon}
+        <div className="hamburger-drawer-content">
+          {view === "menu" ? (
+            /* Main menu sections */
+            <div className="hamburger-drawer-sections">
+              {menuSections.map((section, index) => (
+                <button
+                  key={section.id}
+                  type="button"
+                  onClick={section.onClick}
+                  className="hamburger-drawer-section"
+                  style={{ animationDelay: `${index * 60}ms` }}
+                >
+                  <div className="hamburger-drawer-section-icon">
+                    {section.icon}
+                  </div>
+                  <div className="hamburger-drawer-section-text">
+                    <span className="hamburger-drawer-section-label">{section.label}</span>
+                    <span className="hamburger-drawer-section-subtitle">{section.subtitle}</span>
+                  </div>
+                  {section.badge && (
+                    <span className="hamburger-drawer-section-badge" />
+                  )}
+                  <ChevronRightIcon />
+                </button>
+              ))}
+            </div>
+          ) : (
+            /* Notification preferences */
+            <div className="hamburger-drawer-notifications">
+              {notificationPermission !== "granted" && (
+                <div className="hamburger-drawer-notice">
+                  <p className="hamburger-drawer-notice-text">
+                    {notificationPermission === "denied"
+                      ? "Notifications blocked by browser. Enable them in your browser settings."
+                      : "Enable browser notifications to get alerts for trade events."}
+                  </p>
+                  {notificationPermission === "default" && (
+                    <button
+                      type="button"
+                      onClick={onEnableNotifications}
+                      className="hamburger-drawer-notice-btn"
+                    >
+                      Allow Notifications
+                    </button>
+                  )}
                 </div>
-                <div className="combined-drawer-section-text">
-                  <span className="combined-drawer-section-label">{section.label}</span>
-                  <span className="combined-drawer-section-subtitle">{section.subtitle}</span>
+              )}
+
+              {notificationPermission === "granted" && (
+                <div className="hamburger-drawer-prefs">
+                  {(Object.keys(PREF_LABELS) as Array<keyof NotificationPreferences>).map(
+                    (key, index) => {
+                      const { label, icon } = PREF_LABELS[key];
+                      return (
+                        <label
+                          key={key}
+                          className="hamburger-drawer-pref"
+                          style={{ animationDelay: `${index * 50}ms` }}
+                        >
+                          <span className="hamburger-drawer-pref-icon">{icon}</span>
+                          <span className="hamburger-drawer-pref-label">{label}</span>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={notificationPrefs[key]}
+                            onClick={() => onToggleNotificationPref(key)}
+                            className={`hamburger-drawer-switch ${notificationPrefs[key] ? "hamburger-drawer-switch--on" : ""}`}
+                          >
+                            <span className={`hamburger-drawer-switch-thumb ${notificationPrefs[key] ? "hamburger-drawer-switch-thumb--on" : ""}`} />
+                          </button>
+                        </label>
+                      );
+                    },
+                  )}
                 </div>
-                <ChevronRightIcon />
-              </button>
-            ))}
-          </div>
+              )}
+
+              {notificationPermission === "granted" && !hasAnyEnabled && (
+                <p className="hamburger-drawer-empty">
+                  All notifications disabled. Toggle one above to enable.
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </aside>
     </div>
@@ -192,7 +336,7 @@ export function CombinedMenuButton({
       <button
         type="button"
         onClick={isOpen ? closeDrawer : openDrawer}
-        className={`combined-menu-trigger ${isOpen ? "combined-menu-trigger--active" : ""}`}
+        className={`hamburger-menu-trigger ${isOpen ? "hamburger-menu-trigger--active" : ""}`}
         aria-label={isOpen ? "Close menu" : "Open menu"}
         aria-expanded={isOpen}
       >
@@ -202,7 +346,7 @@ export function CombinedMenuButton({
       {mounted && createPortal(drawerContent, document.body)}
 
       <style jsx global>{`
-        .combined-menu-trigger {
+        .hamburger-menu-trigger {
           display: flex;
           align-items: center;
           justify-content: center;
@@ -218,36 +362,36 @@ export function CombinedMenuButton({
           z-index: 41;
         }
 
-        .combined-menu-trigger:hover {
+        .hamburger-menu-trigger:hover {
           background: var(--bg-panel-strong);
           color: var(--text-strong);
           border-color: var(--line-strong);
         }
 
-        .combined-menu-trigger:active {
+        .hamburger-menu-trigger:active {
           transform: scale(0.95);
         }
 
-        .combined-menu-trigger--active {
+        .hamburger-menu-trigger--active {
           background: var(--accent-ink);
           color: white;
           border-color: var(--accent-ink);
         }
 
         /* ── Drawer root ─────────────────────────────────────────── */
-        .combined-drawer-root {
+        .hamburger-drawer-root {
           position: fixed;
           inset: 0;
           z-index: 9999;
           pointer-events: none;
         }
 
-        .combined-drawer-root > * {
+        .hamburger-drawer-root > * {
           pointer-events: auto;
         }
 
         /* ── Backdrop ────────────────────────────────────────────── */
-        .combined-drawer-backdrop {
+        .hamburger-drawer-backdrop {
           position: fixed;
           inset: 0;
           background: rgba(15, 18, 23, 0.5);
@@ -258,13 +402,13 @@ export function CombinedMenuButton({
           z-index: 0;
         }
 
-        .combined-drawer-backdrop--open {
+        .hamburger-drawer-backdrop--open {
           opacity: 1;
           pointer-events: auto;
         }
 
-        /* ── Panel — opens from LEFT (hamburger convention) ──── */
-        .combined-drawer-panel {
+        /* ── Panel - opens from LEFT ─────────────────────────────── */
+        .hamburger-drawer-panel {
           position: fixed;
           top: 0;
           left: 0;
@@ -281,12 +425,12 @@ export function CombinedMenuButton({
           overflow: hidden;
         }
 
-        .combined-drawer-panel--open {
+        .hamburger-drawer-panel--open {
           transform: translateX(0);
         }
 
         /* ── Header ──────────────────────────────────────────────── */
-        .combined-drawer-header {
+        .hamburger-drawer-header {
           display: flex;
           align-items: center;
           gap: 12px;
@@ -295,7 +439,7 @@ export function CombinedMenuButton({
           flex-shrink: 0;
         }
 
-        .combined-drawer-close {
+        .hamburger-drawer-close {
           display: flex;
           align-items: center;
           justify-content: center;
@@ -310,13 +454,13 @@ export function CombinedMenuButton({
           flex-shrink: 0;
         }
 
-        .combined-drawer-close:hover {
+        .hamburger-drawer-close:hover {
           background: var(--bg-surface-hover);
           color: var(--text-strong);
           border-color: var(--line-strong);
         }
 
-        .combined-drawer-title {
+        .hamburger-drawer-title {
           flex: 1;
           font-size: 1rem;
           font-weight: 600;
@@ -325,26 +469,26 @@ export function CombinedMenuButton({
           font-family: "Inter", "Segoe UI", system-ui, sans-serif;
         }
 
-        .combined-drawer-spacer {
+        .hamburger-drawer-spacer {
           width: 36px;
           flex-shrink: 0;
         }
 
         /* ── Content ─────────────────────────────────────────────── */
-        .combined-drawer-content {
+        .hamburger-drawer-content {
           flex: 1;
           overflow-y: auto;
           padding: 12px;
         }
 
         /* ── Menu sections ───────────────────────────────────────── */
-        .combined-drawer-sections {
+        .hamburger-drawer-sections {
           display: flex;
           flex-direction: column;
           gap: 4px;
         }
 
-        .combined-drawer-section {
+        .hamburger-drawer-section {
           display: flex;
           align-items: center;
           gap: 14px;
@@ -357,20 +501,20 @@ export function CombinedMenuButton({
           cursor: pointer;
           transition: all 180ms var(--ease-out);
           text-align: left;
-          animation: drawerItemSlideIn 250ms var(--ease-out) backwards;
+          animation: hamburgerDrawerSlideIn 250ms var(--ease-out) backwards;
         }
 
-        .combined-drawer-section:hover {
+        .hamburger-drawer-section:hover {
           background: var(--bg-surface-hover);
           border-color: var(--line-subtle);
           color: var(--text-strong);
         }
 
-        .combined-drawer-section:active {
+        .hamburger-drawer-section:active {
           transform: scale(0.98);
         }
 
-        .combined-drawer-section-icon {
+        .hamburger-drawer-section-icon {
           display: flex;
           align-items: center;
           justify-content: center;
@@ -383,12 +527,12 @@ export function CombinedMenuButton({
           transition: all 180ms var(--ease-out);
         }
 
-        .combined-drawer-section:hover .combined-drawer-section-icon {
+        .hamburger-drawer-section:hover .hamburger-drawer-section-icon {
           background: var(--accent-ink-soft);
           color: var(--accent-ink);
         }
 
-        .combined-drawer-section-text {
+        .hamburger-drawer-section-text {
           flex: 1;
           display: flex;
           flex-direction: column;
@@ -396,20 +540,20 @@ export function CombinedMenuButton({
           min-width: 0;
         }
 
-        .combined-drawer-section-label {
+        .hamburger-drawer-section-label {
           font-size: 15px;
           font-weight: 600;
           color: var(--text-strong);
           line-height: 1.3;
         }
 
-        .combined-drawer-section-subtitle {
+        .hamburger-drawer-section-subtitle {
           font-size: 12px;
           color: var(--text-muted);
           line-height: 1.3;
         }
 
-        .combined-drawer-section-badge {
+        .hamburger-drawer-section-badge {
           width: 8px;
           height: 8px;
           border-radius: 50%;
@@ -417,39 +561,39 @@ export function CombinedMenuButton({
           flex-shrink: 0;
         }
 
-        .combined-drawer-section > svg:last-child {
+        .hamburger-drawer-section > svg:last-child {
           color: var(--text-muted);
           flex-shrink: 0;
           opacity: 0.5;
         }
 
-        .combined-drawer-section:hover > svg:last-child {
+        .hamburger-drawer-section:hover > svg:last-child {
           opacity: 1;
           color: var(--accent-ink);
         }
 
         /* ── Notifications ───────────────────────────────────────── */
-        .combined-drawer-notifications {
+        .hamburger-drawer-notifications {
           display: flex;
           flex-direction: column;
           gap: 16px;
         }
 
-        .combined-drawer-notice {
+        .hamburger-drawer-notice {
           padding: 16px;
           border-radius: 14px;
           background: var(--accent-ink-soft);
           border: 1px solid rgba(31, 75, 153, 0.15);
         }
 
-        .combined-drawer-notice-text {
+        .hamburger-drawer-notice-text {
           font-size: 13px;
           color: var(--accent-ink);
           margin: 0 0 12px;
           line-height: 1.5;
         }
 
-        .combined-drawer-notice-btn {
+        .hamburger-drawer-notice-btn {
           display: inline-flex;
           align-items: center;
           padding: 8px 16px;
@@ -463,17 +607,17 @@ export function CombinedMenuButton({
           transition: opacity 150ms;
         }
 
-        .combined-drawer-notice-btn:hover {
+        .hamburger-drawer-notice-btn:hover {
           opacity: 0.9;
         }
 
-        .combined-drawer-prefs {
+        .hamburger-drawer-prefs {
           display: flex;
           flex-direction: column;
           gap: 2px;
         }
 
-        .combined-drawer-pref {
+        .hamburger-drawer-pref {
           display: flex;
           align-items: center;
           gap: 14px;
@@ -481,14 +625,14 @@ export function CombinedMenuButton({
           border-radius: 12px;
           cursor: pointer;
           transition: background 150ms var(--ease-out);
-          animation: drawerItemSlideIn 200ms var(--ease-out) backwards;
+          animation: hamburgerDrawerSlideIn 200ms var(--ease-out) backwards;
         }
 
-        .combined-drawer-pref:hover {
+        .hamburger-drawer-pref:hover {
           background: var(--bg-surface-hover);
         }
 
-        .combined-drawer-pref-icon {
+        .hamburger-drawer-pref-icon {
           font-size: 20px;
           width: 36px;
           height: 36px;
@@ -500,14 +644,14 @@ export function CombinedMenuButton({
           flex-shrink: 0;
         }
 
-        .combined-drawer-pref-label {
+        .hamburger-drawer-pref-label {
           flex: 1;
           font-size: 15px;
           font-weight: 500;
           color: var(--text-strong);
         }
 
-        .combined-drawer-switch {
+        .hamburger-drawer-switch {
           position: relative;
           width: 44px;
           height: 24px;
@@ -519,11 +663,11 @@ export function CombinedMenuButton({
           flex-shrink: 0;
         }
 
-        .combined-drawer-switch--on {
+        .hamburger-drawer-switch--on {
           background: var(--accent-positive);
         }
 
-        .combined-drawer-switch-thumb {
+        .hamburger-drawer-switch-thumb {
           position: absolute;
           top: 2px;
           left: 2px;
@@ -535,11 +679,11 @@ export function CombinedMenuButton({
           transition: transform 200ms var(--ease-out);
         }
 
-        .combined-drawer-switch-thumb--on {
+        .hamburger-drawer-switch-thumb--on {
           transform: translateX(20px);
         }
 
-        .combined-drawer-empty {
+        .hamburger-drawer-empty {
           text-align: center;
           padding: 24px 16px;
           font-size: 13px;
@@ -548,7 +692,7 @@ export function CombinedMenuButton({
         }
 
         /* ── Animations ──────────────────────────────────────────── */
-        @keyframes drawerItemSlideIn {
+        @keyframes hamburgerDrawerSlideIn {
           from {
             opacity: 0;
             transform: translateX(-16px);
