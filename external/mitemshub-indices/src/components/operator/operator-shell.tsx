@@ -47,6 +47,7 @@ import { TradeJournalDashboard } from "../intelligence/TradeJournalDashboard";
 import { MissedTradeLearningPanel } from "../intelligence/MissedTradeLearningPanel";
 import CurveFittingTestPanel from "../intelligence/CurveFittingTestPanel";
 import { SystemPerformancePanel } from "../intelligence/SystemPerformancePanel";
+import GeneratorFingerprintPanel from "../intelligence/GeneratorFingerprintPanel";
 
 /** Shared intelligence tab content — used by both desktop section and mobile accordion. */
 function IntelTabContent({
@@ -139,6 +140,12 @@ function IntelTabContent({
     case "learning":
       return (
         <>
+          <CollapsiblePanel title="Generator Fingerprint & EGARCH Calibration">
+            <GeneratorFingerprintPanel
+              data={intelligence?.generator_fingerprint ?? null}
+              loading={loading}
+            />
+          </CollapsiblePanel>
           <CollapsiblePanel title="Curve-Fitting Test">
             {intelligence?.curve_fitting_test ? (
               <CurveFittingTestPanel data={intelligence.curve_fitting_test} />
@@ -172,7 +179,7 @@ function IntelTabContent({
           </CollapsiblePanel>
           <CollapsiblePanel title="System Performance">
             <SystemPerformancePanel
-              performance={intelligence.system_performance ?? null}
+              performance={intelligence?.system_performance ?? null}
               loading={loading}
             />
           </CollapsiblePanel>

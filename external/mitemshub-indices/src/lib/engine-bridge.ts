@@ -856,6 +856,114 @@ export async function testMt5Connection(): Promise<{
  * persisted mt5_last_error.json file on success so the error badge
  * disappears on the next ConnectionStatus poll.
  */
+export async function calibrateEgarch(symbol: string, csvPath?: string): Promise<{
+  success: boolean;
+  symbol: string;
+  convergence: boolean;
+  observations: number;
+  omega: number;
+  alpha: number;
+  beta: number;
+  gamma: number;
+  persistence: number;
+  half_life: number;
+  long_run_vol: number;
+  realized_vol: number;
+  vol_ratio: number;
+  saved_path: string | null;
+  error: string | null;
+  duration_ms: number;
+}> {
+  const engineRoot = getConfiguredEngineRoot();
+  if (!engineRoot) {
+    return { success: false, symbol, convergence: false, observations: 0, omega: 0, alpha: 0, beta: 0, gamma: 0, persistence: 0, half_life: 0, long_run_vol: 0, realized_vol: 0, vol_ratio: 0, saved_path: null, error: "Engine root not configured", duration_ms: 0 };
+  }
+
+  // Default CSV path: the symbol's tick CSV in the data directory
+  const resolvedCsv = csvPath || join(engineRoot, "data", `${symbol}_ticks.csv`);
+  const startedAt = Date.now();
+
+  try {
+    const { stdout } = await withImportCheck(
+      engineRoot,
+      () => runPythonScript({
+        engineRoot,
+        pythonScript: `import json, time
+from synthetic_trader.models.garch_calibration import (
+    calibrate_from_ticks_csv,
+    save_calibrated_garch_state,
+)
+
+t = time.time()
+result = calibrate_from_ticks_csv(
+    csv_path=${JSON.stringify(resolvedCsv)},
+    symbol=${JSON.stringify(symbol)},
+)
+saved = save_calibrated_garch_state(result, ${JSON.stringify(symbol)})
+print(json.dumps({
+    "success": True,
+    "symbol": result.symbol,
+    "convergence": result.convergence,
+    "observations": result.n_observations,
+    "omega": result.omega,
+    "alpha": result.alpha,
+    "beta": result.beta,
+    "gamma": result.gamma,
+    "persistence": result.persistence,
+    "half_life": result.half_life,
+    "long_run_vol": result.long_run_vol,
+    "realized_vol": result.realized_vol,
+    "vol_ratio": result.vol_ratio,
+    "saved_path": str(saved),
+    "error": None if result.convergence else result.message,
+    "duration_ms": int((time.time() - t) * 1000),
+}))`,
+        timeout: 120000,
+        label: "calibrateEgarch",
+      }),
+      "calibrateEgarch",
+    );
+    const parsed = JSON.parse(stdout.trim());
+    return {
+      success: parsed.success ?? false,
+      symbol: parsed.symbol ?? symbol,
+      convergence: parsed.convergence ?? false,
+      observations: parsed.observations ?? 0,
+      omega: parsed.omega ?? 0,
+      alpha: parsed.alpha ?? 0,
+      beta: parsed.beta ?? 0,
+      gamma: parsed.gamma ?? 0,
+      persistence: parsed.persistence ?? 0,
+      half_life: parsed.half_life ?? 0,
+      long_run_vol: parsed.long_run_vol ?? 0,
+      realized_vol: parsed.realized_vol ?? 0,
+      vol_ratio: parsed.vol_ratio ?? 0,
+      saved_path: parsed.saved_path ?? null,
+      error: parsed.error ?? null,
+      duration_ms: parsed.duration_ms ?? (Date.now() - startedAt),
+    };
+  } catch (error) {
+    return {
+      success: false,
+      symbol,
+      convergence: false,
+      observations: 0,
+      omega: 0,
+      alpha: 0,
+      beta: 0,
+      gamma: 0,
+      persistence: 0,
+      half_life: 0,
+      long_run_vol: 0,
+      realized_vol: 0,
+      vol_ratio: 0,
+      saved_path: null,
+      error: error instanceof Error ? error.message : "Unknown calibration error",
+      duration_ms: Date.now() - startedAt,
+    };
+  }
+}
+
 export async function retryMt5Connection(): Promise<{
   success: boolean;
   error: string | null;
