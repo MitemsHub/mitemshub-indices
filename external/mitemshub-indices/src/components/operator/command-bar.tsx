@@ -218,6 +218,15 @@ export function CommandBar({
           >
             Active
           </button>
+          <button
+            type="button"
+            aria-pressed={tradingMode === "volatility_harvest"}
+            title="Exploits variance clustering. Trades only on GARCH mean-reversion signals."
+            className="mode-toggle rounded-full px-3.5 py-1.5 text-xs font-medium"
+            onClick={() => onSelectTradingMode("volatility_harvest")}
+          >
+            Vol Harvest
+          </button>
         </div>
       </div>
     </section>

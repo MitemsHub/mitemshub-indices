@@ -86,9 +86,28 @@ ACTIVE_TRADER_GUARDIAN_THRESHOLDS = GuardianThresholds(
     max_adverse_cluster_count=3,
 )
 
+# Volatility Harvesting mode: fast reversion trades exploiting variance clustering.
+# Tighter arming window since these are quick mean-reversion entries.
+VOLATILITY_HARVEST_GUARDIAN_THRESHOLDS = GuardianThresholds(
+    max_arming_ticks=8,
+    max_confirmation_window_ticks=6,
+    weakening_excursion_ratio=0.50,
+    max_adverse_excursion_ratio=0.90,
+    max_entry_drift_ratio=1.0,
+    microstructure_window_ticks=6,
+    min_persistence_ticks=2,
+    min_impulse_ratio=0.10,
+    max_pullback_ratio=0.25,
+    rollover_warning_ratio=0.20,
+    rollover_invalidation_ratio=0.35,
+    adverse_cluster_window_ticks=4,
+    max_adverse_cluster_count=2,
+)
+
 GUARDIAN_PRESETS = {
     "sniper": SNIPER_GUARDIAN_THRESHOLDS,
     "active_trader": ACTIVE_TRADER_GUARDIAN_THRESHOLDS,
+    "volatility_harvest": VOLATILITY_HARVEST_GUARDIAN_THRESHOLDS,
 }
 
 DEFAULT_GUARDIAN_THRESHOLDS = SNIPER_GUARDIAN_THRESHOLDS
@@ -266,6 +285,24 @@ TRADING_MODE_PRESETS = {
         symbol_min_primary_reward_risk=0.85,
         execution_mode="intraday",
         max_stop_distance_pct=0.03,  # tighter cap for faster exits
+    ),
+    # Volatility Harvesting: trades ONLY on GARCH mean-reversion signals.
+    # Bypasses session filter, structure bias, and multi-TF alignment.
+    # Relies solely on variance clustering — the ONE exploitable property.
+    "volatility_harvest": TradingModePreset(
+        confidence_above=0.30,
+        confidence_near=0.24,
+        bias_buy_threshold=0.50,
+        bias_sell_threshold=0.50,
+        risk_min_confidence=0.20,
+        risk_min_reward_risk=1.0,
+        risk_max_volatility_z=5.0,
+        model_decision_threshold=0.40,
+        confidence_relaxation=0.12,
+        symbol_min_history_candles=10,
+        symbol_min_primary_reward_risk=1.0,
+        execution_mode="intraday",
+        max_stop_distance_pct=0.04,
     ),
 }
 

@@ -6,7 +6,8 @@ export async function GET(request: Request) {
   const symbol = (searchParams.get("symbol") ?? "R_100") as "R_75" | "R_100";
   const tradingMode = (searchParams.get("trading_mode") ?? "sniper") as
     | "sniper"
-    | "active_trader";
+    | "active_trader"
+    | "volatility_harvest";
 
   const payload = await getLatestCall(symbol, tradingMode);
   return NextResponse.json(payload);

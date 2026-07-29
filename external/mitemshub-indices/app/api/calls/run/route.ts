@@ -10,7 +10,7 @@ import {
 export async function POST(request: Request) {
   const controller = new AbortController();
   let symbol: string = "R_100";
-  let tradingMode: "sniper" | "active_trader" = "sniper";
+  let tradingMode: "sniper" | "active_trader" | "volatility_harvest" = "sniper";
 
   try {
     const body = runCallRequestSchema.parse(await request.json());

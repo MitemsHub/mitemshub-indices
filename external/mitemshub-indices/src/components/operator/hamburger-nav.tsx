@@ -160,6 +160,14 @@ export function HamburgerNav({
             >
               Active
             </button>
+            <button
+              type="button"
+              aria-pressed={tradingMode === "volatility_harvest"}
+              className="mode-toggle rounded-full px-4 py-2 text-sm font-medium"
+              onClick={() => { onSetTradingMode("volatility_harvest"); onClose(); }}
+            >
+              Vol Harvest
+            </button>
           </div>
         </div>
 

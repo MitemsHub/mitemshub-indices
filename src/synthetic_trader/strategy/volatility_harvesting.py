@@ -96,6 +96,20 @@ class VolatilityHarvester:
         self._last_signal_bar: int = 0
         self._bar_count: int = 0
     
+    def set_harvest_mode(self) -> None:
+        """Switch to dedicated volatility harvesting mode with relaxed thresholds.
+        
+        In harvest mode, the z-score threshold drops from 2.5 to 1.8,
+        the mean-revert signal threshold stays at 0.6, and the ATR z
+        threshold drops from 1.0 to 0.8.  This makes the strategy
+        more aggressive at detecting reversion opportunities.
+        """
+        self.z_threshold = 1.8
+        self.mr_signal_threshold = 0.6
+        self.min_atr_z = 0.8
+        self.cooldown_bars = 6  # shorter cooldown in dedicated mode
+        self.stop_loss_multiple = 2.0  # slightly tighter stops
+    
     def evaluate(
         self,
         features: dict[str, float],

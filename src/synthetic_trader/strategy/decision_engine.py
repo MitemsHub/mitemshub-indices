@@ -116,6 +116,7 @@ class DecisionEngine:
         self.calibration = CalibrationState()
         self.regime_detector = RegimeShiftDetector()
         self.volatility_harvester = VolatilityHarvester()
+        self._trading_mode = "intraday"
         self._call_lifecycle: dict[str, str] = {}
 
     def evaluate(
@@ -126,6 +127,12 @@ class DecisionEngine:
         role_candles: dict[str, list[Candle]] | None = None,
         trading_mode: str = "intraday",
     ) -> DecisionReport:
+        # Store trading mode for vol_harvest path activation
+        self._trading_mode = trading_mode
+        # Activate harvest mode thresholds when in volatility_harvest mode
+        if trading_mode == "volatility_harvest":
+            self.volatility_harvester.set_harvest_mode()
+
         profile = self._profile(symbol)
         execution_candles = role_candles.get("execution", candles) if role_candles else candles
         setup_candles = role_candles.get("setup", candles) if role_candles else candles
