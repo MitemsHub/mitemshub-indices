@@ -468,3 +468,89 @@ def load_calibration_result(path: str | Path) -> CalibrationResult:
         ljung_box_p_value=data.get("ljung_box_p_value", 0.0),
         arch_test_p_value=data.get("arch_test_p_value", 0.0),
     )
+
+
+# Default directory for calibrated EGARCH parameters.
+# The CLI's calibrate-egarch command saves here automatically,
+# and the assembler loads from here on startup.
+DEFAULT_CALIBRATION_DIR = Path("data/garch_calibration")
+
+
+def get_calibration_path(
+    symbol: str,
+    calibration_dir: str | Path | None = None,
+) -> Path:
+    """Return the canonical path for a symbol's calibration JSON.
+
+    Parameters
+    ----------
+    symbol : str
+        Symbol name, e.g. "R_75" or "R_100".
+    calibration_dir : str | Path, optional
+        Override the default directory.  When ``None``, uses
+        ``data/garch_calibration/`` relative to the project root.
+    """
+    d = Path(calibration_dir) if calibration_dir else DEFAULT_CALIBRATION_DIR
+    return d / f"{symbol.lower()}.json"
+
+
+def save_calibrated_garch_state(
+    result: CalibrationResult,
+    symbol: str,
+    calibration_dir: str | Path | None = None,
+) -> Path:
+    """Persist calibrated EGARCH parameters for the live pipeline.
+
+    Saves to ``data/garch_calibration/{symbol}.json`` by default.
+    The assembler's ``_get_garch_forecaster`` reads from this path
+    so the online forecaster starts with market-calibrated priors
+    instead of generic defaults.
+
+    Returns
+    -------
+    Path
+        The file path that was written.
+    """
+    path = get_calibration_path(symbol, calibration_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_calibration_result(result, path)
+    return path
+
+
+def load_calibrated_garch_state(
+    symbol: str,
+    calibration_dir: str | Path | None = None,
+) -> GARCHState | None:
+    """Load calibrated GARCHState for a symbol, or ``None`` if unavailable.
+
+    The assembler calls this once per symbol on first access.  When a
+    calibration file exists, the forecaster is initialized with the
+    fitted parameters instead of generic defaults.  When no file exists
+    (pre-calibration), the caller falls back to the default
+    ``EGARCHVarianceForecaster()``.
+
+    Parameters
+    ----------
+    symbol : str
+        Symbol name, e.g. "R_75" or "R_100".
+    calibration_dir : str | Path, optional
+        Override the default calibration directory.
+
+    Returns
+    -------
+    GARCHState | None
+        Initialized GARCHState from calibrated parameters, or
+        ``None`` if no calibration file is found.
+    """
+    path = get_calibration_path(symbol, calibration_dir)
+    if not path.exists():
+        return None
+    try:
+        result = load_calibration_result(path)
+        if not result.convergence:
+            # Calibration didn't converge — skip and use defaults
+            return None
+        return result.to_garch_state()
+    except (json.JSONDecodeError, KeyError, OSError):
+        # Corrupted or unreadable file — use defaults
+        return None

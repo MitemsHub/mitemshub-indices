@@ -1234,6 +1234,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.output:
             save_calibration_result(result, args.output)
             print(f"\nSaved to {args.output}")
+        else:
+            # Auto-save to the standard calibration directory so the
+            # assembler's _get_garch_forecaster() picks it up on next start.
+            from synthetic_trader.models.garch_calibration import save_calibrated_garch_state
+            saved_path = save_calibrated_garch_state(result, args.symbol)
+            print(f"\nAuto-saved calibrated parameters to {saved_path}")
 
         if args.apply:
             print("\nApplying to synthetic generator config...")

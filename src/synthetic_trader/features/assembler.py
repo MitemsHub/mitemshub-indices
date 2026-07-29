@@ -5,6 +5,7 @@ from synthetic_trader.features.market_structure import market_structure_features
 from synthetic_trader.features.regimes import classify_regime
 from synthetic_trader.features.tick_integration import compute_tick_flow_features
 from synthetic_trader.models.garch import EGARCHVarianceForecaster
+from synthetic_trader.models.garch_calibration import load_calibrated_garch_state
 from synthetic_trader.features.session_filter import SessionVolatilityFilter
 from synthetic_trader.features.generator_fingerprint import GeneratorFingerprintDetector
 import time as _time
@@ -17,9 +18,33 @@ _fingerprint_detectors: dict[str, GeneratorFingerprintDetector] = {}
 
 
 def _get_garch_forecaster(symbol: str) -> EGARCHVarianceForecaster:
-    """Get or create the GARCH forecaster for a symbol."""
+    """Get or create the GARCH forecaster for a symbol.
+
+    On first access, checks for a calibrated calibration file at
+    ``data/garch_calibration/{symbol}.json``.  If one exists and
+    converged during MLE fitting, the forecaster is initialized with
+    those market-calibrated parameters instead of the generic defaults.
+    This means the online forecaster starts with priors that reflect
+    actual Blueberry Markets synthetic index behavior.
+    """
     if symbol not in _garch_forecasters:
-        _garch_forecasters[symbol] = EGARCHVarianceForecaster()
+        calibrated_state = load_calibrated_garch_state(symbol)
+        if calibrated_state is not None:
+            # Initialize forecaster with calibrated parameters.
+            # Use a larger prior for _grad_sq_ema to prevent the first
+            # few online updates from overshooting (RMSProp denominator
+            # would otherwise be tiny with the default 1e-6).
+            forecaster = EGARCHVarianceForecaster(
+                long_run_var_prior=calibrated_state.long_run_variance,
+            )
+            forecaster.state = calibrated_state
+            forecaster._grad_sq_ema = {
+                "omega": 1e-3, "alpha": 1e-3,
+                "gamma": 1e-3, "beta": 1e-3,
+            }
+            _garch_forecasters[symbol] = forecaster
+        else:
+            _garch_forecasters[symbol] = EGARCHVarianceForecaster()
     return _garch_forecasters[symbol]
 
 
