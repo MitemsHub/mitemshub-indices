@@ -46,6 +46,7 @@ import { DecisionHistoryPanel } from "../intelligence/DecisionHistoryPanel";
 import { TradeJournalDashboard } from "../intelligence/TradeJournalDashboard";
 import { MissedTradeLearningPanel } from "../intelligence/MissedTradeLearningPanel";
 import CurveFittingTestPanel from "../intelligence/CurveFittingTestPanel";
+import { SystemPerformancePanel } from "../intelligence/SystemPerformancePanel";
 
 /** Shared intelligence tab content — used by both desktop section and mobile accordion. */
 function IntelTabContent({
@@ -164,6 +165,10 @@ function IntelTabContent({
             )}
           </CollapsiblePanel>
           <CollapsiblePanel title="Missed Trade Learning">
+            <SystemPerformancePanel
+              performance={intelligence.system_performance ?? null}
+              loading={intelligenceLoading}
+            />
             <MissedTradeLearningPanel
               data={intelligence?.missed_trade_learning ?? null}
               loading={loading}

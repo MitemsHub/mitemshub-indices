@@ -31,6 +31,7 @@ function intelligenceEmptyResponse(usingPrepared = false) {
     generator_fingerprint: null,
     missed_trade_learning: null,
     curve_fitting_test: null,
+    system_performance: null,
     using_prepared_call: usingPrepared,
   };
 }
@@ -147,6 +148,7 @@ async function buildIntelligencePayload(
   const sessionQuality = buildSessionQuality(currentCall);
   const generatorFingerprint = buildGeneratorFingerprint(currentCall);    const missedTradeLearning = buildMissedTradeLearning();
   const curveFittingTest = buildCurveFittingTest();
+  const systemPerformance = buildSystemPerformance(history);
 
   return {
     market_intelligence: marketIntelligence,
@@ -167,6 +169,7 @@ async function buildIntelligencePayload(
     generator_fingerprint: generatorFingerprint,
     missed_trade_learning: missedTradeLearning,
     curve_fitting_test: curveFittingTest,
+    system_performance: systemPerformance,
   };
 }
 
@@ -1292,6 +1295,96 @@ function buildCurveFittingTest() {
       explanation: report.explanation || "Run the synthetic backtest to generate a curve-fitting report.",
       episodes,
       ran_at: report.ran_at || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ── System Performance ──────────────────────────────────────────
+// Computes aggregate performance metrics from trade history.
+// Reads the journal JSONL file to calculate win rate, profit factor,
+// max drawdown, expectancy, and other key trading metrics.
+
+function buildSystemPerformance(history: any[]) {
+  try {
+    const engineRoot = process.env.SYNTHETIC_ENGINE_ROOT || process.cwd();
+    const journalPath = join(engineRoot, "data", "trade_journal.jsonl");
+
+    let outcomes: any[] = [];
+
+    if (existsSync(journalPath)) {
+      const raw = readFileSync(journalPath, "utf-8");
+      outcomes = raw
+        .split("\n")
+        .filter((l: string) => l.trim())
+        .map((l: string) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter((o: any) => o && o.type === "outcome");
+    }
+
+    if (outcomes.length === 0) {
+      return null;
+    }
+
+    const wins = outcomes.filter((o: any) => (o.pnl ?? 0) > 0);
+    const losses = outcomes.filter((o: any) => (o.pnl ?? 0) <= 0);
+    const totalTrades = outcomes.length;
+    const winRate = wins.length / totalTrades;
+
+    const grossProfit = wins.reduce((sum: number, o: any) => sum + (o.pnl ?? 0), 0);
+    const grossLoss = Math.abs(losses.reduce((sum: number, o: any) => sum + (o.pnl ?? 0), 0));
+    const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999.99 : 0);
+
+    const rMultiples = outcomes.map((o: any) => o.return_r ?? 0);
+    const avgRMultiple = rMultiples.reduce((a: number, b: number) => a + b, 0) / totalTrades;
+
+    const pnlSequence = outcomes.map((o: any) => o.pnl ?? 0);
+    let peak = 0;
+    let maxDrawdownAmount = 0;
+    let maxDrawdownPct = 0;
+    let equity = 0;
+
+    for (const pnl of pnlSequence) {
+      equity += pnl;
+      if (equity > peak) peak = equity;
+      const drawdown = peak - equity;
+      if (drawdown > maxDrawdownAmount) {
+        maxDrawdownAmount = drawdown;
+        maxDrawdownPct = peak > 0 ? (drawdown / peak) * 100 : 0;
+      }
+    }
+
+    const netPnl = pnlSequence.reduce((a: number, b: number) => a + b, 0);
+    const avgWin = wins.length > 0 ? grossProfit / wins.length : 0;
+    const avgLoss = losses.length > 0 ? grossLoss / losses.length : 0;
+    const expectancyR = avgRMultiple;
+
+    // Time span
+    const firstEpoch = outcomes[0]?.epoch ?? outcomes[0]?.opened_at ?? 0;
+    const lastEpoch = outcomes[outcomes.length - 1]?.epoch ?? outcomes[outcomes.length - 1]?.opened_at ?? 0;
+    const spanSeconds = lastEpoch > firstEpoch ? lastEpoch - firstEpoch : 0;
+    let timeSpan = "session";
+    if (spanSeconds > 86400 * 7) timeSpan = `${Math.floor(spanSeconds / 86400)} days`;
+    else if (spanSeconds > 86400) timeSpan = `${Math.floor(spanSeconds / 3600)} hours`;
+    else if (spanSeconds > 3600) timeSpan = `${Math.floor(spanSeconds / 3600)}h ${Math.floor((spanSeconds % 3600) / 60)}m`;
+    else if (spanSeconds > 0) timeSpan = `${Math.floor(spanSeconds / 60)} minutes`;
+
+    return {
+      total_trades: totalTrades,
+      wins: wins.length,
+      losses: losses.length,
+      win_rate: winRate,
+      profit_factor: profitFactor,
+      avg_r_multiple: avgRMultiple,
+      max_drawdown_pct: maxDrawdownPct,
+      max_drawdown_amount: maxDrawdownAmount,
+      net_pnl: netPnl,
+      gross_profit: grossProfit,
+      gross_loss: grossLoss,
+      avg_win: avgWin,
+      avg_loss: avgLoss,
+      expectancy_r: expectancyR,
+      time_span: timeSpan,
     };
   } catch {
     return null;

@@ -555,6 +555,26 @@ export const generatorFingerprintSchema = z.object({
 
 export type GeneratorFingerprint = z.infer<typeof generatorFingerprintSchema>;
 
+export const systemPerformanceSchema = z.object({
+  total_trades: z.number(),
+  wins: z.number(),
+  losses: z.number(),
+  win_rate: z.number(),
+  profit_factor: z.number(),
+  avg_r_multiple: z.number(),
+  max_drawdown_pct: z.number(),
+  max_drawdown_amount: z.number(),
+  net_pnl: z.number(),
+  gross_profit: z.number(),
+  gross_loss: z.number(),
+  avg_win: z.number(),
+  avg_loss: z.number(),
+  expectancy_r: z.number(),
+  time_span: z.string(),
+}).nullable();
+
+export type SystemPerformance = z.infer<typeof systemPerformanceSchema>;
+
 export const missedTradeLearningSchema = z.object({
   total_resolved: z.number(),
   missed_opportunities: z.number(),
@@ -648,6 +668,7 @@ export const intelligencePayloadSchema = z.object({
   generator_fingerprint: generatorFingerprintSchema,
   missed_trade_learning: missedTradeLearningSchema,
   curve_fitting_test: curveFittingTestSchema,
+  system_performance: systemPerformanceSchema,
 });
 
 export type IntelligencePayload = z.infer<typeof intelligencePayloadSchema>;
