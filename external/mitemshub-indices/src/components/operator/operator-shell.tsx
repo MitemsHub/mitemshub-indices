@@ -28,6 +28,7 @@ import { LotSizeCalculator } from "./lot-size-calculator";
 import { BridgeOfflineBanner } from "./bridge-offline-banner";
 import { TABS, type IntelPanelId, resolveEnabledPanels, readIntelPanelOverrides } from "../../lib/constants";
 import { PriceChart } from "../charts/PriceChart";
+import { CollapsiblePanel } from "../ui/collapsible-panel";
 
 // Intelligence panels
 import { MarketIntelligencePanel } from "../intelligence/MarketIntelligencePanel";
@@ -69,10 +70,12 @@ function IntelTabContent({
             modelProbability={call?.confidence ?? undefined}
             loading={loading}
           />
-          <AlternativeScenarioPanel
-            scenario={intelligence?.alternative_scenario || null}
-            loading={loading}
-          />
+          <CollapsiblePanel title="Alternative Scenario">
+            <AlternativeScenarioPanel
+              scenario={intelligence?.alternative_scenario || null}
+              loading={loading}
+            />
+          </CollapsiblePanel>
         </>
       );
     case "analysis":
@@ -82,81 +85,96 @@ function IntelTabContent({
             plan={intelligence?.trade_plan || null}
           />
           <div className="grid gap-5 md:grid-cols-2">
-            <ConfidenceTrendPanel
-              trend={intelligence?.confidence_trend || null}
-              loading={loading}
-            />
+            <CollapsiblePanel title="Confidence Trend">
+              <ConfidenceTrendPanel
+                trend={intelligence?.confidence_trend || null}
+                loading={loading}
+              />
+            </CollapsiblePanel>
             <RiskAssessmentPanel
               assessment={intelligence?.risk_assessment || null}
               loading={loading}
             />
           </div>
-          <ThesisInvalidationPanel
-            invalidation={intelligence?.thesis_invalidation || null}
-            currentPrice={call?.current_close ?? null}
-            loading={loading}
-          />
+          <CollapsiblePanel title="Thesis Invalidation">
+            <ThesisInvalidationPanel
+              invalidation={intelligence?.thesis_invalidation || null}
+              currentPrice={call?.current_close ?? null}
+              loading={loading}
+            />
+          </CollapsiblePanel>
         </>
       );
     case "history":
       return (
         <>
-          <TradeProgressPanel
-            progress={intelligence?.trade_progress || null}
-            currentPrice={call?.current_close ?? null}
-            loading={loading}
-          />
-          <ConfidenceTrendPanel
-            trend={intelligence?.confidence_trend || null}
-            loading={loading}
-          />
-          <DecisionHistoryPanel
-            history={history}
-            loading={loading}
-          />
+          <CollapsiblePanel title="Trade Progress">
+            <TradeProgressPanel
+              progress={intelligence?.trade_progress || null}
+              currentPrice={call?.current_close ?? null}
+              loading={loading}
+            />
+          </CollapsiblePanel>
+          <CollapsiblePanel title="Confidence Trend">
+            <ConfidenceTrendPanel
+              trend={intelligence?.confidence_trend || null}
+              loading={loading}
+            />
+          </CollapsiblePanel>
+          <CollapsiblePanel title="Decision History">
+            <DecisionHistoryPanel
+              history={history}
+              loading={loading}
+            />
+          </CollapsiblePanel>
         </>
       );
     case "learning":
       return (
         <>
-          {intelligence?.curve_fitting_test && (
-            <CurveFittingTestPanel data={intelligence.curve_fitting_test} />
-          )}
-          {!intelligence?.curve_fitting_test && (
-            <div
-              className="info-card"
-              style={{ padding: "1.25rem", borderRadius: "0.75rem" }}
-            >
-              <div style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-strong)", marginBottom: "0.375rem" }}>
-                Curve-Fitting Test
+          <CollapsiblePanel title="Curve-Fitting Test">
+            {intelligence?.curve_fitting_test ? (
+              <CurveFittingTestPanel data={intelligence.curve_fitting_test} />
+            ) : (
+              <div
+                className="info-card"
+                style={{ padding: "1.25rem", borderRadius: "0.75rem" }}
+              >
+                <div style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-strong)", marginBottom: "0.375rem" }}>
+                  Curve-Fitting Test
+                </div>
+                <p style={{ margin: 0, fontSize: "0.75rem", lineHeight: 1.5, color: "var(--text-body)" }}>
+                  No curve-fitting report found. Run the synthetic backtest to generate one:
+                </p>
+                <pre
+                  style={{
+                    marginTop: "0.5rem",
+                    padding: "0.5rem 0.75rem",
+                    borderRadius: "0.375rem",
+                    background: "var(--bg-panel-muted)",
+                    fontSize: "0.6875rem",
+                    fontFamily: "monospace",
+                    color: "var(--text-body)",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-all",
+                    margin: 0,
+                  }}
+                >{`python -m synthetic_trader backtest-synth --symbol R_100 --episodes 20 --ticks 5000 --prop-firm blueberry_2step --artifact-output data/curve_fitting_report.json`}</pre>
               </div>
-              <p style={{ margin: 0, fontSize: "0.75rem", lineHeight: 1.5, color: "var(--text-body)" }}>
-                No curve-fitting report found. Run the synthetic backtest to generate one:
-              </p>
-              <pre
-                style={{
-                  marginTop: "0.5rem",
-                  padding: "0.5rem 0.75rem",
-                  borderRadius: "0.375rem",
-                  background: "var(--bg-panel-muted)",
-                  fontSize: "0.6875rem",
-                  fontFamily: "monospace",
-                  color: "var(--text-body)",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-all",
-                  margin: 0,
-                }}
-              >{`python -m synthetic_trader backtest-synth --symbol R_100 --episodes 20 --ticks 5000 --prop-firm blueberry_2step --artifact-output data/curve_fitting_report.json`}</pre>
-            </div>
-          )}
-          <MissedTradeLearningPanel
-            data={intelligence?.missed_trade_learning ?? null}
-            loading={loading}
-          />
-          <TradeJournalDashboard
-            externalTrades={null}
-            confidenceTrend={intelligence?.confidence_trend ?? null}
-          />
+            )}
+          </CollapsiblePanel>
+          <CollapsiblePanel title="Missed Trade Learning">
+            <MissedTradeLearningPanel
+              data={intelligence?.missed_trade_learning ?? null}
+              loading={loading}
+            />
+          </CollapsiblePanel>
+          <CollapsiblePanel title="Trade Journal">
+            <TradeJournalDashboard
+              externalTrades={null}
+              confidenceTrend={intelligence?.confidence_trend ?? null}
+            />
+          </CollapsiblePanel>
         </>
       );
   }
@@ -368,18 +386,22 @@ export function OperatorShell() {
                       />
                     )}
                     {enabledPanels.includes("evidence_summary") && (
-                      <EvidencePanel
-                        evidence={workspace.intelligence?.evidence_summary ?? null}
-                        loading={workspace.intelligenceLoading}
-                      />
+                      <CollapsiblePanel title="Evidence Summary">
+                        <EvidencePanel
+                          evidence={workspace.intelligence?.evidence_summary ?? null}
+                          loading={workspace.intelligenceLoading}
+                        />
+                      </CollapsiblePanel>
                     )}
                   </div>
                 )}
                 {enabledPanels.includes("market_thesis") && (
-                  <MarketThesisPanel
-                    thesis={(workspace.intelligence?.market_thesis ?? null) as any}
-                    loading={workspace.intelligenceLoading}
-                  />
+                  <CollapsiblePanel title="Market Thesis">
+                    <MarketThesisPanel
+                      thesis={(workspace.intelligence?.market_thesis ?? null) as any}
+                      loading={workspace.intelligenceLoading}
+                    />
+                  </CollapsiblePanel>
                 )}
               </>
             )}
