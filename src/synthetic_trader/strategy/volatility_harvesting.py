@@ -100,9 +100,9 @@ class VolatilityHarvester:
         """Switch to dedicated volatility harvesting mode with relaxed thresholds.
         
         In harvest mode, the z-score threshold drops from 2.5 to 1.8,
-        the mean-revert signal threshold stays at 0.6, and the ATR z
-        threshold drops from 1.0 to 0.8.  This makes the strategy
-        more aggressive at detecting reversion opportunities.
+        the mean-revert signal threshold stays at 0.6, the ATR z
+        threshold drops from 1.0 to 0.8, and hold_bars drops from
+        4 to 3 for faster exits on mean-reversion trades.
         """
         self.z_threshold = 1.8
         self.mr_signal_threshold = 0.6
