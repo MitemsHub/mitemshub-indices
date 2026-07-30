@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { notifyBridgeReconnected } from "../lib/notifications";
 
 type AutoRetryState = {
   /** Whether auto-retry is currently active. */
@@ -60,6 +61,7 @@ export function useBridgeAutoRetry({
   const offlineRef = useRef(offline);
   const loadingRef = useRef(loading);
   const onRetryRef = useRef(onRetry);
+  const wasOfflineRef = useRef(false);
 
   // Keep refs in sync — avoids stale closures in setTimeout callbacks
   offlineRef.current = offline;
@@ -129,7 +131,12 @@ export function useBridgeAutoRetry({
       );
       scheduleRetry(nextDelay);
     } else if (!offline) {
-      // Bridge came back online — reset everything
+      // Bridge came back online — fire notification if it was previously offline
+      if (wasOfflineRef.current && attemptRef.current > 0) {
+        notifyBridgeReconnected();
+      }
+      wasOfflineRef.current = false;
+      // Reset everything
       clearTimers();
       attemptRef.current = 0;
       setAttempt(0);
@@ -138,6 +145,11 @@ export function useBridgeAutoRetry({
     } else if (loading) {
       // Retry in progress — clear the schedule (will reschedule after loading ends)
       clearTimers();
+    }
+
+    // Track offline transitions
+    if (offline) {
+      wasOfflineRef.current = true;
     }
 
     return clearTimers;

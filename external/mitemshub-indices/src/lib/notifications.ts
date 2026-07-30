@@ -70,7 +70,7 @@ export function sendNotification(opts: NotificationOptions): boolean {
       tag: opts.tag ?? "mitems-default",
       renotify: opts.renotify ?? true,
       silent: opts.silent ?? false,
-    });
+    } as NotificationOptions & { renotify?: boolean });
     return true;
   } catch {
     // Some mobile browsers throw when creating notifications from
@@ -192,6 +192,15 @@ export function notifyGuardianActionable(params: {
     title: `🟡 Guardian Actionable — ${params.symbol}`,
     body: params.reason,
     tag: `guardian-actionable-${params.symbol}`,
+    renotify: true,
+  });
+}
+
+export function notifyBridgeReconnected(): boolean {
+  return sendNotification({
+    title: `🟢 Bridge Reconnected`,
+    body: `Intelligence panels updating — fresh market data incoming.`,
+    tag: `bridge-reconnected`,
     renotify: true,
   });
 }
