@@ -26,6 +26,7 @@ import { CombinedMenuButton } from "./combined-menu-button";
 import { NotificationBell } from "./notification-bell";
 import { LotSizeCalculator } from "./lot-size-calculator";
 import { BridgeOfflineBanner } from "./bridge-offline-banner";
+import { useBridgeAutoRetry } from "../../hooks/use-bridge-auto-retry";
 import { TABS, type IntelPanelId, resolveEnabledPanels, readIntelPanelOverrides } from "../../lib/constants";
 import { PriceChart } from "../charts/PriceChart";
 import { CollapsiblePanel } from "../ui/collapsible-panel";
@@ -257,6 +258,17 @@ export function OperatorShell() {
   const isLoading = workspace.loading;
   const isDesktop = useMediaQuery("(min-width: 768px)");
 
+  // Auto-retry bridge reconnection with exponential backoff
+  const bridgeOffline = workspace.currentCall?.guardian_state === "unavailable" && !isLoading;
+  const bridgeAutoRetry = useBridgeAutoRetry({
+    offline: bridgeOffline,
+    loading: isLoading,
+    onRetry: () => workspace.runSymbol(workspace.activeSymbol),
+    baseDelayMs: 30_000,   // 30 seconds
+    maxDelayMs: 300_000,   // 5 minutes max
+    maxAttempts: 0,         // unlimited
+  });
+
   // Re-resolve panels when trading mode changes
   useEffect(() => {
     setEnabledPanels(
@@ -356,6 +368,11 @@ export function OperatorShell() {
             offline={workspace.currentCall?.guardian_state === "unavailable" && !isLoading}
             onRetry={() => workspace.runSymbol(workspace.activeSymbol)}
             retrying={isLoading}
+            autoRetryAttempt={bridgeAutoRetry.attempt}
+            secondsUntilRetry={bridgeAutoRetry.secondsUntilRetry}
+            autoRetryPaused={bridgeAutoRetry.paused}
+            onPauseAutoRetry={bridgeAutoRetry.pause}
+            onResumeAutoRetry={bridgeAutoRetry.resume}
           />
         )}
 
