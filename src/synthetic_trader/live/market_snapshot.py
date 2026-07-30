@@ -675,6 +675,13 @@ GUARDIAN_POSITION_SCALES: dict[str, float] = {
     "cancelled": 0.0,
 }
 
+# ── Confirmed lock tracking ────────────────────────────────────
+# Per-symbol tracking of when the guardian first reached 'confirmed'.
+# When the guardian state is 'confirmed', we record the tick count
+# (ticks_since_armed) so we can hold that status for
+# `confirmed_lock_ticks` ticks even if the entry gate no longer passes.
+_guardian_confirmed_at_tick: dict[str, int] = {}
+
 
 def _guardian_position_scale(guardian_state: str) -> float:
     """Map guardian state to a position scale multiplier (0.0–1.0).
@@ -727,6 +734,16 @@ def build_guardian_snapshot(
         entry=signal_snapshot.entry,
         prices=prices,
     )
+    # ── Confirmed lock: track previous state and first confirmation tick ──
+    symbol_key = str(snapshot.get("symbol", ""))
+    previous_guardian_state = str(snapshot.get("guardian_state", "")) or None
+    first_confirmed_at_tick = _guardian_confirmed_at_tick.get(symbol_key)
+
+    # Reset the confirmed tick tracker when the symbol or trade changes
+    if previous_guardian_state is None or previous_guardian_state == "forming":
+        _guardian_confirmed_at_tick.pop(symbol_key, None)
+        first_confirmed_at_tick = None
+
     guardian = evaluate_signal_guardian(
         signal_snapshot,
         GuardianContext(
@@ -734,11 +751,21 @@ def build_guardian_snapshot(
             ticks_since_armed=len(prices),
             max_favorable_excursion=max_favorable_excursion,
             max_adverse_excursion=max_adverse_excursion,
+            previous_guardian_state=previous_guardian_state,
+            first_confirmed_at_tick=first_confirmed_at_tick,
         ),
         thresholds,
     )
     enriched["guardian_state"] = guardian.state
     enriched["guardian_reason"] = guardian.reason
+
+    # Record the tick when the guardian first reaches 'confirmed'
+    if guardian.state == "confirmed" and symbol_key not in _guardian_confirmed_at_tick:
+        _guardian_confirmed_at_tick[symbol_key] = len(prices)
+
+    # Clear the tracker when the guardian leaves confirmed/actionable
+    if guardian.state in ("failing", "cancelled", "forming", "unavailable"):
+        _guardian_confirmed_at_tick.pop(symbol_key, None)
 
     # ── Guardian-based position sizing ───────────────────────────
     # Adjust position_scale based on guardian state. The guardian monitors

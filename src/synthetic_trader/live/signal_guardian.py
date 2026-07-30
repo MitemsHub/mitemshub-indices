@@ -18,6 +18,10 @@ class GuardianThresholds:
     rollover_invalidation_ratio: float
     adverse_cluster_window_ticks: int
     max_adverse_cluster_count: int
+    # Once a signal reaches 'confirmed', lock it for this many ticks
+    # before allowing downgrade to 'failing'.  Confirmed signals are
+    # validated setups that shouldn't flip on normal price noise.
+    confirmed_lock_ticks: int = 10
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,12 @@ class GuardianContext:
     ticks_since_armed: int
     max_favorable_excursion: float
     max_adverse_excursion: float
+    # Previous guardian state from the last evaluation.  Used to detect
+    # confirmed->failing transitions so we can apply the lock.
+    previous_guardian_state: str | None = None
+    # Tick number when the signal was first confirmed.  Set by the
+    # caller when previous_guardian_state == "confirmed".
+    first_confirmed_at_tick: int | None = None
 
 
 @dataclass(frozen=True)
@@ -235,25 +245,44 @@ def evaluate_signal_guardian(
         )
 
     micro = _assess_microstructure(snapshot, context, thresholds, stop_distance)
+
+    # ── Confirmed lock: hold confirmed status through normal noise ──
+    # Once a setup has been validated as 'confirmed', the guardian holds
+    # that status for at least `confirmed_lock_ticks` ticks even if
+    # microstructure temporarily weakens (rollover detection, adverse
+    # excursion).  This prevents validated setups from flickering to
+    # 'failing' on normal price noise.
+    #
+    # The lock does NOT protect against 'cancelled' — genuine thesis
+    # breakage (max adverse excursion) must always override the lock.
+    _in_confirmed_lock = False
+    if (
+        context.previous_guardian_state == "confirmed"
+        and context.first_confirmed_at_tick is not None
+    ):
+        ticks_since_confirmation = context.ticks_since_armed - context.first_confirmed_at_tick
+        if ticks_since_confirmation < thresholds.confirmed_lock_ticks:
+            _in_confirmed_lock = True
+
     rollover_state, rollover_reason = _detect_rollover(micro, thresholds)
     if rollover_state == "failing":
-        # ── Grace period: don't degrade during the first few ticks ──
-        # After a signal is generated, the market needs time to develop.
-        # Treating every adverse tick as 'deterioration' within the first
-        # 8 ticks is far too reactive — especially on volatile synthetic
-        # indices where normal price action includes rapid back-and-forth.
-        in_grace_period = context.ticks_since_armed <= 8
-
-        # Structure-led plans can print an orderly early pullback without losing the thesis.
-        orderly_early_post_entry_move = (
-            context.ticks_since_armed <= thresholds.min_persistence_ticks + 2
-            and adverse_ratio < thresholds.rollover_warning_ratio
-            and micro.pullback_ratio < thresholds.rollover_warning_ratio
-            and micro.rejection_imbalance > 0
-        )
-        if in_grace_period or orderly_early_post_entry_move:
+        # During confirmed lock, suppress 'failing' — the setup was
+        # validated and normal pullbacks shouldn't downgrade it.
+        if _in_confirmed_lock:
             rollover_state = None
             rollover_reason = None
+        else:
+            # ── Grace period: don't degrade during the first few ticks ──
+            in_grace_period = context.ticks_since_armed <= 8
+            orderly_early_post_entry_move = (
+                context.ticks_since_armed <= thresholds.min_persistence_ticks + 2
+                and adverse_ratio < thresholds.rollover_warning_ratio
+                and micro.pullback_ratio < thresholds.rollover_warning_ratio
+                and micro.rejection_imbalance > 0
+            )
+            if in_grace_period or orderly_early_post_entry_move:
+                rollover_state = None
+                rollover_reason = None
     if rollover_state:
         return GuardianEvaluation(
             rollover_state,
@@ -261,10 +290,15 @@ def evaluate_signal_guardian(
         )
 
     if adverse_ratio >= thresholds.weakening_excursion_ratio:
-        return GuardianEvaluation(
-            "failing",
-            "The setup is deteriorating and the old plan is no longer fresh.",
-        )
+        # During confirmed lock, suppress 'failing' from adverse excursion
+        # unless it's genuinely severe (approaching max).
+        if _in_confirmed_lock and adverse_ratio < thresholds.max_adverse_excursion_ratio * 0.8:
+            pass  # hold confirmed — excursion is within tolerable range
+        else:
+            return GuardianEvaluation(
+                "failing",
+                "The setup is deteriorating and the old plan is no longer fresh.",
+            )
 
     passes_entry_gate, gate_reason = _passes_entry_gate(
         snapshot,
@@ -277,6 +311,18 @@ def evaluate_signal_guardian(
         return GuardianEvaluation(
             "confirmed",
             f"{snapshot.direction_bias.capitalize()} confirmation received after strong reclaim and controlled pullback.",
+        )
+
+    # ── Confirmed lock fallback: hold 'confirmed' when entry gate lapses ──
+    # If the entry gate no longer passes (e.g. brief pullback reduced
+    # impulse) but the setup was recently confirmed, hold 'confirmed'
+    # until the lock expires.
+    if _in_confirmed_lock:
+        ticks_since_confirmation = context.ticks_since_armed - context.first_confirmed_at_tick
+        remaining = thresholds.confirmed_lock_ticks - ticks_since_confirmation
+        return GuardianEvaluation(
+            "confirmed",
+            f"Confirmation locked — setup validated, {remaining} ticks remaining before re-evaluation.",
         )
 
     return GuardianEvaluation(
