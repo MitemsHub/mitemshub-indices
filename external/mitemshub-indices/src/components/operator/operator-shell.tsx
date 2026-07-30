@@ -378,7 +378,10 @@ export function OperatorShell() {
 
         {/* ── Connection Status ────────────────────────────────────── */}
         <ErrorBoundary label="Connection status">
-          <ConnectionStatus />
+          <ConnectionStatus
+            autoRetryAttempt={bridgeAutoRetry.attempt}
+            secondsUntilRetry={bridgeAutoRetry.secondsUntilRetry}
+          />
         </ErrorBoundary>
 
         {/* ── Health Dashboard (collapsible) ─────────────────────────── */}

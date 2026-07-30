@@ -38,6 +38,10 @@ export type ConnectionStatusProps = {
   retryFetcher?: RetryFetcher;
   /** Poll interval in ms — defaults to 15000. */
   pollIntervalMs?: number;
+  /** Auto-retry attempt number (1-based). Show when > 0. */
+  autoRetryAttempt?: number;
+  /** Seconds until the next auto-retry fires. */
+  secondsUntilRetry?: number;
 };
 
 function StatusDot({ active, color }: { active: boolean; color: string }) {
@@ -70,6 +74,8 @@ export function ConnectionStatus({
   testFetcher,
   retryFetcher,
   pollIntervalMs = 15_000,
+  autoRetryAttempt,
+  secondsUntilRetry,
 }: ConnectionStatusProps = {}) {
   const [data, setData] = useState<ConnectionStatusData | null>(
     initialData !== undefined ? initialData : null,
@@ -175,6 +181,17 @@ export function ConnectionStatus({
 
   return (
     <div className="surface rounded-xl px-3 py-2 flex items-center gap-3 text-[11px] text-[var(--text-body)] flex-wrap mb-3">
+      {/* Auto-retry indicator — shown when bridge auto-retry is active */}
+      {(autoRetryAttempt ?? 0) > 0 && (
+        <span className="flex items-center gap-1.5 rounded-md bg-[var(--accent-warn-soft)] border border-[rgba(184,134,11,0.18)] px-2 py-0.5 text-[10px] font-medium text-[var(--accent-warn)]" title="Bridge auto-retry in progress">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--accent-warn)] animate-pulse" />
+          <span>Retry #{autoRetryAttempt}</span>
+          {(secondsUntilRetry ?? 0) > 0 && (
+            <span className="opacity-70">{secondsUntilRetry}s</span>
+          )}
+        </span>
+      )}
+
       {/* MT5 status */}
       <span className="flex items-center gap-1.5" title={mt5Tooltip}>
         <StatusDot active={mt5Ok} color="var(--accent-positive)" />
