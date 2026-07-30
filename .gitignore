@@ -10,6 +10,8 @@ build/
 dist/
 *.egg-info/
 data/
+!src/synthetic_trader/data/
+!src/synthetic_trader/data/*.py
 journals/
 models/*.json
 artifacts/
