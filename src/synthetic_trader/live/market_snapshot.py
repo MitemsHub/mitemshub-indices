@@ -646,6 +646,41 @@ def _guardian_prices_since_entry(
     return recent_prices[-1:]
 
 
+# ── Guardian-based position sizing ──────────────────────────────
+# The guardian monitors LIVE signal quality after a trade is generated.
+# When the setup deteriorates, the guardian adjusts position_scale to
+# automatically de-risk before the signal reaches the execution layer.
+#
+# Position scale mapping:
+#   confirmed  → 1.0  (full size — setup is validated)
+#   actionable → 0.5  (reduced size — waiting for confirmation)
+#   forming    → 0.0  (no size — no data to evaluate)
+#   failing    → 0.0  (no size — setup is deteriorating)
+#   cancelled  → 0.0  (no size — thesis is broken)
+#
+# The guardian position_scale is applied AFTER the regime shift detector's
+# position_scale, so the final scale is min(regime_scale, guardian_scale).
+# This ensures that BOTH regime anomalies AND setup deterioration reduce
+# position sizing — the most conservative signal wins.
+
+GUARDIAN_POSITION_SCALES: dict[str, float] = {
+    "confirmed": 1.0,
+    "actionable": 0.5,
+    "forming": 0.0,
+    "failing": 0.0,
+    "cancelled": 0.0,
+}
+
+
+def _guardian_position_scale(guardian_state: str) -> float:
+    """Map guardian state to a position scale multiplier (0.0–1.0).
+
+    Returns the position scale for the given guardian state. Unknown
+    states default to 0.0 (no position) for safety.
+    """
+    return GUARDIAN_POSITION_SCALES.get(guardian_state, 0.0)
+
+
 def build_guardian_snapshot(
     snapshot: dict[str, object],
     ticks: list[Tick],
@@ -700,6 +735,30 @@ def build_guardian_snapshot(
     )
     enriched["guardian_state"] = guardian.state
     enriched["guardian_reason"] = guardian.reason
+
+    # ── Guardian-based position sizing ───────────────────────────
+    # Adjust position_scale based on guardian state. The guardian monitors
+    # LIVE signal quality — when the setup deteriorates (failing/cancelled),
+    # it reduces position sizing to protect capital.
+    #
+    # The final position_scale is min(regime_scale, guardian_scale), so
+    # BOTH regime anomalies AND setup deterioration reduce sizing.
+    regime_scale = float(snapshot.get("position_scale", 1.0))
+    guardian_scale = _guardian_position_scale(guardian.state)
+    final_scale = min(regime_scale, guardian_scale)
+    enriched["position_scale"] = final_scale
+    enriched["guardian_position_scale"] = guardian_scale
+
+    # Update position_sizing label to reflect the guardian's adjustment.
+    if final_scale <= 0.0:
+        enriched["position_sizing"] = "none"
+    elif final_scale < 0.5:
+        enriched["position_sizing"] = "minimal"
+    elif final_scale < 0.8:
+        enriched["position_sizing"] = "reduced"
+    else:
+        enriched["position_sizing"] = "full"
+
     return enriched
 
 
@@ -1507,6 +1566,7 @@ def analyze_live_snapshot(
         "direction_bias": direction_bias,
         "signal_strength": getattr(report.signal, "signal_strength", "strong"),
         "position_sizing": getattr(report.signal, "position_sizing", "full"),
+        "position_scale": getattr(report.signal, "position_scale", 1.0),
         "briefing": "; ".join(report.signal.rationale[:2]),
         "decision_summary": "; ".join(report.signal.rationale),
         "symbol": symbol,
