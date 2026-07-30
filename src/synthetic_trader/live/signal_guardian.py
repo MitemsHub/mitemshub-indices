@@ -21,7 +21,13 @@ class GuardianThresholds:
     # Once a signal reaches 'confirmed', lock it for this many ticks
     # before allowing downgrade to 'failing'.  Confirmed signals are
     # validated setups that shouldn't flip on normal price noise.
+    # The actual lock duration scales dynamically with confidence:
+    #   confidence >= 0.75 → confirmed_lock_ticks_high (extended)
+    #   confidence <  0.50 → confirmed_lock_ticks_low  (shortened)
+    #   otherwise         → confirmed_lock_ticks       (default)
     confirmed_lock_ticks: int = 10
+    confirmed_lock_ticks_high: int = 15
+    confirmed_lock_ticks_low: int = 5
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,12 @@ class GuardianContext:
     # Tick number when the signal was first confirmed.  Set by the
     # caller when previous_guardian_state == "confirmed".
     first_confirmed_at_tick: int | None = None
+    # Confidence level at the time of first confirmation.  Used to
+    # scale the confirmed lock duration dynamically.
+    confidence_at_confirmation: float | None = None
+    # Current confidence level from the decision engine.  Used to
+    # determine the effective lock duration for re-evaluation.
+    current_confidence: float | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +81,26 @@ def _stop_distance(snapshot: GuardianSnapshot) -> float | None:
     if snapshot.entry is None or snapshot.stop_loss is None:
         return None
     return abs(snapshot.entry - snapshot.stop_loss)
+
+
+def _effective_confirmed_lock_ticks(
+    thresholds: GuardianThresholds,
+    confidence: float | None,
+) -> int:
+    """Return the lock duration in ticks, scaled by confidence.
+
+    High-confidence setups (>= 0.75) get a longer lock (15 ticks)
+    because they're more likely to be genuine.  Low-confidence setups
+    (< 0.50) get a shorter lock (5 ticks) so they can degrade faster
+    if the setup proves weak.  Middle-range uses the default (10).
+    """
+    if confidence is None:
+        return thresholds.confirmed_lock_ticks
+    if confidence >= 0.75:
+        return thresholds.confirmed_lock_ticks_high
+    if confidence < 0.50:
+        return thresholds.confirmed_lock_ticks_low
+    return thresholds.confirmed_lock_ticks
 
 
 def _directional_deltas(prices: list[float], direction_bias: str) -> list[float]:
@@ -256,12 +288,15 @@ def evaluate_signal_guardian(
     # The lock does NOT protect against 'cancelled' — genuine thesis
     # breakage (max adverse excursion) must always override the lock.
     _in_confirmed_lock = False
+    _effective_lock_ticks = _effective_confirmed_lock_ticks(
+        thresholds, context.current_confidence or context.confidence_at_confirmation
+    )
     if (
         context.previous_guardian_state == "confirmed"
         and context.first_confirmed_at_tick is not None
     ):
         ticks_since_confirmation = context.ticks_since_armed - context.first_confirmed_at_tick
-        if ticks_since_confirmation < thresholds.confirmed_lock_ticks:
+        if ticks_since_confirmation < _effective_lock_ticks:
             _in_confirmed_lock = True
 
     rollover_state, rollover_reason = _detect_rollover(micro, thresholds)
@@ -319,10 +354,10 @@ def evaluate_signal_guardian(
     # until the lock expires.
     if _in_confirmed_lock:
         ticks_since_confirmation = context.ticks_since_armed - context.first_confirmed_at_tick
-        remaining = thresholds.confirmed_lock_ticks - ticks_since_confirmation
+        remaining = _effective_lock_ticks - ticks_since_confirmation
         return GuardianEvaluation(
             "confirmed",
-            f"Confirmation locked — setup validated, {remaining} ticks remaining before re-evaluation.",
+            f"Confirmation locked ({_effective_lock_ticks}t) — setup validated, {remaining} ticks remaining.",
         )
 
     return GuardianEvaluation(

@@ -744,6 +744,13 @@ def build_guardian_snapshot(
         _guardian_confirmed_at_tick.pop(symbol_key, None)
         first_confirmed_at_tick = None
 
+    # Read confidence from the snapshot for dynamic lock duration
+    current_confidence = float(snapshot.get("confidence", 0.0) or 0.0)
+    confidence_at_confirmation: float | None = None
+    if previous_guardian_state == "confirmed" and first_confirmed_at_tick is not None:
+        # Preserve the confidence level from when the signal was first confirmed
+        confidence_at_confirmation = float(snapshot.get("confidence_at_confirmation", 0.0) or 0.0) or None
+
     guardian = evaluate_signal_guardian(
         signal_snapshot,
         GuardianContext(
@@ -753,15 +760,19 @@ def build_guardian_snapshot(
             max_adverse_excursion=max_adverse_excursion,
             previous_guardian_state=previous_guardian_state,
             first_confirmed_at_tick=first_confirmed_at_tick,
+            confidence_at_confirmation=confidence_at_confirmation,
+            current_confidence=current_confidence,
         ),
         thresholds,
     )
     enriched["guardian_state"] = guardian.state
     enriched["guardian_reason"] = guardian.reason
 
-    # Record the tick when the guardian first reaches 'confirmed'
+    # Record the tick and confidence when the guardian first reaches 'confirmed'
     if guardian.state == "confirmed" and symbol_key not in _guardian_confirmed_at_tick:
         _guardian_confirmed_at_tick[symbol_key] = len(prices)
+        # Store the confidence at confirmation time for dynamic lock duration
+        enriched["confidence_at_confirmation"] = current_confidence
 
     # Clear the tracker when the guardian leaves confirmed/actionable
     if guardian.state in ("failing", "cancelled", "forming", "unavailable"):
