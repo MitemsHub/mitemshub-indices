@@ -892,6 +892,9 @@ export async function getHealthMetrics(): Promise<{
     snapshotPhases = JSON.parse(raw) as Record<string, unknown>;
   } catch { /* file not written yet */ }
 
+  // getPipelineDiagnostics() now calls clearStalePipelineErrors() internally,
+  // so stale errors from past failures are automatically cleared when a
+  // recent successful subprocess is observed. No duplicate logic needed here.
   const diagnostics = getPipelineDiagnostics();
 
   // Bridge-unavailable detection:
@@ -903,25 +906,8 @@ export async function getHealthMetrics(): Promise<{
   // When bridge_unavailable is true, the HealthDashboard shows "Bridge Offline"
   // instead of "Critical" — a more accurate description of the root cause,
   // since zero velocity and stalled ticks are symptoms, not the problem.
-  //
-  // Belt-and-suspenders: if the subprocess history shows a successful call
-  // within the last 60 seconds, treat the error as stale and clear it.
-  // This prevents a single past failure from permanently locking the bridge
-  // into "offline" even when subsequent calls succeed (e.g. the record-
-  // PipelineError fix missed an edge case, or the server was restarted
-  // between failure and recovery).
-  const recentSuccessMs = 60_000;
-  const now = Date.now();
-  const hasRecentSuccess = diagnostics.subprocessHistory.some(
-    (entry) => entry.success && (now - entry.timestamp) < recentSuccessMs,
-  );
-  if (hasRecentSuccess && diagnostics.lastError !== null) {
-    // Clear the stale error — bridge is clearly working.
-    recordPipelineError(null);
-  }
-  const freshDiagnostics = getPipelineDiagnostics();
   const bridge_unavailable = getConfiguredEngineRoot() !== null
-    && freshDiagnostics.lastError !== null;
+    && diagnostics.lastError !== null;
 
   // ── MT5 process check, last test, and auto-retry (parallel reads) ──
   let mt5Running = false;

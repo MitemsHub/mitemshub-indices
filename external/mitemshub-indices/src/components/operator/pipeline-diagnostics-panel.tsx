@@ -199,7 +199,10 @@ export function PipelineDiagnosticsPanel() {
   };
 
   const hasData = data && (data.lastGuardianReason || data.lastStderr || data.lastError || data.lastRetryCount > 0);
-  const hasIssues = data?.lastStderr || data?.lastError || (data?.lastRetryCount ?? 0) > 0;
+  // Only flag as "issues" when there are actual errors or retries.
+  // lastStderr contains informational Python output (e.g. outlier tick
+  // warnings) — not real errors, so it should not trigger the badge.
+  const hasIssues = data?.lastError || (data?.lastRetryCount ?? 0) > 0;
 
   return (
     <div className="surface rounded-xl mt-2">
@@ -323,7 +326,7 @@ export function PipelineDiagnosticsPanel() {
                 {(data.lastStderr || data.lastError) && (
                   <span className="inline-flex items-center gap-1 rounded-full border border-[var(--accent-danger)] bg-[var(--accent-danger-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-danger)]">
                     <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--accent-danger)]" />
-                    Issue detected
+                    Issues detected
                   </span>
                 )}
               </div>

@@ -141,6 +141,28 @@ export function recordPipelineStaleDataSince(epoch: number | null | undefined): 
   }
 }
 
+/**
+ * Clear stale pipeline errors when a recent successful subprocess call
+ * is observed. Prevents a single past failure from permanently
+ * showing "Issues detected" in the diagnostics panel even after
+ * the bridge has recovered.
+ *
+ * Called from both `getPipelineDiagnostics()` and `getHealthMetrics()`
+ * so the clearing happens regardless of which endpoint is polled.
+ */
+export function clearStalePipelineErrors(): void {
+  const RECENT_SUCCESS_MS = 60_000;
+  const now = Date.now();
+  const hasRecentSuccess = pipelineDiagnostics.subprocessHistory.some(
+    (entry) => entry.success && (now - entry.timestamp) < RECENT_SUCCESS_MS,
+  );
+  if (hasRecentSuccess && pipelineDiagnostics.lastError !== null) {
+    pipelineDiagnostics.lastError = null;
+    pipelineDiagnostics.staleDataSince = null;
+    pipelineDiagnostics.lastUpdatedAt = new Date().toISOString();
+  }
+}
+
 function recordSubprocessTiming(label: string, durationMs: number, success: boolean): void {
   pipelineDiagnostics.lastSubprocessDurationMs = durationMs;
   pipelineDiagnostics.lastSubprocessLabel = label;
@@ -156,8 +178,12 @@ function recordSubprocessTiming(label: string, durationMs: number, success: bool
   }
 }
 
-export function getPipelineDiagnostics() {
-  return { ...pipelineDiagnostics, subprocessHistory: [...pipelineDiagnostics.subprocessHistory] } as PipelineDiagnostics;
+export function getPipelineDiagnostics(): PipelineDiagnostics {
+  // Clear stale errors when a recent successful subprocess is observed.
+  // This ensures the diagnostics panel doesn't show "Issues detected"
+  // after the bridge has recovered from a past failure.
+  clearStalePipelineErrors();
+  return { ...pipelineDiagnostics, subprocessHistory: [...pipelineDiagnostics.subprocessHistory] };
 }
 
 // ── TTL cache factory ─────────────────────────────────────────
