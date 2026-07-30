@@ -212,6 +212,46 @@ export function MarketIntelligencePanel({
           ]}
         />
       </div>
+
+      {/* GARCH Volatility Forecast — only shown when data is available */}
+      {intelligence.garch_sigma != null && (
+        <div className="mt-3 md:mt-4">
+          <DetailCard
+            title="EGARCH Volatility Forecast"
+            items={[
+              {
+                label: "Sigma",
+                value: formatNumber(intelligence.garch_sigma!, 4),
+                hint: intelligence.garch_vol_regime === "high"
+                  ? "Elevated — whipsaw risk"
+                  : intelligence.garch_vol_regime === "low"
+                  ? "Compressed — breakout potential"
+                  : "Normal",
+              },
+              {
+                label: "Vol Regime",
+                value: intelligence.garch_vol_regime ?? "normal",
+                hint: intelligence.garch_vol_regime === "high"
+                  ? "σ above 1.2× long-run"
+                  : intelligence.garch_vol_regime === "low"
+                  ? "σ below 0.8× long-run"
+                  : "Within normal band",
+              },
+              {
+                label: "Mean-Revert Signal",
+                value: intelligence.garch_mean_revert_signal != null
+                  ? `${(intelligence.garch_mean_revert_signal * 100).toFixed(0)}%`
+                  : "\u2014",
+                hint: intelligence.garch_mean_revert_signal != null && intelligence.garch_mean_revert_signal > 0.6
+                  ? "Strong — price likely reverting"
+                  : intelligence.garch_mean_revert_signal != null && intelligence.garch_mean_revert_signal > 0.4
+                  ? "Moderate — vol may compress"
+                  : "Weak — trend may continue",
+              },
+            ]}
+          />
+        </div>
+      )}
     </div>
     </div>
   );
