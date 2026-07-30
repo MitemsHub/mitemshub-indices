@@ -33,8 +33,8 @@ export const DEFAULT_THRESHOLDS: AlertThresholds = {
   mt5InitCritMs: 30_000,
   csvVelocityWarnTicksMin: 50,
   csvVelocityCritTicksMin: 10,
-  flatTicksWarnPolls: 2,
-  flatTicksCritPolls: 4,
+  flatTicksWarnPolls: 4,
+  flatTicksCritPolls: 8,
   pollIntervalMs: 15_000,
 };
 
