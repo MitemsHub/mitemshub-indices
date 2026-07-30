@@ -171,3 +171,27 @@ export function notifyGuardianFailing(params: {
     renotify: true,
   });
 }
+
+export function notifyGuardianCancelled(params: {
+  symbol: string;
+  reason: string;
+}): boolean {
+  return sendNotification({
+    title: `⛔ Guardian Cancelled — ${params.symbol}`,
+    body: params.reason,
+    tag: `guardian-cancelled-${params.symbol}`,
+    renotify: true,
+  });
+}
+
+export function notifyGuardianActionable(params: {
+  symbol: string;
+  reason: string;
+}): boolean {
+  return sendNotification({
+    title: `🟡 Guardian Actionable — ${params.symbol}`,
+    body: params.reason,
+    tag: `guardian-actionable-${params.symbol}`,
+    renotify: true,
+  });
+}

@@ -656,40 +656,16 @@ def build_guardian_snapshot(
     enriched = dict(snapshot)
     enriched["current_close"] = current_close
 
-    if trading_mode == "sniper":
-        # Only claim confirmed if there's an actual signal with trade levels.
-        # When the engine has analyzed data and produced a signal (even weak),
-        # show "actionable" — never "forming". "forming" only means literally
-        # no data to analyze.
-        signal_strength = snapshot.get("signal_strength", "strong")
-        if snapshot.get("entry") is not None and snapshot.get("stop_loss") is not None:
-            enriched["guardian_state"] = "confirmed" if signal_strength == "strong" else "actionable"
-            if signal_strength == "strong":
-                enriched["guardian_reason"] = "Sniper swing thesis is active; thesis-invalidation levels guard the trade."
-            else:
-                enriched["guardian_reason"] = "Weak signal — confidence is below threshold. Entry/levels available but execute with caution."
-        elif snapshot.get("call") in ("buy_candidate", "sell_candidate"):
-            enriched["guardian_state"] = "actionable"
-            enriched["guardian_reason"] = "Setup identified — waiting for a cleaner entry trigger."
-        elif snapshot.get("trade_status") == "valid":
-            # Engine analyzed the data and produced a signal, but risk rejected it.
-            enriched["guardian_state"] = "actionable"
-            enriched["guardian_reason"] = "Signal generated but blocked by risk controls. Review risk state."
-        elif snapshot.get("raw_features") or snapshot.get("snapshot_structure"):
-            # Engine HAS analyzed data (features exist) but couldn't produce a
-            # clean signal — typically because candle count is below threshold.
-            wait_detail = (snapshot.get("wait_for") or "").strip()
-            enriched["guardian_state"] = "actionable"
-            if wait_detail:
-                # Capitalize first letter so the sentence reads naturally
-                enriched["guardian_reason"] = f"Engine analyzed the market but setup is incomplete — {wait_detail[0].upper()}{wait_detail[1:]}"
-            else:
-                enriched["guardian_reason"] = "Engine analyzed the market but setup is incomplete. Waiting for stronger directional confirmation."
-        else:
-            # Truly no data at all — CSV empty, live ticks failed.
-            enriched["guardian_state"] = "forming"
-            enriched["guardian_reason"] = "Waiting for market data — no candle history available for analysis."
-        return enriched
+    # ── Sniper mode: use full microstructure evaluation ──────────
+    # Sniper mode previously used simple heuristics (checking entry/stop_loss
+    # presence and signal_strength).  Now it uses the same microstructure
+    # evaluation as active_trader and volatility_harvest modes, so sniper
+    # users get detailed signal quality feedback (persistence, impulse,
+    # pullback depth, adverse excursion) instead of just "actionable".
+    #
+    # The SNIPER_GUARDIAN_THRESHOLDS are tuned for conservative swing
+    # entries: longer arming window (30 ticks), wider adverse excursion
+    # tolerance (0.95), and relaxed pullback limits (0.85).
 
     thresholds = guardian_thresholds or DEFAULT_GUARDIAN_THRESHOLDS
     signal_snapshot = GuardianSnapshot(

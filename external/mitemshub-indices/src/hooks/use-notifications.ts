@@ -12,6 +12,8 @@ import {
   notifyEntryFilled,
   notifyGuardianConfirmed,
   notifyGuardianFailing,
+  notifyGuardianCancelled,
+  notifyGuardianActionable,
 } from "../lib/notifications";
 
 export type NotificationPreferences = {
@@ -140,6 +142,16 @@ function detectChanges(
       events.push({
         type: "guardian_failing",
         fire: () => notifyGuardianFailing({ symbol, reason: next.guardian_reason }),
+      });
+    } else if (next.guardian_state === "cancelled") {
+      events.push({
+        type: "guardian_cancelled",
+        fire: () => notifyGuardianCancelled({ symbol, reason: next.guardian_reason }),
+      });
+    } else if (next.guardian_state === "actionable") {
+      events.push({
+        type: "guardian_actionable",
+        fire: () => notifyGuardianActionable({ symbol, reason: next.guardian_reason }),
       });
     }
   }
