@@ -211,6 +211,22 @@ export function OperatorShell() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [bottomSheetOpen, setBottomSheetOpen] = useState(false);
   const [intelAccordionOpen, setIntelAccordionOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  // Lazy initializer reads from localStorage to match saved theme on first render
+  const [currentTheme, setCurrentTheme] = useState(() => {
+    try { return localStorage.getItem("data-theme") || "light"; } catch { return "light"; }
+  });
+
+  // Sync DOM attribute on mount so other code reading document.documentElement
+  // stays consistent with the state. No flash because state already matches localStorage.
+  useEffect(() => {
+    setMounted(true);
+    try {
+      document.documentElement.setAttribute("data-theme", currentTheme);
+    } catch {
+      // DOM unavailable — no-op
+    }
+  }, [currentTheme]);
 
   // Intelligence panel visibility — initialised from localStorage overrides
   // merged with trading-mode defaults. Re-resolves when trading mode changes.
@@ -270,9 +286,12 @@ export function OperatorShell() {
             onToggleTheme={() => {
               const html = document.documentElement;
               const current = html.getAttribute("data-theme") || "light";
-              html.setAttribute("data-theme", current === "dark" ? "light" : "dark");
+              const next = current === "dark" ? "light" : "dark";
+              html.setAttribute("data-theme", next);
+              setCurrentTheme(next);
+              try { localStorage.setItem("data-theme", next); } catch {}
             }}
-            currentTheme={typeof window !== "undefined" ? (document.documentElement.getAttribute("data-theme") || "light") : "light"}
+            currentTheme={currentTheme}
           />
           <NotificationBell
             permission={workspace.notifications.permission}
@@ -310,11 +329,15 @@ export function OperatorShell() {
           />
         )}
         {/* ── Bridge Offline Banner ───────────────────────────────── */}
-        <BridgeOfflineBanner
-          offline={workspace.currentCall?.guardian_state === "unavailable"}
-          onRetry={() => workspace.runSymbol(workspace.activeSymbol)}
-          retrying={isLoading}
-        />
+        {/* Only show after mounted to prevent SSR hydration flash.
+            !isLoading prevents false positives from stale cached calls. */}
+        {mounted && (
+          <BridgeOfflineBanner
+            offline={workspace.currentCall?.guardian_state === "unavailable" && !isLoading}
+            onRetry={() => workspace.runSymbol(workspace.activeSymbol)}
+            retrying={isLoading}
+          />
+        )}
 
         {/* ── Connection Status ────────────────────────────────────── */}
         <ErrorBoundary label="Connection status">

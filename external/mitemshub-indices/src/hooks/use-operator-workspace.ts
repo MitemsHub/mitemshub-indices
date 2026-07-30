@@ -448,19 +448,44 @@ export function useOperatorWorkspace() {
     if (hasAutoRun.current) return;
     hasAutoRun.current = true;
 
-    async function autoRunLiveCall() {
-      // Only run once on initial mount
-      if (!currentCall && !loading) {
-        try {
-          await runSymbol(activeSymbol);
-        } catch {
-          // Ignore errors, fallback will be shown
+    async function loadCachedCallFirst() {
+      // Load the last cached call from the journal FIRST — this is instant
+      // and prevents signal flip-flopping across page refreshes.
+      if (currentCall || loading) return;
+
+      try {
+        const response = await fetch(`/api/calls/latest?symbol=${activeSymbol}`);
+        if (response.ok) {
+          const cached = (await response.json()) as FreshCallResponse;
+          if (cached && cached.call && cached.call !== "stand_aside") {
+            // Cached call exists and is a real signal — use it immediately.
+            // Do NOT spawn a fresh calculation. User must click Refresh for that.
+            setCurrentCall(cached);
+            setGuardianStatus({
+              symbol: cached.symbol,
+              guardian_state: cached.guardian_state,
+              guardian_reason: cached.guardian_reason,
+              current_close: cached.current_close,
+              generated_at: cached.generated_at,
+            });
+            setHistory((previous) =>
+              [cached, ...previous.filter((entry) => entry.symbol !== activeSymbol)].slice(0, 6),
+            );
+            return;
+          }
         }
+      } catch {
+        // Cached call unavailable — show placeholder, user clicks Refresh
       }
+
+      // No cached call available — show placeholder state.
+      // User must explicitly click Refresh to spawn a fresh Python subprocess.
+      // This prevents unnecessary subprocess spawns on every page load.
     }
 
-    void autoRunLiveCall();
-  }, [currentCall, loading, activeSymbol, runSymbol]);
+    void loadCachedCallFirst();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Re-run when trading mode changes to get a fresh call with new parameters
   const prevTradingMode = useRef(tradingMode);
