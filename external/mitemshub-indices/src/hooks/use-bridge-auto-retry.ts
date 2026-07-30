@@ -111,7 +111,8 @@ export function useBridgeAutoRetry({
         scheduleRetry(nextDelay);
       }, delayMs);
     },
-    [clearTimers, onRetry, baseDelayMs, maxDelayMs],
+    // onRetry is accessed via onRetryRef.current() — not needed in deps
+    [clearTimers, baseDelayMs, maxDelayMs],
   );
 
   // Start auto-retry when bridge goes offline
