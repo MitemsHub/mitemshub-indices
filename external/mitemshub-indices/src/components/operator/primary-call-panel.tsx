@@ -68,6 +68,16 @@ export function PrimaryCallPanel({
 
       {call ? (
         <>
+          {/* Staleness indicator for cached calls */}
+          {call.call_age_seconds !== null && call.call_age_seconds !== undefined && call.call_age_seconds > 300 && (
+            <div className="mt-2 flex items-center gap-2 rounded-lg border border-[var(--accent-warn)] bg-[var(--accent-warn-soft)] px-3 py-2">
+              <span className="inline-block w-2 h-2 rounded-full bg-[var(--accent-warn)] flex-shrink-0" aria-hidden="true" />
+              <p className="text-xs text-[var(--accent-warn)]">
+                Showing cached plan from {formatCallAge(call.call_age_seconds)} ago — click Refresh for live data
+              </p>
+            </div>
+          )}
+
           {/* Headline row */}
           <div className="mt-3 flex flex-wrap items-center gap-2.5">
             <h2 className="display-serif text-xl font-semibold text-[var(--text-strong)] md:text-2xl">
