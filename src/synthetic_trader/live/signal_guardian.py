@@ -199,7 +199,12 @@ def _detect_rollover(
             "failing",
             "The setup is deteriorating and the old plan is no longer fresh.",
         )
-    if micro.acceleration_shift < 0 and micro.adverse_cluster_count > 0:
+    # Only trigger 'failing' on acceleration shift when there are MULTIPLE
+    # adverse clusters (not just one).  A single adverse cluster with negative
+    # acceleration is normal price action on volatile synthetic indices — it
+    # does NOT mean the thesis is broken.  Require at least 2 clusters to
+    # signal genuine deterioration.
+    if micro.acceleration_shift < 0 and micro.adverse_cluster_count >= 2:
         return (
             "failing",
             "The setup is deteriorating and the old plan is no longer fresh.",
@@ -232,6 +237,13 @@ def evaluate_signal_guardian(
     micro = _assess_microstructure(snapshot, context, thresholds, stop_distance)
     rollover_state, rollover_reason = _detect_rollover(micro, thresholds)
     if rollover_state == "failing":
+        # ── Grace period: don't degrade during the first few ticks ──
+        # After a signal is generated, the market needs time to develop.
+        # Treating every adverse tick as 'deterioration' within the first
+        # 8 ticks is far too reactive — especially on volatile synthetic
+        # indices where normal price action includes rapid back-and-forth.
+        in_grace_period = context.ticks_since_armed <= 8
+
         # Structure-led plans can print an orderly early pullback without losing the thesis.
         orderly_early_post_entry_move = (
             context.ticks_since_armed <= thresholds.min_persistence_ticks + 2
@@ -239,7 +251,7 @@ def evaluate_signal_guardian(
             and micro.pullback_ratio < thresholds.rollover_warning_ratio
             and micro.rejection_imbalance > 0
         )
-        if orderly_early_post_entry_move:
+        if in_grace_period or orderly_early_post_entry_move:
             rollover_state = None
             rollover_reason = None
     if rollover_state:

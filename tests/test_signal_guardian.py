@@ -163,6 +163,9 @@ class SignalGuardianTests(unittest.TestCase):
         self.assertIn("drift", result.reason.lower())
 
     def test_buy_setup_fails_when_pullback_depth_breaks_rollover_warning(self) -> None:
+        # ticks_since_armed=10 is OUTSIDE the 8-tick grace period.
+        # Prices show a deep pullback: max adverse delta = 0.30, stop_distance = 1.4
+        # pullback_ratio = 0.30 / 1.4 = 0.214 > rollover_warning_ratio (0.18)
         snapshot = GuardianSnapshot(
             symbol="R_100",
             direction_bias="buy",
@@ -170,13 +173,13 @@ class SignalGuardianTests(unittest.TestCase):
             entry=459.6,
             stop_loss=458.2,
             take_profit=462.2,
-            current_close=459.44,
+            current_close=459.3,
         )
         context = GuardianContext(
-            tick_prices=[459.92, 459.86, 459.75, 459.62, 459.53, 459.44],
-            ticks_since_armed=5,
-            max_favorable_excursion=0.32,
-            max_adverse_excursion=0.16,
+            tick_prices=[459.8, 459.5, 459.45, 459.4, 459.35, 459.3],
+            ticks_since_armed=10,
+            max_favorable_excursion=0.20,
+            max_adverse_excursion=0.30,
         )
 
         result = evaluate_signal_guardian(snapshot, context, self.thresholds)
@@ -209,6 +212,10 @@ class SignalGuardianTests(unittest.TestCase):
         self.assertIn("broken", result.reason.lower())
 
     def test_confirmed_buy_setup_downgrades_to_failing_when_follow_through_rolls_over(self) -> None:
+        # ticks_since_armed=10 is OUTSIDE the 8-tick grace period.
+        # Prices show follow-through rolling over with deep pullback:
+        # max adverse delta = 0.30, stop_distance = 1.4
+        # pullback_ratio = 0.30 / 1.4 = 0.214 > rollover_warning_ratio (0.18)
         snapshot = GuardianSnapshot(
             symbol="R_100",
             direction_bias="buy",
@@ -216,13 +223,13 @@ class SignalGuardianTests(unittest.TestCase):
             entry=459.6,
             stop_loss=458.2,
             take_profit=462.2,
-            current_close=459.52,
+            current_close=459.3,
         )
         context = GuardianContext(
-            tick_prices=[459.8, 459.76, 459.7, 459.64, 459.58, 459.52],
-            ticks_since_armed=5,
-            max_favorable_excursion=0.24,
-            max_adverse_excursion=0.2,
+            tick_prices=[460.0, 459.7, 459.5, 459.4, 459.35, 459.3],
+            ticks_since_armed=10,
+            max_favorable_excursion=0.40,
+            max_adverse_excursion=0.30,
         )
 
         result = evaluate_signal_guardian(snapshot, context, self.thresholds)

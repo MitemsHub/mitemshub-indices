@@ -57,7 +57,11 @@ MAX_BUFFER_TICKS = 10_000
 SNIPER_GUARDIAN_THRESHOLDS = GuardianThresholds(
     max_arming_ticks=30,
     max_confirmation_window_ticks=40,
-    weakening_excursion_ratio=0.25,
+    # Sniper mode is forward-looking — tolerate normal pullbacks.
+    # 0.50 means price must move 50% against the stop before degrading.
+    # On volatile synthetic indices, 0.25 was causing 'losing strength' within
+    # seconds of entry — far too reactive for a sniper/swing signal.
+    weakening_excursion_ratio=0.50,
     max_adverse_excursion_ratio=0.95,
     max_entry_drift_ratio=0.90,
     microstructure_window_ticks=16,
