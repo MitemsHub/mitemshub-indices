@@ -457,7 +457,7 @@ export function useOperatorWorkspace() {
         const response = await fetch(`/api/calls/latest?symbol=${activeSymbol}`);
         if (response.ok) {
           const cached = (await response.json()) as FreshCallResponse;
-          if (cached && cached.call && cached.call !== "stand_aside") {
+          if (cached && cached.call && cached.call !== "stand_aside" && cached.guardian_state !== "unavailable") {
             // Cached call exists and is a real signal — use it immediately.
             // Do NOT spawn a fresh calculation. User must click Refresh for that.
             setCurrentCall(cached);
@@ -484,7 +484,6 @@ export function useOperatorWorkspace() {
     }
 
     void loadCachedCallFirst();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Re-run when trading mode changes to get a fresh call with new parameters

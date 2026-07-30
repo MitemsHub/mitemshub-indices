@@ -212,13 +212,18 @@ export function OperatorShell() {
   const [bottomSheetOpen, setBottomSheetOpen] = useState(false);
   const [intelAccordionOpen, setIntelAccordionOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
-  // Lazy initializer reads from localStorage to match saved theme on first render
+  // Lazy initializer reads from localStorage to match saved theme on first render.
+  // Wrapped in try/catch for SSR safety where localStorage is unavailable.
   const [currentTheme, setCurrentTheme] = useState(() => {
-    try { return localStorage.getItem("data-theme") || "light"; } catch { return "light"; }
+    try {
+      return localStorage.getItem("data-theme") || "light";
+    } catch {
+      return "light";
+    }
   });
 
-  // Sync DOM attribute on mount so other code reading document.documentElement
-  // stays consistent with the state. No flash because state already matches localStorage.
+  // Sync DOM attribute on mount only — other code reading
+  // document.documentElement stays consistent. Toggle handler writes DOM directly.
   useEffect(() => {
     setMounted(true);
     try {
@@ -226,7 +231,7 @@ export function OperatorShell() {
     } catch {
       // DOM unavailable — no-op
     }
-  }, [currentTheme]);
+  }, []);
 
   // Intelligence panel visibility — initialised from localStorage overrides
   // merged with trading-mode defaults. Re-resolves when trading mode changes.
