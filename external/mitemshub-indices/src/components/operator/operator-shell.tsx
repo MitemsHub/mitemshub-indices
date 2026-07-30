@@ -231,6 +231,21 @@ export function OperatorShell() {
     } catch {
       // DOM unavailable — no-op
     }
+
+    // Cross-tab theme sync: listen for storage changes so if the user
+    // opens the app in two browser tabs and changes theme in one, the other updates.
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === "data-theme" && e.newValue) {
+        setCurrentTheme(e.newValue);
+        try {
+          document.documentElement.setAttribute("data-theme", e.newValue);
+        } catch {
+          // DOM unavailable — no-op
+        }
+      }
+    };
+    window.addEventListener("storage", handleStorageChange);
+    return () => window.removeEventListener("storage", handleStorageChange);
   }, []);
 
   // Intelligence panel visibility — initialised from localStorage overrides

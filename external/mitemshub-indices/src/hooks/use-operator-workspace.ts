@@ -142,6 +142,7 @@ export function useOperatorWorkspace() {
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [executionSuccess, setExecutionSuccess] = useState<string | null>(null);
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
+  const [cachedCallError, setCachedCallError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const successToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -341,17 +342,22 @@ export function useOperatorWorkspace() {
     }
   };
 
-  const runSymbol = async (symbol: SymbolCode) => {
+  const autoRefreshRunningRef = useRef(false);
+
+  const runSymbol = async (symbol: SymbolCode, silent = false) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
-    setLoading(true);
-    setLoadingElapsedSeconds(0);
-    setActiveSymbol(symbol);
-    setGuardianStatus(null);
-    setCurrentCall(null);
-    setIntelligence(null);
+    if (!silent) {
+      setLoading(true);
+      setLoadingElapsedSeconds(0);
+      setActiveSymbol(symbol);
+      setGuardianStatus(null);
+      setCurrentCall(null);
+      setIntelligence(null);
+    }
+    setCachedCallError(null);
 
     // ── Auto-dismiss loading after 30 seconds ──────────────────
     // Prevents the "Still loading…" state from persisting forever
@@ -418,7 +424,7 @@ export function useOperatorWorkspace() {
     } catch {
       // Preserve the last known support data when support routes are unavailable.
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
 
     const fallback = buildUnavailableCall(
@@ -471,11 +477,13 @@ export function useOperatorWorkspace() {
             setHistory((previous) =>
               [cached, ...previous.filter((entry) => entry.symbol !== activeSymbol)].slice(0, 6),
             );
+            setCachedCallError(null);
             return;
           }
         }
       } catch {
-        // Cached call unavailable — show placeholder, user clicks Refresh
+        // Cached call fetch failed — show error state so user knows to retry
+        setCachedCallError("Failed to load cached call — click Refresh to try again");
       }
 
       // No cached call available — show placeholder state.
@@ -485,6 +493,34 @@ export function useOperatorWorkspace() {
 
     void loadCachedCallFirst();
   }, []);
+
+  // ── Auto-refresh stale cached calls (10-minute background refresh) ──
+  // When a cached call is older than 10 minutes, silently refresh in the background
+  // so the user eventually gets fresh data without manual intervention.
+  useEffect(() => {
+    if (!currentCall || currentCall.call === "stand_aside" || currentCall.call_age_seconds == null) return;
+
+    const STALE_THRESHOLD = 600; // 10 minutes in seconds
+    const CHECK_INTERVAL = 60_000; // Check every 60 seconds
+
+    const intervalId = setInterval(() => {
+      if (
+        currentCall.call_age_seconds != null &&
+        currentCall.call_age_seconds > STALE_THRESHOLD &&
+        !loading &&
+        !autoRefreshRunningRef.current
+      ) {
+        // Silently refresh — don't show loading state, just update in background
+        autoRefreshRunningRef.current = true;
+        // eslint-disable-next-line @typescript-eslint/no-floating-promises
+        runSymbol(activeSymbol, true).finally(() => {
+          autoRefreshRunningRef.current = false;
+        });
+      }
+    }, CHECK_INTERVAL);
+
+    return () => clearInterval(intervalId);
+  }, [currentCall?.call_age_seconds, loading, activeSymbol]);
 
   // Re-run when trading mode changes to get a fresh call with new parameters
   const prevTradingMode = useRef(tradingMode);
@@ -721,6 +757,7 @@ const notifications = useNotifications(currentCall);
 return {
   accountMode,
   activeSymbol,
+  cachedCallError,
   cancelPropModeRequest,
   closeTrackedPosition,
   confirmPropMode,
