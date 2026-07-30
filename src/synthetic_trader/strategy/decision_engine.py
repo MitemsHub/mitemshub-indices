@@ -272,11 +272,23 @@ class DecisionEngine:
             )
             return DecisionReport(vol_signal, vol_signal.rationale)
 
+        # ── Formal setup check (used by session filter override) ──────
+        has_formal_setup = (
+            setup.state != "none"
+            and confirmation.state in {"confirmed", "actionable"}
+        )
+
         # ── Session filter gate ────────────────────────────────────
         # Block signal generation during low-volatility hours.
         # The generator's server load balancing creates exploitable
         # time-of-day effects — certain hours consistently produce
         # more volatile moves with better risk/reward.
+        #
+        # STRONG SIGNAL OVERRIDE: When confidence >= 0.75 AND a formal
+        # setup is confirmed, bypass the session filter.  High-confidence
+        # setups with confirmed structure are rare and shouldn't be
+        # filtered out by low-volatility windows — the signal quality
+        # already accounts for regime, structure, and momentum.
         #
         # NOTE: The assembler already computes session_quality and
         # session_vol_rank in the feature snapshot.  We use those
@@ -289,10 +301,35 @@ class DecisionEngine:
         min_quality = self.config.risk.min_session_quality
         warmup = self.config.risk.session_filter_warmup
 
+        STRONG_SIGNAL_CONFIDENCE_THRESHOLD = 0.75
+        session_blocked = (
+            session_observations >= warmup
+            and session_quality < min_quality
+        )
+        strong_signal_override = (
+            session_blocked
+            and confidence >= STRONG_SIGNAL_CONFIDENCE_THRESHOLD
+            and has_formal_setup
+        )
+        if strong_signal_override:
+            logging.info(
+                "[%s] session filter bypassed — strong signal override: "
+                "confidence=%.3f >= %.3f, formal setup confirmed, "
+                "session quality %.2f < %.2f",
+                symbol, confidence, STRONG_SIGNAL_CONFIDENCE_THRESHOLD,
+                session_quality, min_quality,
+            )
+            rationale += (
+                f"⚠ strong signal override: confidence {confidence:.3f} >= 0.75, "
+                f"formal setup confirmed — session filter bypassed "
+                f"(quality {session_quality:.2f} < {min_quality:.2f})",
+            )
+
         # During warmup, don't block — we need data to learn.
-        # When blocked, return a WAIT signal (not None) so the frontend
-        # shows the actual reason instead of a generic "Setup still forming".
-        if session_observations >= warmup and session_quality < min_quality:
+        # When blocked (and not overridden), return a WAIT signal (not None)
+        # so the frontend shows the actual reason instead of a generic
+        # "Setup still forming".
+        if session_blocked and not strong_signal_override:
             wait_signal = TradeSignal(
                 symbol=symbol,
                 direction=direction,
@@ -378,12 +415,9 @@ class DecisionEngine:
         # binary setup/confirmation states alone.
         #
         # Gate: require BOTH setup state AND confirmation to be valid,
-        # OR confidence above an elevated threshold (0.62) which means
+        # OR confidence above an elevated threshold (0.52) which means
         # at least 5 of the 8 scoring components agree on direction.
-        has_formal_setup = (
-            setup.state != "none"
-            and confirmation.state in {"confirmed", "actionable"}
-        )
+        # NOTE: has_formal_setup was already computed above for session filter override.
         has_strong_confidence = confidence >= 0.52
         if not has_formal_setup and not has_strong_confidence and not is_weak:
             # Mark as weak instead of blocking — always produce a signal.
