@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Number of ticks to suppress 'failing' after a plan is first generated.
+# On volatile synthetic indices, the price often moves against the entry
+# within the first few ticks while the candle is still forming.
+GRACE_PERIOD_TICKS = 8
+
 
 @dataclass(frozen=True)
 class GuardianThresholds:
@@ -94,10 +99,11 @@ def _effective_confirmed_lock_ticks(
 ) -> int:
     """Return the lock duration in ticks, scaled by confidence.
 
-    High-confidence setups (>= 0.75) get a longer lock (15 ticks)
+    High-confidence setups (>= 0.75) get a longer lock (90 ticks / 7.5 min)
     because they're more likely to be genuine.  Low-confidence setups
-    (< 0.50) get a shorter lock (5 ticks) so they can degrade faster
-    if the setup proves weak.  Middle-range uses the default (10).
+    (< 0.50) get a shorter lock (30 ticks / 2.5 min) so they can degrade
+    faster if the setup proves weak.  Middle-range uses the default
+    (60 ticks / 5 min).
     """
     if confidence is None:
         return thresholds.confirmed_lock_ticks
@@ -313,7 +319,7 @@ def evaluate_signal_guardian(
             rollover_reason = None
         else:
             # ── Grace period: don't degrade during the first few ticks ──
-            in_grace_period = context.ticks_since_armed <= 8
+            in_grace_period = context.ticks_since_armed <= GRACE_PERIOD_TICKS
             orderly_early_post_entry_move = (
                 context.ticks_since_armed <= thresholds.min_persistence_ticks + 2
                 and adverse_ratio < thresholds.rollover_warning_ratio
@@ -334,6 +340,14 @@ def evaluate_signal_guardian(
         # unless it's genuinely severe (approaching max).
         if _in_confirmed_lock and adverse_ratio < thresholds.max_adverse_excursion_ratio * 0.8:
             pass  # hold confirmed — excursion is within tolerable range
+        elif context.ticks_since_armed <= GRACE_PERIOD_TICKS:
+            # ── Grace period for new plans ────────────────────────────
+            # A brand-new plan should NOT immediately fail on adverse
+            # excursion.  On volatile synthetic indices, the price often
+            # moves against the entry within the first few ticks while
+            # the candle is still forming.  Allow 8 ticks (~40 seconds)
+            # before the adverse excursion check becomes active.
+            pass
         else:
             return GuardianEvaluation(
                 "failing",

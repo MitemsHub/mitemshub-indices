@@ -75,6 +75,9 @@ class SignalGuardianTests(unittest.TestCase):
         self.assertIn("broken", result.reason.lower())
 
     def test_buy_setup_becomes_failing_before_full_cancellation(self) -> None:
+        # Use ticks_since_armed=15 to be past the 8-tick grace period.
+        # During the grace period (<=8 ticks), adverse excursion is suppressed
+        # to give new plans time to form before failing.
         snapshot = GuardianSnapshot(
             symbol="R_100",
             direction_bias="buy",
@@ -86,7 +89,7 @@ class SignalGuardianTests(unittest.TestCase):
         )
         context = GuardianContext(
             tick_prices=[459.62, 459.58, 459.45, 459.32, 459.2, 459.1],
-            ticks_since_armed=5,
+            ticks_since_armed=15,
             max_favorable_excursion=0.05,
             max_adverse_excursion=0.5,
         )
@@ -308,6 +311,7 @@ class SignalGuardianTests(unittest.TestCase):
         self.assertIn("actionable", result.reason.lower())
 
     def test_deteriorating_setup_moves_to_failing_before_cancelled(self) -> None:
+        # Use ticks_since_armed=12 to be past the 8-tick grace period.
         snapshot = GuardianSnapshot(
             symbol="R_75",
             direction_bias="sell",
@@ -319,7 +323,7 @@ class SignalGuardianTests(unittest.TestCase):
         )
         context = GuardianContext(
             tick_prices=[53072.0, 53076.0, 53085.0, 53094.0, 53103.0, 53110.0],
-            ticks_since_armed=4,
+            ticks_since_armed=12,
             max_favorable_excursion=16.0,
             max_adverse_excursion=40.0,
         )
