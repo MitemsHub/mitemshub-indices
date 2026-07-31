@@ -160,7 +160,10 @@ def _calculate_mae(
     if direction == "buy":
         # Find the largest intra-candle adverse move (close-to-low)
         # and the largest multi-candle drawdown (peak-to-trough)
-        max_wick_adverse = max(candle.close - candle.low for candle in window if candle.close > candle.low)
+        max_wick_adverse = max(
+            (candle.close - candle.low for candle in window if candle.close > candle.low),
+            default=0.0,
+        )
         # Peak-to-trough: find the largest drop between any two candles
         prices = [c.close for c in window]
         max_drawdown = 0.0
@@ -174,7 +177,10 @@ def _calculate_mae(
         return max(max_wick_adverse, max_drawdown)
     else:
         # For sell: find largest adverse move upward
-        max_wick_adverse = max(candle.high - candle.close for candle in window if candle.high > candle.close)
+        max_wick_adverse = max(
+            (candle.high - candle.close for candle in window if candle.high > candle.close),
+            default=0.0,
+        )
         prices = [c.close for c in window]
         max_drawdown = 0.0
         trough = prices[0]
