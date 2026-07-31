@@ -133,6 +133,56 @@ def find_external_liquidity(
     return None
 
 
+def _smart_stop_loss(
+    candles: list[Candle],
+    sweep_index: int,
+    direction: str,
+    sweep_level: float,
+    atr_14: float,
+) -> float:
+    """Place stop below/above the swing candle body close + buffer.
+
+    On volatile synthetic indices, placing the stop at the absolute swing
+    low/high (the wick) causes premature stop-outs from normal wick
+    volatility.  A smart trader places the stop below the candle body
+    CLOSE of the swing candle, not the wick.
+
+    The swing candle's close is always "inside" the wick:
+    - Buy: close is ABOVE the wick low  → more room to breathe
+    - Sell: close is BELOW the wick high → more room to breathe
+
+    Logic:
+    - Buy:  stop = sweep_candle.close - 0.25*ATR
+    - Sell: stop = sweep_candle.close + 0.25*ATR
+    - The swing level (wick) is the ultimate invalidation —
+      if the body stop is too close to entry, fall back to
+      wick - buffer to ensure minimum stop distance.
+    """
+    if sweep_index < 0 or sweep_index >= len(candles):
+        return sweep_level
+
+    sweep_candle = candles[sweep_index]
+    buffer = atr_14 * 0.25
+
+    if direction == "buy":
+        # Place stop below the candle CLOSE (not the wick low)
+        # The close is always above the low, giving more room
+        body_stop = sweep_candle.close - buffer
+        # If body_stop is still above the swing level, that means the
+        # candle closed well above its wick — place stop below the wick
+        # with a small buffer for safety
+        if body_stop >= sweep_level:
+            return sweep_level - buffer
+        return body_stop
+    else:
+        # Place stop above the candle CLOSE (not the wick high)
+        body_stop = sweep_candle.close + buffer
+        # If body_stop is still below the swing level, place above wick
+        if body_stop <= sweep_level:
+            return sweep_level + buffer
+        return body_stop
+
+
 def build_swing_execution(
     symbol: str,
     direction: str,
@@ -177,7 +227,10 @@ def build_swing_execution(
     if entry is None:
         entry = setup_candles[-1].close
 
-    stop_loss = sweep_level
+    # Smart stop loss: use candle body close + ATR buffer instead of
+    # absolute swing low/high wick.  This gives the trade more room
+    # to breathe and avoids premature stop-outs from wick volatility.
+    stop_loss = _smart_stop_loss(setup_candles, sweep_index, direction, sweep_level, atr_14)
 
     risk = abs(entry - stop_loss)
     if risk <= 0 or risk < atr_14 * 0.5:
