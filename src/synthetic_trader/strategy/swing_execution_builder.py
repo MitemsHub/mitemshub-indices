@@ -133,56 +133,175 @@ def find_external_liquidity(
     return None
 
 
-def _smart_stop_loss(
+def _calculate_mae(
     candles: list[Candle],
-    sweep_index: int,
     direction: str,
-    sweep_level: float,
-    atr_14: float,
+    entry: float,
+    lookback: int = 50,
 ) -> float:
-    """Place stop below/above the swing candle body close + buffer.
+    """Calculate Maximum Adverse Excursion from historical candles.
 
-    On volatile synthetic indices, placing the stop at the absolute swing
-    low/high (the wick) causes premature stop-outs from normal wick
-    volatility.  A smart trader places the stop below the candle body
-    CLOSE of the swing candle, not the wick.
+    Scans the last `lookback` candles to find the worst-case pullback
+    that occurred during previous swings.  This is the "highest drop"
+    concept — the largest adverse move the market made before reversing.
 
-    The swing candle's close is always "inside" the wick:
-    - Buy: close is ABOVE the wick low  → more room to breathe
-    - Sell: close is BELOW the wick high → more room to breathe
+    A stop placed beyond the historical MAE ensures that normal
+    pullbacks (which are well within historical norms) don't trigger
+    premature stop-outs.
 
-    Logic:
-    - Buy:  stop = sweep_candle.close - 0.25*ATR
-    - Sell: stop = sweep_candle.close + 0.25*ATR
-    - The swing level (wick) is the ultimate invalidation —
-      if the body stop is too close to entry, fall back to
-      wick - buffer to ensure minimum stop distance.
+    For a buy trade, MAE is how far price dropped from entry before
+    recovering.  We measure the largest candle-to-candle adverse move
+    within the lookback window.
     """
-    if sweep_index < 0 or sweep_index >= len(candles):
-        return sweep_level
+    if not candles or len(candles) < 3:
+        return 0.0
 
-    sweep_candle = candles[sweep_index]
-    # 0.5x ATR buffer — gives the trade room to breathe on volatile
-    # synthetic indices where wicks can be 2-3x the body.
+    window = candles[-min(lookback, len(candles)):]
+    if direction == "buy":
+        # Find the largest intra-candle adverse move (close-to-low)
+        # and the largest multi-candle drawdown (peak-to-trough)
+        max_wick_adverse = max(candle.close - candle.low for candle in window if candle.close > candle.low)
+        # Peak-to-trough: find the largest drop between any two candles
+        prices = [c.close for c in window]
+        max_drawdown = 0.0
+        peak = prices[0]
+        for price in prices:
+            if price > peak:
+                peak = price
+            drawdown = peak - price
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+        return max(max_wick_adverse, max_drawdown)
+    else:
+        # For sell: find largest adverse move upward
+        max_wick_adverse = max(candle.high - candle.close for candle in window if candle.high > candle.close)
+        prices = [c.close for c in window]
+        max_drawdown = 0.0
+        trough = prices[0]
+        for price in prices:
+            if price < trough:
+                trough = price
+            drawdown = price - trough
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+        return max(max_wick_adverse, max_drawdown)
+
+
+def _find_structural_stop(
+    candles: list[Candle],
+    direction: str,
+    entry: float,
+    atr_14: float,
+) -> float | None:
+    """Find the structural stop loss from historical swing points.
+
+    A professional trader places the stop at the structural level
+    where the trade thesis is invalidated — NOT at the current
+    candle's wick.  This function looks back across historical
+    candles to find:
+
+    1. The lowest swing low (for buys) or highest swing high (for sells)
+       from the last 50 candles — this is the "highest drop" level
+    2. The order block level where institutional demand/supply stepped in
+    3. The structural invalidation point
+
+    The stop is placed beyond the structural level with a buffer,
+    ensuring it survives normal volatility while still protecting
+    against genuine thesis breakage.
+    """
+    if len(candles) < 10:
+        return None
+
+    # Detect swings across the full lookback window (last 50 candles)
+    lookback = candles[-min(50, len(candles)):]
+    swings = detect_swings(lookback, left=3, right=3)
+    swing_lows = sorted([s for s in swings if s.kind == "low"], key=lambda s: s.price)
+    swing_highs = sorted([s for s in swings if s.kind == "high"], key=lambda s: s.price, reverse=True)
+
     buffer = atr_14 * 0.5
 
     if direction == "buy":
-        # Place stop below the candle CLOSE (not the wick low)
-        # The close is always above the low, giving more room
-        body_stop = sweep_candle.close - buffer
-        # If body_stop is still above the swing level, that means the
-        # candle closed well above its wick — place stop below the wick
-        # with a small buffer for safety
-        if body_stop >= sweep_level:
-            return sweep_level - buffer
-        return body_stop
+        # Structural stop: below the lowest swing low in the lookback
+        # This represents the "highest drop" — the worst adverse move
+        # the market has made in recent history
+        if swing_lows:
+            structural_low = swing_lows[0].price  # lowest swing low
+            return structural_low - buffer
+        # Fallback: find the lowest candle low in the lookback
+        lowest_low = min(candle.low for candle in lookback)
+        return lowest_low - buffer
     else:
-        # Place stop above the candle CLOSE (not the wick high)
-        body_stop = sweep_candle.close + buffer
-        # If body_stop is still below the swing level, place above wick
-        if body_stop <= sweep_level:
-            return sweep_level + buffer
-        return body_stop
+        # Structural stop: above the highest swing high
+        if swing_highs:
+            structural_high = swing_highs[0].price  # highest swing high
+            return structural_high + buffer
+        highest_high = max(candle.high for candle in lookback)
+        return highest_high + buffer
+
+
+def _smart_stop_loss(
+    htf_candles: list[Candle],
+    ltf_candles: list[Candle],
+    direction: str,
+    sweep_level: float,
+    atr_14: float,
+    entry: float,
+) -> float:
+    """Calculate stop loss using the professional 3-layer approach.
+
+    Instead of using the immediate candle, this function uses THREE
+    layers of analysis (from the professional trading research):
+
+    Layer 1: STRUCTURAL STOP — Historical swing points from the
+    HIGHER TIMEFRAME (4H/daily).  The "last week's highest drop" level
+    where institutional demand stepped in.  This is the PRIMARY stop
+    for a professional trader.
+
+    Layer 2: MAXIMUM ADVERSE EXCURSION (MAE) — The worst-case pullback
+    from historical candles on the setup timeframe.  Measures both
+    intra-candle wick adverse moves AND multi-candle peak-to-trough
+    drawdowns.
+
+    Layer 3: ATR VOLATILITY BUFFER — The current ATR * 2.0 provides a
+    minimum stop distance based on current volatility.
+
+    The FINAL STOP = WIDEST of the three candidates.
+    We always use the most conservative stop to ensure the trade has
+    enough room to breathe while still protecting against genuine
+    thesis breakage.
+    """
+    # Layer 1: Structural stop from HIGHER TIMEFRAME swing points
+    # This is the "last week's highest drop" — the user's key insight
+    structural_stop = _find_structural_stop(htf_candles, direction, entry, atr_14)
+
+    # Layer 2: Maximum Adverse Excursion from setup candles
+    # Measures the largest pullback from recent price structure
+    mae = _calculate_mae(ltf_candles, direction, entry, lookback=50)
+    if direction == "buy":
+        mae_stop = entry - mae - atr_14 * 0.25
+    else:
+        mae_stop = entry + mae + atr_14 * 0.25
+
+    # Layer 3: ATR volatility buffer (2.0x ATR — professional standard)
+    atr_stop_buffer = atr_14 * 2.0
+    if direction == "buy":
+        atr_stop = entry - atr_stop_buffer
+    else:
+        atr_stop = entry + atr_stop_buffer
+
+    # Choose the WIDEST stop (most conservative)
+    candidates = [sweep_level, mae_stop, atr_stop]
+    if structural_stop is not None:
+        candidates.append(structural_stop)
+
+    if direction == "buy":
+        # For buys, stop is BELOW entry — want the LOWEST (widest)
+        final_stop = min(candidates)
+    else:
+        # For sells, stop is ABOVE entry — want the HIGHEST (widest)
+        final_stop = max(candidates)
+
+    return final_stop
 
 
 def build_swing_execution(
@@ -229,10 +348,12 @@ def build_swing_execution(
     if entry is None:
         entry = setup_candles[-1].close
 
-    # Smart stop loss: use candle body close + ATR buffer instead of
-    # absolute swing low/high wick.  This gives the trade more room
-    # to breathe and avoids premature stop-outs from wick volatility.
-    stop_loss = _smart_stop_loss(setup_candles, sweep_index, direction, sweep_level, atr_14)
+    # Professional 3-layer stop loss: structural swing points + MAE + ATR
+    # Uses bias_candles (4H) for structural analysis — this gives the
+    # "last week's highest drop" view that professional traders use.
+    # Falls back to setup_candles if 4H data isn't available.
+    htf_candles = bias_candles if bias_candles and len(bias_candles) >= 10 else setup_candles
+    stop_loss = _smart_stop_loss(htf_candles, setup_candles, direction, sweep_level, atr_14, entry)
 
     risk = abs(entry - stop_loss)
     if risk <= 0 or risk < atr_14 * 0.5:
