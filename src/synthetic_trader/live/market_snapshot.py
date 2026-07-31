@@ -842,11 +842,16 @@ def build_guardian_snapshot(
             first_confirmed_at_tick=first_confirmed_at_tick,
             confidence_at_confirmation=confidence_at_confirmation,
             current_confidence=current_confidence,
+            atr_14=snapshot.get("atr_14") if isinstance(snapshot.get("atr_14"), (int, float)) else None,
         ),
         thresholds,
     )
     enriched["guardian_state"] = guardian.state
     enriched["guardian_reason"] = guardian.reason
+    # Wire trailing stop recommendation into the snapshot so the
+    # execution layer can use it to modify orders on MT5.
+    if guardian.recommended_stop is not None:
+        enriched["recommended_stop"] = guardian.recommended_stop
 
     # Record the tick and confidence when the guardian first reaches 'confirmed'
     if guardian.state == "confirmed" and symbol_key not in _guardian_confirmed_at_tick:

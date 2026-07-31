@@ -69,6 +69,9 @@ class GuardianContext:
     # Current confidence level from the decision engine.  Used to
     # determine the effective lock duration for re-evaluation.
     current_confidence: float | None = None
+    # Real ATR_14 from features — used for trailing stop calculations.
+    # Avoids approximating ATR from stop_distance which is fragile.
+    atr_14: float | None = None
 
 
 @dataclass(frozen=True)
@@ -271,6 +274,55 @@ def _detect_rollover(
     return None, None
 
 
+def _compute_trailing_stop(
+    snapshot: GuardianSnapshot,
+    stop_distance: float,
+    favorable_ratio: float,
+    atr: float,
+) -> float | None:
+    """Compute trailing stop / breakeven recommendation.
+
+    When the trade moves in our favor, recommend moving the stop to
+    lock in profits.  This prevents winning trades from turning into
+    losers — the #1 cause of premature trade closures.
+
+    Logic:
+      - 1x ATR in favor → move stop to breakeven + 0.25 ATR
+      - 2x ATR in favor → trail stop at 1x ATR behind price
+      - 3x ATR in favor → trail stop at 1.5x ATR behind price
+    """
+    if favorable_ratio < 1.0:
+        return None
+    if snapshot.entry is None or snapshot.stop_loss is None:
+        return None
+
+    recommended_stop = None
+    if favorable_ratio >= 3.0:
+        if snapshot.direction_bias == "buy" and snapshot.current_close is not None:
+            recommended_stop = snapshot.current_close - atr * 1.5
+        elif snapshot.direction_bias == "sell" and snapshot.current_close is not None:
+            recommended_stop = snapshot.current_close + atr * 1.5
+    elif favorable_ratio >= 2.0:
+        if snapshot.direction_bias == "buy" and snapshot.current_close is not None:
+            recommended_stop = snapshot.current_close - atr
+        elif snapshot.direction_bias == "sell" and snapshot.current_close is not None:
+            recommended_stop = snapshot.current_close + atr
+    elif favorable_ratio >= 1.0:
+        if snapshot.direction_bias == "buy":
+            recommended_stop = snapshot.entry + atr * 0.25
+        else:
+            recommended_stop = snapshot.entry - atr * 0.25
+
+    # Ensure recommended stop never moves against the trade
+    if recommended_stop is not None and snapshot.stop_loss is not None:
+        if snapshot.direction_bias == "buy" and recommended_stop < snapshot.stop_loss:
+            return None  # don't move stop backward
+        elif snapshot.direction_bias == "sell" and recommended_stop > snapshot.stop_loss:
+            return None  # don't move stop backward
+
+    return recommended_stop
+
+
 def evaluate_signal_guardian(
     snapshot: GuardianSnapshot,
     context: GuardianContext,
@@ -360,6 +412,13 @@ def evaluate_signal_guardian(
                 "The setup is deteriorating and the old plan is no longer fresh.",
             )
 
+    # ── Trailing stop / breakeven protection (all return paths) ───
+    # Compute once and attach to every return — confirmed signals
+    # are the ones most likely in profit, so they need trailing stops too.
+    favorable_ratio = context.max_favorable_excursion / stop_distance if stop_distance else 0.0
+    atr = context.atr_14 if context.atr_14 and context.atr_14 > 0 else stop_distance * 0.3
+    _trail = _compute_trailing_stop(snapshot, stop_distance, favorable_ratio, atr)
+
     passes_entry_gate, gate_reason = _passes_entry_gate(
         snapshot,
         context,
@@ -371,6 +430,7 @@ def evaluate_signal_guardian(
         return GuardianEvaluation(
             "confirmed",
             f"{snapshot.direction_bias.capitalize()} confirmation received after strong reclaim and controlled pullback.",
+            recommended_stop=_trail,
         )
 
     # ── Confirmed lock fallback: hold 'confirmed' when entry gate lapses ──
@@ -383,49 +443,11 @@ def evaluate_signal_guardian(
         return GuardianEvaluation(
             "confirmed",
             f"Confirmation locked ({_effective_lock_ticks}t) — setup validated, {remaining} ticks remaining.",
+            recommended_stop=_trail,
         )
-
-    # ── Trailing stop / breakeven protection ──────────────────────
-    # When the trade moves in our favor, recommend moving the stop to
-    # lock in profits.  This prevents winning trades from turning into
-    # losers — the #1 cause of premature trade closures.
-    #
-    # Logic:
-    #   - 1x ATR in favor → move stop to breakeven + 0.25 ATR (locks small profit)
-    #   - 2x ATR in favor → trail stop at 1x ATR behind price
-    #   - 3x ATR in favor → trail stop at 1.5x ATR behind price
-    favorable_ratio = context.max_favorable_excursion / stop_distance if stop_distance else 0.0
-    recommended_stop = None
-    if favorable_ratio >= 1.0 and snapshot.entry is not None and snapshot.stop_loss is not None:
-        # Calculate ATR from stop distance (rough approximation)
-        atr_approx = stop_distance * 0.3  # typical ATR is ~30% of stop distance
-        if favorable_ratio >= 3.0:
-            # Max profit lock: trail at 1.5x ATR behind current price
-            if snapshot.direction_bias == "buy" and snapshot.current_close is not None:
-                recommended_stop = snapshot.current_close - atr_approx * 1.5
-            elif snapshot.direction_bias == "sell" and snapshot.current_close is not None:
-                recommended_stop = snapshot.current_close + atr_approx * 1.5
-        elif favorable_ratio >= 2.0:
-            # Good profit lock: trail at 1x ATR behind current price
-            if snapshot.direction_bias == "buy" and snapshot.current_close is not None:
-                recommended_stop = snapshot.current_close - atr_approx
-            elif snapshot.direction_bias == "sell" and snapshot.current_close is not None:
-                recommended_stop = snapshot.current_close + atr_approx
-        elif favorable_ratio >= 1.0:
-            # Breakeven protection: move stop to entry + 0.25 ATR
-            if snapshot.direction_bias == "buy":
-                recommended_stop = snapshot.entry + atr_approx * 0.25
-            else:
-                recommended_stop = snapshot.entry - atr_approx * 0.25
-        # Ensure recommended stop never moves against the trade
-        if recommended_stop is not None and snapshot.stop_loss is not None:
-            if snapshot.direction_bias == "buy" and recommended_stop < snapshot.stop_loss:
-                recommended_stop = None  # don't move stop backward
-            elif snapshot.direction_bias == "sell" and recommended_stop > snapshot.stop_loss:
-                recommended_stop = None  # don't move stop backward
 
     return GuardianEvaluation(
         "actionable",
         gate_reason or "The setup is actionable with caution.",
-        recommended_stop=recommended_stop,
+        recommended_stop=_trail,
     )
