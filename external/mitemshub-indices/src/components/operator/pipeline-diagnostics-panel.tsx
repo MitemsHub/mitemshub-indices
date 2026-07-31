@@ -54,6 +54,26 @@ type ReplayBufferStats = {
   r_100: ReplayBufferSymbolStats;
 };
 
+type CalibrationSymbolStats = {
+  total_samples: number;
+  positive_count: number;
+  negative_count: number;
+  avg_prediction: number;
+  accuracy: number;
+  model_updates: number;
+  model_version: string;
+  ready: boolean;
+  progress_pct: number;
+  loaded_from_disk?: boolean;
+  save_count?: number;
+  brier_score?: number | null;
+  last_save_epoch?: number;
+  last_save_age_seconds?: number;
+  file_size_bytes?: number;
+} | null | { error: string };
+
+type CalibrationStats = Record<string, CalibrationSymbolStats>;
+
 function formatTimestamp(iso: string | null): string {
   if (!iso) return "Never";
   const d = new Date(iso);
@@ -122,6 +142,7 @@ export function PipelineDiagnosticsPanel() {
   const [collectResult, setCollectResult] = useState<string | null>(null);
   const [sseStatus, setSseStatus] = useState<SseStatusData | null>(null);
   const [replayStats, setReplayStats] = useState<ReplayBufferStats | null>(null);
+  const [calibrationStats, setCalibrationStats] = useState<CalibrationStats | null>(null);
 
   // useCallback keeps a stable reference for the useEffect dependency.
   // Without it, the effect would re-run on every render.
@@ -159,12 +180,24 @@ export function PipelineDiagnosticsPanel() {
         // Replay stats unavailable — not critical
       }
     };
+    const fetchCalibrationStats = async () => {
+      try {
+        const res = await fetch("/api/system/calibration-stats");
+        if (res.ok) {
+          setCalibrationStats(await res.json());
+        }
+      } catch {
+        // Calibration stats unavailable — not critical
+      }
+    };
     void fetchSseStatus();
     void fetchReplayStats();
+    void fetchCalibrationStats();
     const interval = setInterval(() => {
       void fetchDiagnostics();
       void fetchSseStatus();
       void fetchReplayStats();
+      void fetchCalibrationStats();
     }, 10_000);
     return () => clearInterval(interval);
   }, [fetchDiagnostics]);
@@ -533,6 +566,192 @@ export function PipelineDiagnosticsPanel() {
                           <span className="text-[10px] font-mono text-[var(--text-muted)]">
                             {s.label_1_count}↑ / {s.label_0_count}↓
                           </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Learning Progress — Calibration Buffer */}
+              {calibrationStats && Object.keys(calibrationStats).length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-label)] font-medium">
+                    Learning Progress
+                  </p>
+                  {Object.entries(calibrationStats).map(([key, stats]) => {
+                    const label = key.replace(/_/g, " ").toUpperCase();
+                    if (stats === null) {
+                      return (
+                        <div key={key} className="rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel-muted)] px-2.5 py-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-mono font-semibold text-[var(--text-strong)] uppercase">{label}</span>
+                            <span className="text-[10px] text-[var(--text-muted)] italic">No model loaded</span>
+                          </div>
+                        </div>
+                      );
+                    }
+                    if ("error" in stats) {
+                      return (
+                        <div key={key} className="rounded-lg border border-[var(--accent-danger)] bg-[var(--accent-danger-soft)] px-2.5 py-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-mono font-semibold text-[var(--text-strong)] uppercase">{label}</span>
+                            <span className="text-[10px] text-[var(--accent-danger)]">{(stats as { error: string }).error}</span>
+                          </div>
+                        </div>
+                      );
+                    }
+                    const s = stats as { total_samples: number; positive_count: number; negative_count: number; avg_prediction: number; accuracy: number; model_updates: number; model_version: string; ready: boolean; progress_pct: number };
+                    const fillColor = s.ready
+                      ? "bg-[var(--accent-positive)]"
+                      : s.progress_pct > 50
+                        ? "bg-[var(--accent-ink)]"
+                        : "bg-[var(--text-muted)]";
+                    const readyColor = s.ready
+                      ? "text-[var(--accent-positive)]"
+                      : "text-[var(--accent-warn)]";
+                    return (
+                      <div key={key} className="rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel-muted)] px-2.5 py-2">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[10px] font-mono font-semibold text-[var(--text-strong)] uppercase">
+                            {label}
+                          </span>
+                          <span className={`text-[10px] font-semibold ${readyColor}`}>
+                            {s.ready ? "✓ Calibrated" : "⚠ Warming up"}
+                          </span>
+                        </div>
+                        {/* Progress bar toward 30-sample threshold */}
+                        <div className="h-1.5 rounded-full bg-[var(--line-subtle)] overflow-hidden mb-1.5">
+                          <div
+                            className={`h-full rounded-full ${fillColor} transition-all duration-500`}
+                            style={{ width: `${Math.min(s.progress_pct, 100)}%` }}
+                          />
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]">
+                          <span className="flex items-center gap-1">
+                            <span className="text-[var(--text-label)]">Samples:</span>
+                            <span className="font-mono font-semibold text-[var(--text-body)]">
+                              {s.total_samples} / 30
+                            </span>
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="text-[var(--text-label)]">Accuracy:</span>
+                            <span className="font-mono text-[var(--text-body)]">
+                              {(s.accuracy * 100).toFixed(1)}%
+                            </span>
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="text-[var(--text-label)]">Updates:</span>
+                            <span className="font-mono text-[var(--text-body)]">
+                              {s.model_updates}
+                            </span>
+                          </span>
+                        </div>
+                        {/* Label distribution */}
+                        <div className="mt-1.5 flex items-center gap-2">
+                          <span className="text-[10px] text-[var(--text-label)]">Outcomes:</span>
+                          <div className="flex-1 h-1 rounded-full bg-[var(--line-subtle)] overflow-hidden flex">
+                            <div
+                              className="h-full bg-[var(--accent-positive)]"
+                              style={{ width: `${s.total_samples > 0 ? (s.positive_count / s.total_samples) * 100 : 50}%` }}
+                            />
+                            <div
+                              className="h-full bg-[var(--accent-danger)]"
+                              style={{ width: `${s.total_samples > 0 ? (s.negative_count / s.total_samples) * 100 : 50}%` }}
+                            />
+                          </div>
+                          <span className="text-[10px] font-mono text-[var(--text-muted)]">
+                            {s.positive_count}↑ / {s.negative_count}↓
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Model Persistence — Disk State */}
+              {calibrationStats && Object.keys(calibrationStats).length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-label)] font-medium">
+                    Model Persistence
+                  </p>
+                  {Object.entries(calibrationStats).map(([key, stats]) => {
+                    const label = key.replace(/_/g, " ").toUpperCase();
+                    if (stats === null || ("error" in stats)) return null;
+                    const s = stats as {
+                      loaded_from_disk?: boolean;
+                      save_count?: number;
+                      brier_score?: number | null;
+                      last_save_epoch?: number;
+                      last_save_age_seconds?: number;
+                      file_size_bytes?: number;
+                    };
+                    const loaded = s.loaded_from_disk ?? false;
+                    const saveCount = s.save_count ?? 0;
+                    const brier = s.brier_score;
+                    const lastSaveAge = s.last_save_age_seconds ?? null;
+                    const fileSize = s.file_size_bytes ?? 0;
+                    if (!loaded && saveCount === 0) return null;
+                    const brierColor =
+                      brier === null || brier === undefined
+                        ? "text-[var(--text-muted)]"
+                        : brier <= 0.15
+                          ? "text-[var(--accent-positive)]"
+                          : brier <= 0.25
+                            ? "text-[var(--accent-warn)]"
+                            : "text-[var(--accent-danger)]";
+                    const brierLabel =
+                      brier === null || brier === undefined
+                        ? "N/A"
+                        : brier <= 0.15
+                          ? "Good"
+                          : brier <= 0.25
+                            ? "Fair"
+                            : "Poor";
+                    const lastSaveStaleness = lastSaveAge !== null ? formatStaleness(Date.now() / 1000 - lastSaveAge) : null;
+                    return (
+                      <div key={key} className="rounded-lg border border-[var(--line-subtle)] bg-[var(--bg-panel-muted)] px-2.5 py-2">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[10px] font-mono font-semibold text-[var(--text-strong)] uppercase">
+                            {label}
+                          </span>
+                          <span className={`text-[10px] font-semibold ${loaded ? "text-[var(--accent-positive)]" : "text-[var(--text-muted)]"}`}>
+                            {loaded ? "✓ Restored from disk" : "Fresh model"}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]">
+                          <span className="flex items-center gap-1">
+                            <span className="text-[var(--text-label)]">Saved:</span>
+                            <span className="font-mono font-semibold text-[var(--text-body)]">
+                              {saveCount}×
+                            </span>
+                          </span>
+                          {lastSaveStaleness && (
+                            <span className="flex items-center gap-1">
+                              <span className="text-[var(--text-label)]">Last save:</span>
+                              <span className="font-mono text-[var(--text-body)]">
+                                {lastSaveStaleness}
+                              </span>
+                            </span>
+                          )}
+                          <span className="flex items-center gap-1">
+                            <span className="text-[var(--text-label)]">Brier:</span>
+                            <span className={`font-mono font-semibold ${brierColor}`}>
+                              {brier !== null && brier !== undefined ? brier.toFixed(3) : "—"}
+                              <span className="text-[var(--text-muted)] font-normal ml-0.5">
+                                ({brierLabel})
+                              </span>
+                            </span>
+                          </span>
+                          {fileSize > 0 && (
+                            <span className="flex items-center gap-1">
+                              <span className="text-[var(--text-label)]">Size:</span>
+                              <span className="font-mono text-[var(--text-muted)]">
+                                {fileSize < 1024 ? `${fileSize}B` : `${(fileSize / 1024).toFixed(1)}KB`}
+                              </span>
+                            </span>
+                          )}
                         </div>
                       </div>
                     );

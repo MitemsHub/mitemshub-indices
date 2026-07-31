@@ -31,6 +31,7 @@ from synthetic_trader.live.market_snapshot import (
     render_live_snapshot_text,
     render_live_watch_alert_text,
     render_live_watch_review_text,
+    reset_persistent_engines,
     run_live_snapshot,
     run_live_watch,
     should_emit_watch_alert,
@@ -894,6 +895,11 @@ class LiveSnapshotDataTests(unittest.TestCase):
 
 
 class LiveSnapshotAnalysisTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Clear the persistent DecisionEngine singleton so each test
+        # starts with a fresh engine (prevents state leakage).
+        reset_persistent_engines()
+
     def test_analyze_live_snapshot_reports_not_valid_when_history_is_insufficient(self) -> None:
         snapshot = analyze_live_snapshot(
             symbol="R_75",

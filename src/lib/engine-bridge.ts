@@ -40,7 +40,7 @@ type LivePropProfileConfig = {
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_HISTORY_LIMIT = 6;
-const DEFAULT_PROP_STARTING_BALANCE = 100000;
+const DEFAULT_PROP_STARTING_BALANCE = 5000;
 const LIVE_SNAPSHOT_MAX_ATTEMPTS = 2;
 
 export function getConfiguredEngineRoot() {

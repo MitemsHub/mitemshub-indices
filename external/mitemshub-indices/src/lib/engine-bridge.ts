@@ -102,7 +102,7 @@ function resolveTerminalPath(): string | null {
   return null;
 }
 
-const DEFAULT_PROP_STARTING_BALANCE = 100000;
+const DEFAULT_PROP_STARTING_BALANCE = 5000;
 const LIVE_SNAPSHOT_MAX_ATTEMPTS = 2;
 const LIVE_SNAPSHOT_TIMEOUT_MS = 35000;
 const DEFAULT_MANUAL_SNAPSHOT_MAX_LIVE_TICKS = 12;
@@ -2980,9 +2980,9 @@ print(json.dumps({
 function buildUnavailablePropProfile(): PropProfileResponse {
   return {
     profile: "blueberry_2step_funded",
-    startingBalance: 100000,
-    currentBalance: 0,
-    currentEquity: 0,
+    startingBalance: 5000,
+    currentBalance: 5000,
+    currentEquity: 5000,
     todaysRealizedLoss: 0,
     todaysFloatingLossExposure: 0,
     highImpactNewsLockout: false,

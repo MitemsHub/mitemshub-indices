@@ -130,6 +130,83 @@ _confidence_scorer = ConfidenceScorer(
     model=None,  # model not needed for range-boost learning
 )
 
+# ── Persistent DecisionEngine singleton ────────────────────────
+# CRITICAL FIX: Previously, every snapshot call created a brand-new
+# DecisionEngine, which meant the OnlineLogisticModel started with
+# random weights, the CalibrationState was empty, and the
+# RegimeShiftDetector had no history.  The engine never learned.
+#
+# This module-level singleton persists across snapshot calls within
+# the same Python process.  It is keyed by (symbol, trading_mode)
+# so that switching modes creates separate engines without
+# cross-contaminating their calibration buffers.
+_decision_engines: dict[str, DecisionEngine] = {}
+
+# ── Disk persistence path for DecisionEngine state ─────────────
+# Model weights and calibration buffer are saved to JSON so learning
+# survives Python process restarts.  Path: data/model_state/{symbol}_{mode}.json
+_MODEL_STATE_DIR = Path("data/model_state")
+_MODEL_STATE_SAVE_INTERVAL = 10  # save at most once every N snapshots
+_snapshot_counter: dict[str, int] = {}
+
+
+def _get_persistent_decision_engine(
+    symbol: str,
+    trading_mode: str,
+    config: TraderConfig | None = None,
+    model: OnlineLogisticModel | None = None,
+) -> DecisionEngine:
+    """Return a persistent DecisionEngine for (symbol, mode).
+
+    On first call, creates and stores a new engine.  On subsequent
+    calls with the same (symbol, mode), returns the cached engine
+    so its CalibrationState, RegimeShiftDetector, and model weights
+    persist across snapshots.
+
+    On first creation, attempts to load saved state from
+    ``data/model_state/{symbol}_{mode}.json`` so learning survives
+    Python process restarts.
+    """
+    key = f"{symbol}_{trading_mode}"
+    if key not in _decision_engines:
+        engine = DecisionEngine(config, model=model)
+        # Try to load saved state from disk
+        state_path = _MODEL_STATE_DIR / f"{key}.json"
+        if state_path.exists():
+            loaded = engine.load_state(state_path)
+            if loaded:
+                logging.info(
+                    "[market_snapshot] restored DecisionEngine state for %s from %s",
+                    key, state_path,
+                )
+        _decision_engines[key] = engine
+    return _decision_engines[key]
+
+
+def _maybe_save_engine_state(key: str, engine: DecisionEngine) -> None:
+    """Auto-save engine state to disk at most once every _MODEL_STATE_SAVE_INTERVAL snapshots.
+
+    The save is fire-and-forget — errors are logged but never raised.
+    """
+    global _snapshot_counter
+    _snapshot_counter[key] = _snapshot_counter.get(key, 0) + 1
+    if _snapshot_counter[key] % _MODEL_STATE_SAVE_INTERVAL != 0:
+        return
+    state_path = _MODEL_STATE_DIR / f"{key}.json"
+    try:
+        engine.save_state(state_path)
+    except Exception as exc:
+        logging.warning("[market_snapshot] failed to save engine state for %s: %s", key, exc)
+
+
+def reset_persistent_engines() -> None:
+    """Clear all cached DecisionEngines.  Called by tests to prevent
+    state leakage between test cases that run in the same process.
+    """
+    _decision_engines.clear()
+    _snapshot_counter.clear()
+
+
 
 # Timestamp of the last missed-trade resolution attempt (module-level).
 _last_missed_resolution_at: float = 0.0
@@ -1467,7 +1544,11 @@ def analyze_live_snapshot(
     structure_summary = "structure still forming"
     model_long_probability = None
 
-    decision_engine = DecisionEngine(config, model=model)
+    # Use persistent DecisionEngine so calibration, regime detector,
+    # and model weights carry over between snapshot calls.
+    decision_engine = _get_persistent_decision_engine(
+        symbol, mode, config=config, model=model,
+    )
 
     if primary_candles:
         feature_snapshot = build_snapshot(
@@ -1518,6 +1599,8 @@ def analyze_live_snapshot(
             higher_timeframe_candles=confirmation_candles,
             trading_mode=mode,
         )
+    # Auto-save engine state to disk (throttled to every N snapshots)
+    _maybe_save_engine_state(f"{symbol}_{mode}", decision_engine)
     if report.signal is None:
         reasons = list(report.reasons)
         confidence = _extract_reason_value(reasons, r"confidence ([0-9.]+)")

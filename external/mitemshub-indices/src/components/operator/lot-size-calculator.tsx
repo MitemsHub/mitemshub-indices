@@ -20,7 +20,7 @@ type LotSizeCalculatorProps = {
  * - Symbol-specific point values
  */
 export function LotSizeCalculator({
-  accountEquity = 100_000,
+  accountEquity = 5_000,
   entryPrice = null,
   stopLoss = null,
   takeProfit = null,

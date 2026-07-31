@@ -107,9 +107,9 @@ export function useOperatorWorkspace() {
   const [history, setHistory] = useState<FreshCallResponse[]>([]);
   const unavailablePropProfile: PropProfileResponse = {
     profile: "blueberry_2step_funded",
-    startingBalance: 100000,
-    currentBalance: 0,
-    currentEquity: 0,
+    startingBalance: 5000,
+    currentBalance: 5000,
+    currentEquity: 5000,
     todaysRealizedLoss: 0,
     todaysFloatingLossExposure: 0,
     highImpactNewsLockout: false,
@@ -359,12 +359,11 @@ export function useOperatorWorkspace() {
     }
     setCachedCallError(null);
 
-    // ── Auto-dismiss loading after 30 seconds ──────────────────
-    // Prevents the "Still loading…" state from persisting forever
-    // when the Python subprocess hangs or the server is unreachable.
-    // The AbortController already supports manual cancellation via
-    // the Stop button; this adds an automatic safety net.
-    const abortTimeout = setTimeout(() => controller.abort(), 30_000);
+    // ── Auto-dismiss loading after 45 seconds ──────────────────
+    // The Python subprocess has a 35s timeout (LIVE_SNAPSHOT_TIMEOUT_MS).
+    // We use 45s here to give the backend 10 seconds of headroom so the
+    // frontend never kills the request before the backend finishes.
+    const abortTimeout = setTimeout(() => controller.abort(), 45_000);
 
     try {
       if (typeof fetch === "function") {
@@ -493,6 +492,27 @@ export function useOperatorWorkspace() {
 
     void loadCachedCallFirst();
   }, []);
+
+  // ── Auto-refresh stale cached calls on mount ──────────────────
+  // When a cached call is loaded on page mount and is older than 3
+  // minutes, automatically trigger a silent refresh so the user gets
+  // fresh analysis without clicking Refresh.
+  const hasAutoRefreshedOnMount = useRef(false);
+  useEffect(() => {
+    if (hasAutoRefreshedOnMount.current) return;
+    if (!currentCall) return;
+    if (currentCall.call === "stand_aside" || currentCall.guardian_state === "unavailable") return;
+    if (currentCall.call_age_seconds != null && currentCall.call_age_seconds > 180) {
+      hasAutoRefreshedOnMount.current = true;
+      // Silently refresh — don't show loading state
+      autoRefreshRunningRef.current = true;
+      void runSymbol(activeSymbol, true).finally(() => {
+        autoRefreshRunningRef.current = false;
+      });
+    } else {
+      hasAutoRefreshedOnMount.current = true;
+    }
+  }, [currentCall, activeSymbol]);
 
   // ── Auto-refresh stale cached calls (10-minute background refresh) ──
   // When a cached call is older than 10 minutes, silently refresh in the background

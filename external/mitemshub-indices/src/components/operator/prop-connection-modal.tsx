@@ -19,7 +19,7 @@ export function PropConnectionModal({
   const [server, setServer] = useState("");
   const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
-  const [startingBalance, setStartingBalance] = useState("100000");
+  const [startingBalance, setStartingBalance] = useState("5000");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -27,7 +27,7 @@ export function PropConnectionModal({
     setServer(initialValue?.server ?? "");
     setLogin(initialValue?.login ?? "");
     setPassword(initialValue?.password ?? "");
-    setStartingBalance(String(initialValue?.startingBalance ?? 100000));
+    setStartingBalance(String(initialValue?.startingBalance ?? 5000));
     setError(null);
   }, [initialValue, open]);
 
@@ -49,7 +49,7 @@ export function PropConnectionModal({
       login: trimmedLogin || null,
       password: trimmedPassword || null,
       terminalPath: null,
-      startingBalance: Number.isNaN(Number(startingBalance)) ? 100000 : Number(startingBalance),
+      startingBalance: Number.isNaN(Number(startingBalance)) ? 5000 : Number(startingBalance),
     });
   };
 

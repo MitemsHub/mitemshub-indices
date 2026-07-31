@@ -7,7 +7,7 @@ from unittest.mock import patch
 from synthetic_trader.config import TraderConfig
 from synthetic_trader.domain import Candle, Direction, FeatureSnapshot, Regime
 from synthetic_trader.strategy.confirmation_builder import confirm_setup
-from synthetic_trader.strategy.decision_engine import DecisionEngine
+from synthetic_trader.strategy.decision_engine import DecisionEngine, CalibrationState, MAX_CALIBRATION_SAMPLES
 from synthetic_trader.strategy.intraday_execution_builder import IntradayExecutionPlan
 from synthetic_trader.strategy.setup_builder import classify_setup
 from synthetic_trader.strategy.top_down_bias import infer_top_down_bias
@@ -76,6 +76,71 @@ def intraday_execution_plan(
         hold_horizon_minutes=hold_horizon_minutes,
         trigger_type=trigger_type,
     )
+
+
+class CalibrationStatePruningTests(unittest.TestCase):
+    """Tests for calibration buffer pruning (max 500 samples)."""
+
+    def test_add_keeps_buffer_within_limit(self) -> None:
+        cal = CalibrationState()
+        for i in range(600):
+            cal.add(0.5 + (i % 10) * 0.01, i % 2)
+        self.assertLessEqual(len(cal.predictions), MAX_CALIBRATION_SAMPLES)
+        self.assertLessEqual(len(cal.outcomes), MAX_CALIBRATION_SAMPLES)
+        self.assertEqual(len(cal.predictions), len(cal.outcomes))
+
+    def test_pruning_keeps_most_recent_entries(self) -> None:
+        cal = CalibrationState()
+        for i in range(600):
+            cal.add(float(i), i % 2)
+        # After 600 adds with limit 500, oldest 100 should be dropped
+        self.assertEqual(len(cal.predictions), 500)
+        # The first remaining prediction should be index 100
+        self.assertEqual(cal.predictions[0], 100.0)
+        self.assertEqual(cal.predictions[-1], 599.0)
+        self.assertEqual(cal.outcomes[0], 100 % 2)
+
+    def test_pruning_preserves_calibration_integrity(self) -> None:
+        cal = CalibrationState()
+        for i in range(550):
+            cal.add(0.7 if i % 2 == 0 else 0.3, i % 2)
+        self.assertEqual(len(cal.predictions), MAX_CALIBRATION_SAMPLES)
+        self.assertEqual(len(cal.outcomes), MAX_CALIBRATION_SAMPLES)
+        # Brier score should still be computable
+        brier = cal.brier_score()
+        self.assertIsNotNone(brier)
+        self.assertGreaterEqual(brier, 0.0)
+
+    def test_no_pruning_when_under_limit(self) -> None:
+        cal = CalibrationState()
+        for i in range(100):
+            cal.add(float(i), i % 2)
+        self.assertEqual(len(cal.predictions), 100)
+        self.assertEqual(len(cal.outcomes), 100)
+
+    def test_exactly_at_limit_no_pruning(self) -> None:
+        cal = CalibrationState()
+        for i in range(MAX_CALIBRATION_SAMPLES):
+            cal.add(float(i), i % 2)
+        self.assertEqual(len(cal.predictions), MAX_CALIBRATION_SAMPLES)
+        self.assertEqual(cal.predictions[0], 0.0)
+
+    def test_one_over_limit_triggers_pruning(self) -> None:
+        cal = CalibrationState()
+        for i in range(MAX_CALIBRATION_SAMPLES + 1):
+            cal.add(float(i), i % 2)
+        self.assertEqual(len(cal.predictions), MAX_CALIBRATION_SAMPLES)
+        self.assertEqual(cal.predictions[0], 1.0)  # 0 was dropped
+
+    def test_large_buffer_prunes_correctly(self) -> None:
+        cal = CalibrationState()
+        for i in range(2000):
+            cal.add(float(i), i % 2)
+        self.assertEqual(len(cal.predictions), MAX_CALIBRATION_SAMPLES)
+        self.assertEqual(len(cal.outcomes), MAX_CALIBRATION_SAMPLES)
+        # Should contain the last 500 entries
+        self.assertEqual(cal.predictions[0], 1500.0)
+        self.assertEqual(cal.predictions[-1], 1999.0)
 
 
 class DecisionEngineTests(unittest.TestCase):

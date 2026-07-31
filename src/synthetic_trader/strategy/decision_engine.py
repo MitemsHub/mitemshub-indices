@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from statistics import mean
 
 from synthetic_trader.config import SymbolProfile, TraderConfig
@@ -28,6 +30,9 @@ class DecisionReport:
     reasons: tuple[str, ...]
 
 
+MAX_CALIBRATION_SAMPLES = 500
+
+
 @dataclass
 class CalibrationState:
     predictions: list[float] = field(default_factory=list)
@@ -40,9 +45,18 @@ class CalibrationState:
     def add(self, prediction: float, outcome: int) -> None:
         self.predictions.append(prediction)
         self.outcomes.append(outcome)
+        self._prune()
         # Invalidate cached models when new training data arrives.
         self._fitted_ir = None
         self._fitted_platt = None
+
+    def _prune(self) -> None:
+        """Trim oldest entries to keep buffer within MAX_CALIBRATION_SAMPLES."""
+        if len(self.predictions) > MAX_CALIBRATION_SAMPLES:
+            excess = len(self.predictions) - MAX_CALIBRATION_SAMPLES
+            self.predictions = self.predictions[excess:]
+        # Always re-sync outcomes to match predictions length (defensive invariant).
+        self.outcomes = self.outcomes[-len(self.predictions):] if self.predictions else []
 
     def _ensure_ir(self) -> object | None:
         """Fit and cache the IsotonicRegression model if needed."""
@@ -104,6 +118,42 @@ class CalibrationState:
         except Exception:
             return prediction
 
+    def brier_score(self) -> float | None:
+        """Compute Brier score on the calibration buffer.
+
+        Brier score measures the accuracy of probabilistic predictions:
+          Brier = (1/N) * sum((predicted - actual)^2)
+
+        Lower is better: 0.0 = perfect, 0.25 = coin-flip, 1.0 = worst.
+
+        Returns None if fewer than 10 samples (too few for meaningful score).
+        """
+        n = len(self.predictions)
+        if n < 10:
+            return None
+        return sum(
+            (p - o) ** 2 for p, o in zip(self.predictions, self.outcomes)
+        ) / n
+
+    def directional_accuracy(self) -> float | None:
+        """Compute directional accuracy (hit rate) on the calibration buffer.
+
+        Measures how often the model's directional prediction matches the
+        actual outcome: prediction >= 0.5 when outcome=1, or < 0.5 when
+        outcome=0.
+
+        Returns accuracy as a float 0.0–1.0, or None if < 10 samples.
+        """
+        n = len(self.predictions)
+        if n < 10:
+            return None
+        correct = sum(
+            1
+            for p, o in zip(self.predictions, self.outcomes)
+            if (p >= 0.5 and o == 1) or (p < 0.5 and o == 0)
+        )
+        return correct / n
+
 
 class DecisionEngine:
     def __init__(
@@ -118,6 +168,7 @@ class DecisionEngine:
         self.volatility_harvester = VolatilityHarvester()
         self._trading_mode = "intraday"
         self._call_lifecycle: dict[str, str] = {}
+        self._save_count: int = 0
 
     def evaluate(
         self,
@@ -1074,6 +1125,134 @@ class DecisionEngine:
 
     def update_calibration(self, prediction: float, outcome: int) -> None:
         self.calibration.add(prediction, outcome)
+
+    # ── Disk persistence ──────────────────────────────────────────
+    # Saves model weights + calibration buffer to JSON so learning
+    # survives Python process restarts.  RegimeShiftDetector and
+    # VolatilityHarvester are intentionally NOT persisted — they are
+    # transient state that rebuilds naturally from live data.
+
+    def save_state(self, path: str | Path) -> None:
+        """Persist model weights and calibration buffer to disk."""
+        # Compute quality metrics for versioning
+        brier = self.calibration.brier_score()
+        accuracy = self.calibration.directional_accuracy()
+        state = {
+            "model": {
+                "config": asdict(self.model.config),
+                "weights": self.model.weights,
+                "bias": self.model.bias,
+                "updates": self.model.updates,
+                "metadata": self.model.metadata,
+            },
+            "calibration": {
+                "predictions": self.calibration.predictions,
+                "outcomes": self.calibration.outcomes,
+            },
+            "trading_mode": self._trading_mode,
+            "versioning": {
+                "save_count": getattr(self, "_save_count", 0) + 1,
+                "calibration_samples": len(self.calibration.predictions),
+                "brier_score": brier,
+                "directional_accuracy": accuracy,
+            },
+        }
+        self._save_count = getattr(self, "_save_count", 0) + 1
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write: write to temp then rename to prevent corruption
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp.replace(target)
+
+    def load_state(self, path: str | Path) -> bool:
+        """Load model weights and calibration buffer from disk.
+
+        After loading, validates the model quality by computing Brier score.
+        If the loaded model performs worse than a fresh baseline model
+        (Brier > 0.25 on its own calibration buffer), automatically
+        resets to default weights and clears calibration to prevent
+        a degraded model from being used.
+
+        Returns True if state was loaded and validated successfully,
+        False if the file doesn't exist, is corrupt, or was rolled back.
+        """
+        target = Path(path)
+        if not target.exists():
+            return False
+        try:
+            state = json.loads(target.read_text(encoding="utf-8"))
+            # Restore model
+            m = state["model"]
+            saved_weights = {str(k): float(v) for k, v in m["weights"].items()}
+            saved_bias = float(m["bias"])
+            saved_updates = int(m["updates"])
+            saved_metadata = {str(k): str(v) for k, v in m.get("metadata", {}).items()}
+            self.model.weights = saved_weights
+            self.model.bias = saved_bias
+            self.model.updates = saved_updates
+            self.model.metadata = saved_metadata
+            # Restore calibration
+            cal = state.get("calibration", {})
+            saved_predictions = [float(p) for p in cal.get("predictions", [])]
+            saved_outcomes = [int(o) for o in cal.get("outcomes", [])]
+            self.calibration.predictions = saved_predictions
+            self.calibration.outcomes = saved_outcomes
+            # Prune oversized buffers loaded from disk (pre-v5 state files)
+            self.calibration._prune()
+            # Invalidate cached calibration models so they re-fit
+            self.calibration._fitted_ir = None
+            self.calibration._fitted_platt = None
+            self.calibration._fitted_ir_version = 0
+            self.calibration._fitted_platt_version = 0
+            self._trading_mode = state.get("trading_mode", "intraday")
+
+            # ── Quality validation ──────────────────────────────────
+            # Compute Brier score on the loaded calibration buffer.
+            # If it exceeds the maximum acceptable threshold (0.25 = coin-flip),
+            # the model has degenerated and should be rolled back to fresh weights.
+            MAX_ACCEPTABLE_BRIER = 0.25
+            loaded_versioning = state.get("versioning", {})
+            brier = self.calibration.brier_score()
+            accuracy = self.calibration.directional_accuracy()
+            save_count = loaded_versioning.get("save_count", 0)
+
+            if brier is not None and brier > MAX_ACCEPTABLE_BRIER:
+                # Model has degenerated — reset to fresh weights
+                fresh_model = OnlineLogisticModel(self.config.model)
+                self.model.weights = fresh_model.weights
+                self.model.bias = fresh_model.bias
+                self.model.updates = 0
+                self.model.metadata = {}
+                self.calibration.predictions = []
+                self.calibration.outcomes = []
+                self.calibration._fitted_ir = None
+                self.calibration._fitted_platt = None
+                self.calibration._fitted_ir_version = 0
+                self.calibration._fitted_platt_version = 0
+                self._save_count = 0
+                logging.warning(
+                    "[DecisionEngine] ROLLED BACK model for %s: "
+                    "Brier score %.4f > %.4f threshold (was %d samples, "
+                    "accuracy=%.3f, save #%d)",
+                    path, brier, MAX_ACCEPTABLE_BRIER,
+                    len(saved_predictions), accuracy or 0.0, save_count,
+                )
+                return False
+
+            self._save_count = save_count
+            logging.info(
+                "[DecisionEngine] loaded state: model_updates=%d, "
+                "calibration_samples=%d, brier=%.4f, accuracy=%s, save #%d",
+                saved_updates, len(saved_predictions),
+                brier if brier is not None else -1.0,
+                f"{accuracy:.3f}" if accuracy is not None else "N/A",
+                save_count,
+            )
+            return True
+        except Exception as e:
+            logging.warning("[DecisionEngine] failed to load state from %s: %s", path, e)
+            return False
 
     def explain_signal(self, signal: TradeSignal) -> dict[str, object]:
         features = dict(signal.snapshot.features)

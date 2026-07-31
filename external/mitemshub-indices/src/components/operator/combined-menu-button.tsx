@@ -44,6 +44,7 @@ export function CombinedMenuButton({
   const [isOpen, setIsOpen] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [hasEverOpened, setHasEverOpened] = useState(false);
   useEffect(() => {
     setMounted(true);
   }, []);
@@ -70,6 +71,7 @@ export function CombinedMenuButton({
   const openDrawer = useCallback(() => {
     setIsClosing(false);
     setIsOpen(true);
+    setHasEverOpened(true);
   }, []);
 
   const closeDrawer = useCallback(() => {
@@ -199,7 +201,7 @@ export function CombinedMenuButton({
         {isOpen ? <CloseIcon /> : <MenuIcon />}
       </button>
 
-      {mounted && createPortal(drawerContent, document.body)}
+      {mounted && hasEverOpened && createPortal(drawerContent, document.body)}
 
       <style jsx global>{`
         .combined-menu-trigger {

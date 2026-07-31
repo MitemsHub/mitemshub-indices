@@ -581,7 +581,7 @@ export function OperatorShell() {
         <section className="mt-6">
           <ErrorBoundary label="Lot size calculator">
             <LotSizeCalculator
-              accountEquity={workspace.propProfile?.currentBalance || 100_000}
+              accountEquity={workspace.propProfile?.startingBalance || 5000}
               entryPrice={workspace.currentCall?.entry ?? null}
               stopLoss={workspace.currentCall?.stop_loss ?? null}
               takeProfit={workspace.currentCall?.take_profit ?? null}
