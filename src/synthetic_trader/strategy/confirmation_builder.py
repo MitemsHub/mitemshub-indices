@@ -134,7 +134,17 @@ def _evaluate_call_lifecycle(
     quality, _ = _assess_confirmation_quality(setup, confirmation_candles)
 
     if previous_state == CallState.CONFIRMED:
-        if not immediate_alignment and quality < 0.4:
+        # ── Confirmed→Failing: require STRONG evidence ──────────
+        # A confirmed signal represents a validated setup.  On volatile
+        # synthetic indices, a single candle where the close doesn't
+        # continue direction is NORMAL — it's consolidation, not
+        # deterioration.  Only fail when:
+        #   1. quality drops below 0.2 (very weak — not just "below 0.4"), AND
+        #   2. there is no immediate alignment (close against direction)
+        #
+        # Quality 0.2 means almost no quality triggers fired — the candle
+        # is genuinely broken, not just a normal consolidation bar.
+        if not immediate_alignment and quality < 0.2:
             return CallState.FAILING
         return CallState.CONFIRMED
 

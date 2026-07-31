@@ -55,8 +55,10 @@ MAX_BUFFER_TICKS = 10_000
 # loosens the gates so the brain can surface more frequent, well-calculated
 # opportunities instead of waiting for a near-perfect "clean" setup.
 SNIPER_GUARDIAN_THRESHOLDS = GuardianThresholds(
-    max_arming_ticks=30,
-    max_confirmation_window_ticks=40,
+    # Sniper mode needs a long arming + confirmation window — at least
+    # as long as the confirmed lock (60 ticks = 5 min).  120 ticks = 10 minutes.
+    max_arming_ticks=120,
+    max_confirmation_window_ticks=120,
     # Sniper mode is forward-looking — tolerate normal pullbacks.
     # 0.50 means price must move 50% against the stop before degrading.
     # On volatile synthetic indices, 0.25 was causing 'losing strength' within

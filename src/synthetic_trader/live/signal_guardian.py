@@ -25,9 +25,14 @@ class GuardianThresholds:
     #   confidence >= 0.75 → confirmed_lock_ticks_high (extended)
     #   confidence <  0.50 → confirmed_lock_ticks_low  (shortened)
     #   otherwise         → confirmed_lock_ticks       (default)
-    confirmed_lock_ticks: int = 10
-    confirmed_lock_ticks_high: int = 15
-    confirmed_lock_ticks_low: int = 5
+    # Once confirmed, hold that status for at least 60 ticks (5 minutes)
+    # on a 5-second tick chart.  This gives the user time to execute
+    # on their phone without the setup flickering to 'failing'.
+    # High-confidence setups get 90 ticks (7.5 minutes), low-confidence
+    # get 30 ticks (2.5 minutes).
+    confirmed_lock_ticks: int = 60
+    confirmed_lock_ticks_high: int = 90
+    confirmed_lock_ticks_low: int = 30
 
 
 @dataclass(frozen=True)
