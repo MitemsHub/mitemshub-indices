@@ -162,7 +162,9 @@ def _smart_stop_loss(
         return sweep_level
 
     sweep_candle = candles[sweep_index]
-    buffer = atr_14 * 0.25
+    # 0.5x ATR buffer — gives the trade room to breathe on volatile
+    # synthetic indices where wicks can be 2-3x the body.
+    buffer = atr_14 * 0.5
 
     if direction == "buy":
         # Place stop below the candle CLOSE (not the wick low)
