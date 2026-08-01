@@ -86,9 +86,9 @@ class TestFitEGARCH:
 
         # Should produce valid parameters even if not perfectly converged
         assert result.n_observations == n - 1
-        assert 0.001 <= result.alpha <= 0.5
-        assert 0.5 <= result.beta <= 0.999
-        assert abs(result.gamma) <= 0.5
+        assert 0.001 <= result.alpha <= 0.95
+        assert 0.01 <= result.beta <= 0.999
+        assert abs(result.gamma) <= 0.99
         assert result.persistence < 1.0
         assert result.long_run_vol > 0
 
@@ -240,9 +240,9 @@ class TestCalibrateFromCSV:
         # Should produce valid parameters
         assert result.n_observations > 0
         assert result.symbol == "SYN100"
-        assert 0.001 <= result.alpha <= 0.5
-        assert 0.5 <= result.beta <= 0.999
-        assert abs(result.gamma) <= 0.5
+        assert 0.001 <= result.alpha <= 0.95
+        assert 0.01 <= result.beta <= 0.999
+        assert abs(result.gamma) <= 0.99
 
     def test_empty_csv(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:

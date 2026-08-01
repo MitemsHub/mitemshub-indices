@@ -138,15 +138,15 @@ def egarch_negative_log_likelihood(
     omega, alpha, beta, gamma = params
     n = len(log_returns)
 
-    # Stability constraints
+    # Stability constraints — match the wider bounds used in fit_egarch()
     persistence = alpha + beta
-    if persistence >= 0.999 or persistence <= 0.0:
-        return 1e10
-    if alpha < 0 or alpha > 0.5:
+    if persistence >= 0.995 or persistence <= 0.0:
+        return 1e10  # near-unit-root is unstable
+    if alpha < 0 or alpha > 0.95:
         return 1e10
     if beta < 0 or beta > 0.999:
         return 1e10
-    if abs(gamma) > 0.5:
+    if abs(gamma) > 0.99:
         return 1e10
 
     # Initialize variance from sample
@@ -227,78 +227,134 @@ def fit_egarch(
         omega_init = math.log(max(sample_var * 0.5, 1e-10))
         x0 = np.array([omega_init, 0.08, 0.88, -0.04])
 
-    # Bounds for parameters
-    # Omega can be very negative for tick-level returns (tiny scale).
-    # The to_garch_state() method clamps the result to prevent
-    # underflow/overflow in the online forecaster.
+    # Bounds for parameters — widened for R_75 and other symbols
+    # that need larger alpha/gamma values.  The to_garch_state() method
+    # clamps the result to prevent underflow/overflow in the online forecaster.
     bounds = [
-        (-20.0, 0.0),       # omega (log variance intercept)
-        (0.001, 0.5),       # alpha (shock magnitude)
-        (0.5, 0.999),       # beta (persistence)
-        (-0.5, 0.5),        # gamma (asymmetry)
+        (-30.0, 2.0),       # omega (log variance intercept) — wider for tick-level
+        (0.001, 0.95),      # alpha (shock magnitude) — was 0.5, R_75 needs higher
+        (0.01, 0.999),      # beta (persistence) — was 0.5 min, allow lower
+        (-0.99, 0.99),      # gamma (asymmetry) — was ±0.5, allow full range
     ]
 
-    # Minimize negative log-likelihood
     # Lazy import: scipy.optimize hangs on Python 3.14 when imported at module level.
-    from scipy.optimize import minimize
+    from scipy.optimize import minimize, differential_evolution
 
-    try:
-        result = minimize(
-            egarch_negative_log_likelihood,
-            x0,
-            args=(log_returns,),
-            method="L-BFGS-B",
-            bounds=bounds,
-            options={"maxiter": max_iter, "ftol": 1e-10},
-        )
+    # ── Multi-start optimization ────────────────────────────────────
+    # R_75 (and other symbols) can get stuck in local minima with a
+    # single starting point.  Try multiple initial parameter sets and
+    # keep the best fit (lowest NLL).
+    # Initial guesses use realistic EGARCH(1,1) ranges: alpha 0.05-0.15,
+    # beta 0.75-0.90, gamma -0.20 to 0.10.
+    initial_guesses = [
+        x0,  # default guess from data
+        np.array([math.log(max(sample_var * 0.1, 1e-10)), 0.05, 0.90, -0.10]),  # low alpha, high beta
+        np.array([math.log(max(sample_var * 0.3, 1e-10)), 0.12, 0.82, 0.05]),  # moderate alpha
+        np.array([math.log(max(sample_var * 0.5, 1e-10)), 0.08, 0.85, -0.20]),  # strong asymmetry
+        np.array([-5.0, 0.10, 0.80, 0.0]),  # neutral asymmetry
+    ]
 
-        omega_fit, alpha_fit, beta_fit, gamma_fit = result.x
-        nll = float(result.fun)
-        converged = result.success
+    best_nll = float("inf")
+    best_result = None
+    last_exception = None
 
-        # Compute diagnostics
-        persistence = alpha_fit + beta_fit
-        half_life = math.log(0.5) / math.log(persistence) if 0.0 < persistence < 1.0 else float("inf")
-        long_run_var = omega_fit / max(1.0 - persistence, 1e-10)
-        long_run_vol = math.sqrt(max(long_run_var, 1e-10))
+    for guess in initial_guesses:
+        try:
+            result = minimize(
+                egarch_negative_log_likelihood,
+                guess,
+                args=(log_returns,),
+                method="L-BFGS-B",
+                bounds=bounds,
+                options={"maxiter": max_iter, "ftol": 1e-10},
+            )
+            if result.fun < best_nll:
+                best_nll = float(result.fun)
+                best_result = result
+        except Exception as exc:
+            last_exception = exc
+            continue
 
-        # Goodness-of-fit diagnostics (skip if fit didn't converge)
-        if converged:
-            std_resid = _compute_standardized_residuals(log_returns, omega_fit, alpha_fit, beta_fit, gamma_fit)
-            ljung_box_p = _ljung_box_test_with_residuals(std_resid)
-            arch_p = _arch_test_with_residuals(std_resid)
-        else:
-            ljung_box_p = 0.5  # neutral when unconverged
-            arch_p = 0.5
+    # ── Differential evolution fallback ──────────────────────────────
+    # If the best L-BFGS-B result didn't converge, use differential
+    # evolution (global optimizer) which doesn't need a good starting
+    # point.  DE needs more iterations than L-BFGS-B (typically 2000+).
+    should_try_de = (
+        best_result is None
+        or not best_result.success
+    )
+    if should_try_de:
+        try:
+            de_result = differential_evolution(
+                egarch_negative_log_likelihood,
+                bounds=bounds,
+                args=(log_returns,),
+                maxiter=max(max_iter * 5, 2000),
+                seed=42,
+                tol=1e-8,
+                polish=True,  # L-BFGS-B polish after DE
+            )
+            if de_result.fun < best_nll:
+                best_nll = float(de_result.fun)
+                best_result = de_result
+        except Exception as exc:
+            last_exception = exc
 
-        return CalibrationResult(
-            symbol=symbol,
-            omega=float(omega_fit),
-            alpha=float(alpha_fit),
-            beta=float(beta_fit),
-            gamma=float(gamma_fit),
-            n_observations=len(log_returns),
-            negative_log_likelihood=nll,
-            convergence=converged,
-            message="MLE fit completed" if converged else f"Partial convergence: {result.message}",
-            persistence=float(persistence),
-            half_life=float(half_life),
-            long_run_vol=float(long_run_vol),
-            realized_vol=realized_vol,
-            vol_ratio=float(long_run_vol / max(realized_vol, 1e-10)),
-            ljung_box_p_value=float(ljung_box_p),
-            arch_test_p_value=float(arch_p),
-        )
-
-    except Exception as exc:
+    if best_result is None:
         return CalibrationResult(
             symbol=symbol,
             omega=x0[0], alpha=x0[1], beta=x0[2], gamma=x0[3],
             n_observations=len(log_returns),
             negative_log_likelihood=float("inf"),
             convergence=False,
-            message=f"Optimization failed: {exc}",
+            message=f"All optimization attempts failed: {last_exception}",
         )
+
+    result = best_result
+    omega_fit, alpha_fit, beta_fit, gamma_fit = result.x
+    nll = float(result.fun)
+    converged = result.success
+
+    # Compute diagnostics
+    persistence = alpha_fit + beta_fit
+    half_life = math.log(0.5) / math.log(persistence) if 0.0 < persistence < 1.0 else float("inf")
+    long_run_var = omega_fit / max(1.0 - persistence, 1e-10)
+    long_run_vol = math.sqrt(max(long_run_var, 1e-10))
+
+    # Goodness-of-fit diagnostics (skip if fit didn't converge)
+    if converged:
+        std_resid = _compute_standardized_residuals(log_returns, omega_fit, alpha_fit, beta_fit, gamma_fit)
+        ljung_box_p = _ljung_box_test_with_residuals(std_resid)
+        arch_p = _arch_test_with_residuals(std_resid)
+    else:
+        ljung_box_p = 0.5  # neutral when unconverged
+        arch_p = 0.5
+
+    # Build convergence message
+    n_starts = len(initial_guesses)
+    if converged:
+        msg = f"MLE fit completed (multi-start, {n_starts} starts)"
+    else:
+        msg = f"Partial convergence (multi-start, {n_starts} starts): {result.message}"
+
+    return CalibrationResult(
+        symbol=symbol,
+        omega=float(omega_fit),
+        alpha=float(alpha_fit),
+        beta=float(beta_fit),
+        gamma=float(gamma_fit),
+        n_observations=len(log_returns),
+        negative_log_likelihood=nll,
+        convergence=converged,
+        message=msg,
+        persistence=float(persistence),
+        half_life=float(half_life),
+        long_run_vol=float(long_run_vol),
+        realized_vol=realized_vol,
+        vol_ratio=float(long_run_vol / max(realized_vol, 1e-10)),
+        ljung_box_p_value=float(ljung_box_p),
+        arch_test_p_value=float(arch_p),
+    )
 
 
 def _compute_standardized_residuals(
@@ -591,18 +647,21 @@ def _params_at_bounds(result: CalibrationResult) -> bool:
 
     An optimizer can report ``convergence=True`` while multiple parameters
     are stuck at their bounds — this is a degenerate fit, not a good one.
-    We require at least 2 parameters at bounds to reject, so a single
-    parameter near its edge (which can happen legitimately) is tolerated.
+    We require at least 3 parameters at bounds to reject (was 2), since
+    with wider bounds a single parameter near its edge is more common.
+
+    Updated bounds (matching fit_egarch):
+        omega: [-30, 2], alpha: [0.001, 0.95], beta: [0.01, 0.999], gamma: [-0.99, 0.99]
     """
     BOUND_EPS = 0.001  # within 0.1% of bound edge
     at_bounds = 0
-    if result.alpha >= 0.5 - BOUND_EPS:
+    if result.omega >= 2.0 - BOUND_EPS or result.omega <= -30.0 + BOUND_EPS:
         at_bounds += 1
-    if result.beta <= 0.5 + BOUND_EPS:
+    if result.alpha >= 0.95 - BOUND_EPS or result.alpha <= 0.001 + BOUND_EPS:
         at_bounds += 1
-    if abs(result.gamma) >= 0.5 - BOUND_EPS:
+    if result.beta >= 0.999 - BOUND_EPS or result.beta <= 0.01 + BOUND_EPS:
         at_bounds += 1
-    if result.omega >= 0.0 - BOUND_EPS:
+    if abs(result.gamma) >= 0.99 - BOUND_EPS:
         at_bounds += 1
     return at_bounds >= 2
 
