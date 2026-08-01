@@ -25,7 +25,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import minimize
 
 from synthetic_trader.models.garch import GARCHState
 
@@ -230,6 +229,9 @@ def fit_egarch(
     ]
 
     # Minimize negative log-likelihood
+    # Lazy import: scipy.optimize hangs on Python 3.14 when imported at module level.
+    from scipy.optimize import minimize  # noqa: E402
+
     try:
         result = minimize(
             egarch_negative_log_likelihood,

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 from synthetic_trader.config import TraderConfig
 from synthetic_trader.domain import Candle
+from synthetic_trader.features.indicators import atr
+from synthetic_trader.strategy.stop_loss import smart_stop_loss
 
 
 @dataclass(frozen=True)
@@ -112,26 +114,63 @@ def select_execution_stop(
     trigger: TriggerSignal,
     execution_candles: list[Candle],
     max_stop_distance_pct: float = 0.05,
+    htf_candles: list[Candle] | None = None,
 ) -> float:
-    recent = execution_candles[-6:]
+    """Select the execution stop using the professional 3-layer system.
+
+    When htf_candles (higher-timeframe bias candles) are provided, uses
+    the same 3-layer stop logic as the swing execution builder:
+      Layer 1: Structural stop from HTF swing points
+      Layer 2: Maximum Adverse Excursion from setup candles
+      Layer 3: ATR volatility buffer (2.0x ATR)
+    Final stop = WIDEST of the three candidates.
+
+    When htf_candles is not provided, falls back to the legacy wick-based
+    stop calculation for backward compatibility.
+    """
     entry = trigger.entry
 
-    if trigger.trigger_type == "continuation_close":
-        stop = trigger.failure_level
-    elif trigger.trigger_type == "reclaim_pullback":
-        if direction == "buy":
-            stop = min(candle.low for candle in recent[-3:])
-        else:
-            stop = max(candle.high for candle in recent[-3:])
-    elif trigger.trigger_type == "break_retest_hold":
-        stop = trigger.failure_level
-    elif direction == "buy":
-        stop = min(candle.low for candle in recent[-4:])
+    # When HTF candles are available, use the professional 3-layer system.
+    # The reference_level is the trigger's failure level (wick-based stop)
+    # which serves as one candidate in the 3-layer comparison.
+    if htf_candles and len(htf_candles) >= 10:
+        atr_14 = atr(execution_candles, 14)
+        if atr_14 <= 0:
+            atr_14 = abs(entry - trigger.failure_level)
+        # Minimum ATR guard: prevent degenerate stops when ATR is near zero
+        atr_14 = max(atr_14, entry * 0.001)
+
+        # Use the trigger failure level as the reference (wick-based candidate)
+        reference_level = trigger.failure_level
+        if reference_level is None:
+            reference_level = entry * 0.99 if direction == "buy" else entry * 1.01
+
+        stop = smart_stop_loss(
+            htf_candles=htf_candles,
+            ltf_candles=execution_candles,
+            direction=direction,
+            reference_level=reference_level,
+            atr_14=atr_14,
+            entry=entry,
+        )
     else:
-        stop = max(candle.high for candle in recent[-4:])
+        # Legacy path: wick-based stop when no HTF data available
+        recent = execution_candles[-6:]
+        if trigger.trigger_type == "continuation_close":
+            stop = trigger.failure_level
+        elif trigger.trigger_type == "reclaim_pullback":
+            if direction == "buy":
+                stop = min(candle.low for candle in recent[-3:])
+            else:
+                stop = max(candle.high for candle in recent[-3:])
+        elif trigger.trigger_type == "break_retest_hold":
+            stop = trigger.failure_level
+        elif direction == "buy":
+            stop = min(candle.low for candle in recent[-4:])
+        else:
+            stop = max(candle.high for candle in recent[-4:])
 
     # Sanity cap: stop distance can never exceed max_stop_distance_pct of entry price.
-    # Prevents broken candle data from producing impossible stop levels.
     max_stop = entry * max_stop_distance_pct
     stop_distance = abs(entry - stop)
     if stop_distance > max_stop:
@@ -224,6 +263,7 @@ def build_intraday_execution(
     execution_candles: list[Candle],
     thesis_invalidation: float,
     config: TraderConfig,
+    htf_candles: list[Candle] | None = None,
 ) -> IntradayExecutionPlan | None:
     profile = config.symbols[symbol]
     trigger = classify_trigger(
@@ -240,6 +280,7 @@ def build_intraday_execution(
         trigger=trigger,
         execution_candles=execution_candles,
         max_stop_distance_pct=profile.max_stop_distance_pct,
+        htf_candles=htf_candles,
     )
 
     primary_target = select_primary_target(

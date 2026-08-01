@@ -7,6 +7,14 @@ from dataclasses import dataclass
 # within the first few ticks while the candle is still forming.
 GRACE_PERIOD_TICKS = 8
 
+# Minimum ticks after confirmation before the guardian re-evaluates
+# microstructure for sniper mode.  Sniper trades target 4-6 hour holds,
+# so re-checking microstructure every 5 seconds is counterproductive —
+# normal pullbacks on volatile synthetics will always trigger "failing".
+# After confirmation, the guardian should only check thesis invalidation
+# (stop hit) on sniper mode.
+SNIPER_MICRO_REEVAL_INTERVAL_TICKS = 360  # 30 minutes between micro re-evals
+
 
 @dataclass(frozen=True)
 class GuardianThresholds:
@@ -72,6 +80,14 @@ class GuardianContext:
     # Real ATR_14 from features — used for trailing stop calculations.
     # Avoids approximating ATR from stop_distance which is fragile.
     atr_14: float | None = None
+    # Trading mode: "sniper", "active_trader", or "volatility_harvest".
+    # Used to apply mode-specific guardian behavior:
+    #   - sniper: after confirmation, skip microstructure re-evaluation;
+    #     only check thesis invalidation (stop hit).  Swing trades target
+    #     4-6 hour holds so tick-level microstructure noise is irrelevant.
+    #   - active_trader/volatility_harvest: re-evaluate microstructure
+    #     on every tick as before.
+    trading_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -368,49 +384,86 @@ def evaluate_signal_guardian(
         if ticks_since_confirmation < _effective_lock_ticks:
             _in_confirmed_lock = True
 
-    rollover_state, rollover_reason = _detect_rollover(micro, thresholds)
-    if rollover_state == "failing":
-        # During confirmed lock, suppress 'failing' — the setup was
-        # validated and normal pullbacks shouldn't downgrade it.
-        if _in_confirmed_lock:
-            rollover_state = None
-            rollover_reason = None
-        else:
-            # ── Grace period: don't degrade during the first few ticks ──
-            in_grace_period = context.ticks_since_armed <= GRACE_PERIOD_TICKS
-            orderly_early_post_entry_move = (
-                context.ticks_since_armed <= thresholds.min_persistence_ticks + 2
-                and adverse_ratio < thresholds.rollover_warning_ratio
-                and micro.pullback_ratio < thresholds.rollover_warning_ratio
-                and micro.rejection_imbalance > 0
-            )
-            if in_grace_period or orderly_early_post_entry_move:
-                rollover_state = None
-                rollover_reason = None
-    if rollover_state:
+    # ── Sniper mode: skip microstructure re-evaluation after confirmation ──
+    # Sniper trades target 4-6 hour holds.  Re-checking microstructure
+    # every 5 seconds is counterproductive — normal pullbacks on volatile
+    # synthetics will ALWAYS trigger "failing" via pullback_ratio or
+    # acceleration_shift checks.  After confirmation, the sniper guardian
+    # should ONLY check thesis invalidation (stop hit / max adverse excursion).
+    #
+    # This is the root cause of "Plan is losing strength" appearing within
+    # minutes of a confirmed call: the guardian was evaluating 16-tick
+    # microstructure for a multi-hour swing trade.
+    _is_sniper = context.trading_mode == "sniper"
+    _sniper_confirmed_and_stable = (
+        _is_sniper
+        and context.previous_guardian_state == "confirmed"
+        and context.first_confirmed_at_tick is not None
+        and (context.ticks_since_armed - context.first_confirmed_at_tick)
+            >= SNIPER_MICRO_REEVAL_INTERVAL_TICKS
+    )
+
+    # For sniper mode after the stabilization window, skip ALL microstructure
+    # degradation checks AND the entry gate.  The only way to fail is via
+    # max adverse excursion (stop hit), which is checked at the top of the
+    # function.  After stabilization, return 'confirmed' directly — the
+    # trade is validated and should not flicker back to 'actionable' or
+    # 'failing' on normal price noise.
+    if _sniper_confirmed_and_stable:
+        favorable_ratio = context.max_favorable_excursion / stop_distance if stop_distance else 0.0
+        atr = context.atr_14 if context.atr_14 and context.atr_14 > 0 else stop_distance * 0.3
+        _trail = _compute_trailing_stop(snapshot, stop_distance, favorable_ratio, atr)
+        ticks_since = context.ticks_since_armed - context.first_confirmed_at_tick
         return GuardianEvaluation(
-            rollover_state,
-            rollover_reason or "Setup is weakening.",
+            "confirmed",
+            f"Sniper setup confirmed and stable ({ticks_since}t since confirmation) — thesis intact, only stop-hit invalidates.",
+            recommended_stop=_trail,
         )
 
-    if adverse_ratio >= thresholds.weakening_excursion_ratio:
-        # During confirmed lock, suppress 'failing' from adverse excursion
-        # unless it's genuinely severe (approaching max).
-        if _in_confirmed_lock and adverse_ratio < thresholds.max_adverse_excursion_ratio * 0.8:
-            pass  # hold confirmed — excursion is within tolerable range
-        elif context.ticks_since_armed <= GRACE_PERIOD_TICKS:
-            # ── Grace period for new plans ────────────────────────────
-            # A brand-new plan should NOT immediately fail on adverse
-            # excursion.  On volatile synthetic indices, the price often
-            # moves against the entry within the first few ticks while
-            # the candle is still forming.  Allow 8 ticks (~40 seconds)
-            # before the adverse excursion check becomes active.
-            pass
-        else:
+    if not _sniper_confirmed_and_stable:
+        rollover_state, rollover_reason = _detect_rollover(micro, thresholds)
+        if rollover_state == "failing":
+            # During confirmed lock, suppress 'failing' — the setup was
+            # validated and normal pullbacks shouldn't downgrade it.
+            if _in_confirmed_lock:
+                rollover_state = None
+                rollover_reason = None
+            else:
+                # ── Grace period: don't degrade during the first few ticks ──
+                in_grace_period = context.ticks_since_armed <= GRACE_PERIOD_TICKS
+                orderly_early_post_entry_move = (
+                    context.ticks_since_armed <= thresholds.min_persistence_ticks + 2
+                    and adverse_ratio < thresholds.rollover_warning_ratio
+                    and micro.pullback_ratio < thresholds.rollover_warning_ratio
+                    and micro.rejection_imbalance > 0
+                )
+                if in_grace_period or orderly_early_post_entry_move:
+                    rollover_state = None
+                    rollover_reason = None
+        if rollover_state:
             return GuardianEvaluation(
-                "failing",
-                "The setup is deteriorating and the old plan is no longer fresh.",
+                rollover_state,
+                rollover_reason or "Setup is weakening.",
             )
+
+        if adverse_ratio >= thresholds.weakening_excursion_ratio:
+            # During confirmed lock, suppress 'failing' from adverse excursion
+            # unless it's genuinely severe (approaching max).
+            if _in_confirmed_lock and adverse_ratio < thresholds.max_adverse_excursion_ratio * 0.8:
+                pass  # hold confirmed — excursion is within tolerable range
+            elif context.ticks_since_armed <= GRACE_PERIOD_TICKS:
+                # ── Grace period for new plans ────────────────────────────
+                # A brand-new plan should NOT immediately fail on adverse
+                # excursion.  On volatile synthetic indices, the price often
+                # moves against the entry within the first few ticks while
+                # the candle is still forming.  Allow 8 ticks (~40 seconds)
+                # before the adverse excursion check becomes active.
+                pass
+            else:
+                return GuardianEvaluation(
+                    "failing",
+                    "The setup is deteriorating and the old plan is no longer fresh.",
+                )
 
     # ── Trailing stop / breakeven protection (all return paths) ───
     # Compute once and attach to every return — confirmed signals

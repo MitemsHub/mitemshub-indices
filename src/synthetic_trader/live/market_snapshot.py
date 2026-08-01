@@ -55,40 +55,55 @@ MAX_BUFFER_TICKS = 10_000
 # loosens the gates so the brain can surface more frequent, well-calculated
 # opportunities instead of waiting for a near-perfect "clean" setup.
 SNIPER_GUARDIAN_THRESHOLDS = GuardianThresholds(
-    # Sniper mode needs a long arming + confirmation window — at least
-    # as long as the confirmed lock (60 ticks = 5 min).  120 ticks = 10 minutes.
-    max_arming_ticks=120,
-    max_confirmation_window_ticks=120,
-    # Sniper mode is forward-looking — tolerate normal pullbacks.
-    # 0.65 means price must move 65% against the stop before degrading.
-    # On volatile synthetic indices, wicks routinely push 50-60% into the
-    # stop distance before reverting — this is NORMAL price action, not
-    # thesis breakage.  A sniper/swing signal should survive this.
-    weakening_excursion_ratio=0.65,
+    # Sniper mode is a 4-6 HOUR swing trade.  The guardian must operate
+    # on a completely different timescale than active_trader.
+    #
+    # Key design principles:
+    # 1. After confirmation, the guardian only checks thesis invalidation
+    #    (stop hit) — NOT microstructure quality.  Normal pullbacks on
+    #    volatile synthetics WILL trigger rollover/acceleration checks
+    #    if we evaluate tick-level microstructure.
+    # 2. Confirmed lock is 720 ticks (60 minutes) — a swing trade needs
+    #    stability, not flickering states.
+    # 3. Microstructure window is 120 ticks (10 minutes) — not 16 ticks
+    #    (80 seconds).  This gives a meaningful view of price action.
+    max_arming_ticks=360,           # 30 min arming window for swing trades
+    max_confirmation_window_ticks=360,  # 30 min to confirm
+    weakening_excursion_ratio=0.85,   # 85% — only degrade on near-stop moves
     max_adverse_excursion_ratio=0.95,
-    max_entry_drift_ratio=0.90,
-    microstructure_window_ticks=16,
+    max_entry_drift_ratio=0.95,      # 95% — tolerate large drift on swings
+    microstructure_window_ticks=120,   # 120 ticks = 10 min (was 16)
     min_persistence_ticks=1,
     min_impulse_ratio=0.02,
-    max_pullback_ratio=0.85,
-    rollover_warning_ratio=0.80,
+    max_pullback_ratio=0.90,         # 90% — only invalidate on near-stop pullbacks
+    rollover_warning_ratio=0.88,      # 88% — very tolerant of pullbacks
     rollover_invalidation_ratio=0.95,
     adverse_cluster_window_ticks=12,
     max_adverse_cluster_count=8,
+    # Sniper confirmed lock: 720 ticks = 60 minutes.
+    # A 4-6 hour swing trade needs at least 60 minutes of stability
+    # after confirmation.  High-confidence setups get 900 ticks (75 min).
+    confirmed_lock_ticks=720,
+    confirmed_lock_ticks_high=900,
+    confirmed_lock_ticks_low=360,
 )
 
 ACTIVE_TRADER_GUARDIAN_THRESHOLDS = GuardianThresholds(
+    # Active trader mode uses the same improvements as sniper mode:
+    # wider excursion tolerance and trailing stop protection.
+    # On volatile synthetic indices, wicks routinely push 50-60% into
+    # the stop distance before reverting — this is NORMAL price action.
     max_arming_ticks=16,
     max_confirmation_window_ticks=10,
-    weakening_excursion_ratio=0.45,
+    weakening_excursion_ratio=0.65,   # was 0.45 — tolerate normal wicks
     max_adverse_excursion_ratio=0.95,
     max_entry_drift_ratio=1.0,
     microstructure_window_ticks=8,
     min_persistence_ticks=3,
     min_impulse_ratio=0.08,
-    max_pullback_ratio=0.32,
-    rollover_warning_ratio=0.28,
-    rollover_invalidation_ratio=0.45,
+    max_pullback_ratio=0.40,         # was 0.32 — give trades room to breathe
+    rollover_warning_ratio=0.35,      # was 0.28 — normal pullbacks shouldn't degrade
+    rollover_invalidation_ratio=0.50, # was 0.45 — only invalidate on deep pullbacks
     adverse_cluster_window_ticks=6,
     max_adverse_cluster_count=3,
 )
@@ -843,6 +858,7 @@ def build_guardian_snapshot(
             confidence_at_confirmation=confidence_at_confirmation,
             current_confidence=current_confidence,
             atr_14=snapshot.get("atr_14") if isinstance(snapshot.get("atr_14"), (int, float)) else None,
+            trading_mode=trading_mode,
         ),
         thresholds,
     )

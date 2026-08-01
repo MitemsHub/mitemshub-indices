@@ -550,6 +550,7 @@ class DecisionEngine:
                     else default_thesis_invalidation
                 ),
                 config=self.config,
+                htf_candles=bias_candles,
             )
         if execution_plan is None:
             snapshot_features = dict(snapshot.features) if snapshot else {}
