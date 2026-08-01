@@ -1134,7 +1134,7 @@ class DecisionEngine:
     # transient state that rebuilds naturally from live data.
 
     def save_state(self, path: str | Path) -> None:
-        """Persist model weights and calibration buffer to disk."""
+        """Persist model weights, replay buffer, and calibration buffer to disk."""
         # Compute quality metrics for versioning
         brier = self.calibration.brier_score()
         accuracy = self.calibration.directional_accuracy()
@@ -1145,6 +1145,7 @@ class DecisionEngine:
                 "bias": self.model.bias,
                 "updates": self.model.updates,
                 "metadata": self.model.metadata,
+                "replay_buffer": self.model.replay_buffer.to_dict(),
             },
             "calibration": {
                 "predictions": self.calibration.predictions,
@@ -1193,6 +1194,11 @@ class DecisionEngine:
             self.model.bias = saved_bias
             self.model.updates = saved_updates
             self.model.metadata = saved_metadata
+            # Restore replay buffer if persisted
+            buf_payload = m.get("replay_buffer")
+            if buf_payload is not None:
+                from synthetic_trader.models.replay_buffer import ExperienceReplayBuffer
+                self.model.replay_buffer = ExperienceReplayBuffer.from_dict(buf_payload)
             # Restore calibration
             cal = state.get("calibration", {})
             saved_predictions = [float(p) for p in cal.get("predictions", [])]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -105,6 +106,13 @@ class RiskEngine:
                     message=prop_firm_breach_msg or prop_firm_breach_type,
                     equity=self.state.equity,
                 )
+            logging.debug(
+                "[RiskEngine] REJECTED %s: conf=%.3f < min=%.3f, rr=%.2f < min=%.2f | %s",
+                signal.symbol,
+                signal.confidence, min_confidence,
+                signal.reward_risk, self.config.min_reward_risk,
+                "; ".join(reasons),
+            )
             return RiskDecision(False, None, tuple(reasons))
 
         risk_budget = self.state.equity * self.config.risk_per_trade

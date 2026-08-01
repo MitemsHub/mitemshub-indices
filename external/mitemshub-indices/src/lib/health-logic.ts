@@ -33,8 +33,8 @@ export const DEFAULT_THRESHOLDS: AlertThresholds = {
   mt5InitCritMs: 30_000,
   csvVelocityWarnTicksMin: 50,
   csvVelocityCritTicksMin: 10,
-  flatTicksWarnPolls: 6,
-  flatTicksCritPolls: 12,
+  flatTicksWarnPolls: 8,
+  flatTicksCritPolls: 16,
   pollIntervalMs: 15_000,
 };
 
@@ -203,12 +203,30 @@ export function evaluateHealth(
   }
 
   // 2. CSV tick velocity
+  // NOTE: When MT5 is connected AND there are already CSV ticks, zero
+  // velocity is NORMAL — the system only appends ticks during snapshot
+  // calls (user clicks Refresh).  There is no perpetual background
+  // collector.  Downgrade velocity alerts to warn when the bridge
+  // is alive and has data, instead of critical.
+  const hasCsvData = Object.values(metrics.csv_ticks).some((n) => n > 0);
+  // Only suppress CSV critical alerts when MT5 process is confirmed running
+  // or was connected within the last 60 seconds.  A stale connection
+  // timestamp (>60s ago) is NOT enough — the terminal may have crashed.
+  const mt5Alive =
+    metrics.mt5_configured &&
+    (metrics.mt5_process_running ||
+      (metrics.mt5_last_connected_at &&
+        Date.now() - new Date(metrics.mt5_last_connected_at).getTime() < 60_000));
+  const suppressCsvCritical = mt5Alive && hasCsvData;
+
   if (velocity !== null) {
     if (velocity < thresholds.csvVelocityCritTicksMin) {
       activeAlerts.push({
         type: "csv_velocity",
-        severity: "crit",
-        message: `CSV ingestion at ${velocity.toLocaleString()} ticks/min — below ${thresholds.csvVelocityCritTicksMin} critical threshold`,
+        severity: suppressCsvCritical ? "warn" : "crit",
+        message: suppressCsvCritical
+          ? `CSV ingestion at ${velocity.toLocaleString()} ticks/min — no background collector running (normal when MT5 is connected)`
+          : `CSV ingestion at ${velocity.toLocaleString()} ticks/min — below ${thresholds.csvVelocityCritTicksMin} critical threshold`,
       });
     } else if (velocity < thresholds.csvVelocityWarnTicksMin) {
       activeAlerts.push({
@@ -220,11 +238,16 @@ export function evaluateHealth(
   }
 
   // 3. Flat tick count
+  // Same downgrade: when MT5 is connected and CSV has data, flat ticks
+  // are expected (no perpetual collector).  Only flag as critical when
+  // the bridge appears genuinely dead.
   if (flatPolls >= thresholds.flatTicksCritPolls) {
     activeAlerts.push({
       type: "ticks_stalled",
-      severity: "crit",
-      message: `Tick count unchanged for ${flatPolls} consecutive polls — data stream may have stalled`,
+      severity: suppressCsvCritical ? "warn" : "crit",
+      message: suppressCsvCritical
+        ? `Tick count unchanged for ${flatPolls} polls — no background collector (normal)`
+        : `Tick count unchanged for ${flatPolls} consecutive polls — data stream may have stalled`,
     });
   } else if (flatPolls >= thresholds.flatTicksWarnPolls) {
     activeAlerts.push({

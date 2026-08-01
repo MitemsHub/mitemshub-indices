@@ -1366,7 +1366,7 @@ def _rotate_csv(csv_path: Path | str, max_lines: int = 200_000) -> None:
 
 def _load_csv_ticks(
     symbol: str,
-    max_ticks: int = 100000,
+    max_ticks: int = 200_000,
     max_age_seconds: int | None = None,
 ) -> list[Tick] | None:
     """Load ticks from the CSV file for the given symbol.
@@ -1408,7 +1408,7 @@ def _load_csv_ticks(
             return cached_ticks
 
     # Rotate CSV if it exceeds the maximum line threshold (200K lines).
-    # The analysis only reads the most recent 100K ticks from the tail, so
+    # The analysis reads up to 200K ticks from the tail, so
     # keeping more than 200K lines on disk is wasteful and slows down reads.
     _rotate_csv(csv_path, max_lines=200_000)
 
@@ -1437,7 +1437,20 @@ def _load_csv_ticks(
 
 
 def _read_tail_ticks(csv_path: Path, symbol: str, max_count: int) -> list[Tick]:
-    BUFFER_SIZE = 256 * 1024
+    """Read the last ``max_count`` ticks from a CSV file.
+
+    Uses a tail-read strategy: reads backward from the end of the file
+    in 256 KB chunks until we have ``max_count`` valid tick lines.
+    With a 2x safety margin for blank lines / parse failures, 200K ticks
+    needs ~16 MB (63 chunks).  The early-stop logic reads only what's
+    needed — for fewer ticks, it stops well before the full file.
+    """
+    BUFFER_SIZE = 256 * 1024  # 256 KB
+    AVG_BYTES_PER_LINE = 40
+    # Estimate how many bytes we need for max_count lines.
+    # Add a 2× safety margin for parse failures / blank lines.
+    # No cap — the CSV rotation at 200K lines limits file size already.
+    estimated_bytes = max_count * AVG_BYTES_PER_LINE * 2
     file_size = csv_path.stat().st_size
     if file_size <= 0:
         return []
@@ -1446,15 +1459,13 @@ def _read_tail_ticks(csv_path: Path, symbol: str, max_count: int) -> list[Tick]:
         tail_chunks: list[bytes] = []
         accumulated = 0
         pos = file_size
-        while pos > 0 and accumulated < BUFFER_SIZE * 20:
+        while pos > 0 and accumulated < estimated_bytes:
             read = min(BUFFER_SIZE, pos)
             pos -= read
             fh.seek(pos)
             data = fh.read(read)
             tail_chunks.append(data)
             accumulated += read
-            if data.startswith(b"\n") and accumulated > BUFFER_SIZE * 18:
-                break
     tail_bytes = b"".join(reversed(tail_chunks))
     if tail_bytes.startswith(b"\n"):
         tail_bytes = tail_bytes[1:]

@@ -44,12 +44,12 @@ class GARCHState:
     """Current state of the EGARCH(1,1) model."""
 
     omega: float = -2.0        # log(long-run variance) intercept
-    alpha: float = 0.08        # magnitude shock coefficient
-    gamma: float = -0.04       # asymmetry / leverage coefficient
-    beta: float = 0.88         # variance persistence
-    log_variance: float = -2.0 # current log-variance
+    alpha: float = 0.10        # magnitude shock coefficient (tuned for synthetic indices)
+    gamma: float = -0.05       # asymmetry / leverage coefficient
+    beta: float = 0.85         # variance persistence (slightly lower for faster adaptation)
+    log_variance: float = -8.0 # current log-variance (matches synthetic index tick scale)
     observations: int = 0
-    long_run_variance: float = math.exp(-2.0)
+    long_run_variance: float = math.exp(-8.0)  # ~3.4e-4, realistic for synthetic indices
 
     @property
     def conditional_variance(self) -> float:

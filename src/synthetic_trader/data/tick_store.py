@@ -201,6 +201,139 @@ def _enrich_from_reference(reference: Tick, batch: list[Tick]) -> list[Tick]:
     return enriched
 
 
+def backfill_derived_columns(path: str | Path, symbol: str = "") -> int:
+    """Recompute spread/direction/vol_proxy for every row in a CSV file.
+
+    MT5 ticks arrive with zeros for these columns.  This function reads
+    the entire CSV, computes the derived columns from consecutive price
+    and epoch deltas, and atomically rewrites the file.
+
+    Returns the number of rows rewritten.
+    """
+    target = Path(path)
+    if not target.exists() or target.stat().st_size == 0:
+        return 0
+
+    # Read all ticks from the CSV
+    if not symbol:
+        # Try to detect symbol from filename: data/R_75_ticks.csv -> R_75
+        stem = target.stem  # e.g. "R_75_ticks"
+        symbol = stem.replace("_ticks", "")
+
+    all_ticks = _read_full_ticks(target, symbol)
+    if not all_ticks:
+        return 0
+
+    # Sort by epoch and filter junk rows (epoch < 2001 = before year 2001)
+    # Legacy CSVs sometimes contain rows with tiny epochs and price=1.0/2.0
+    all_ticks = [t for t in all_ticks if t.epoch > 1_000_000_000]
+    all_ticks.sort(key=lambda t: t.epoch)
+
+    # Deduplicate by (epoch, price)
+    seen: set[tuple[float, float]] = set()
+    deduped: list[Tick] = []
+    for t in all_ticks:
+        key = (t.epoch, t.price)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(t)
+    all_ticks = deduped
+
+    # Compute derived columns
+    enriched: list[Tick] = []
+    prev_price: float | None = None
+    prev_epoch: float | None = None
+    for t in all_ticks:
+        spread = 0.0
+        direction = 0
+        vol_proxy = 0.0
+        if prev_price is not None:
+            delta = t.price - prev_price
+            spread = abs(delta) / 2.0
+            if delta > 0:
+                direction = 1
+            elif delta < 0:
+                direction = -1
+        if prev_epoch is not None:
+            dt = t.epoch - prev_epoch
+            if dt > 0:
+                vol_proxy = 1.0 / dt
+        enriched.append(Tick(
+            symbol=t.symbol, epoch=t.epoch, price=t.price,
+            spread=spread, tick_direction=direction, volume_proxy=vol_proxy,
+        ))
+        prev_price = t.price
+        prev_epoch = t.epoch
+
+    # Atomic rewrite
+    fd, tmp_path = tempfile.mkstemp(suffix=".csv", dir=target.parent, prefix=target.stem + "_")
+    try:
+        os.close(fd)
+        with open(tmp_path, "w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=CSV_FIELDNAMES)
+            writer.writeheader()
+            for t in enriched:
+                writer.writerow({
+                    "epoch": t.epoch, "symbol": t.symbol, "price": t.price,
+                    "spread": t.spread, "direction": t.tick_direction,
+                    "vol_proxy": t.volume_proxy,
+                })
+        os.replace(tmp_path, str(target))
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+    return len(enriched)
+
+
+def _read_full_ticks(csv_path: Path, symbol: str) -> list[Tick]:
+    """Read ALL ticks from a CSV file (not just the tail).
+
+    Used by backfill_derived_columns to process the entire file.
+    Reads in chunks for memory efficiency on large files.
+    """
+    BUFFER_SIZE = 256 * 1024  # 256 KB chunks
+    file_size = csv_path.stat().st_size
+    if file_size <= 0:
+        return []
+
+    with csv_path.open("rb") as fh:
+        # Skip header
+        first_line = fh.readline()
+        if not first_line:
+            return []
+
+        ticks: list[Tick] = []
+        while True:
+            chunk = fh.read(BUFFER_SIZE)
+            if not chunk:
+                break
+            # Decode and split into lines
+            text = chunk.decode("utf-8", errors="replace")
+            lines = text.splitlines()
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(",")
+                if len(parts) < 3:
+                    continue
+                try:
+                    spread = float(parts[3]) if len(parts) > 3 else 0.0
+                    direction = int(parts[4]) if len(parts) > 4 else 0
+                    vol_proxy = float(parts[5]) if len(parts) > 5 else 0.0
+                    ticks.append(Tick(
+                        symbol=symbol, epoch=float(parts[0]), price=float(parts[2]),
+                        spread=spread, tick_direction=direction, volume_proxy=vol_proxy,
+                    ))
+                except (ValueError, IndexError):
+                    continue
+    return ticks
+
+
 def append_ticks_csv(path: str | Path, ticks: list[Tick]) -> None:
     """Append ticks to CSV, deduplicating by (epoch, price) against existing data.
 
@@ -219,6 +352,10 @@ def append_ticks_csv(path: str | Path, ticks: list[Tick]) -> None:
         # Enrich raw ticks using the last existing tick as reference
         if existing:
             fresh = _enrich_from_reference(existing[-1], fresh)
+        else:
+            # Existing CSV but couldn't read tail — enrich from first fresh tick
+            if len(fresh) > 1:
+                fresh = [fresh[0]] + _enrich_from_reference(fresh[0], fresh[1:])
         write_ticks_csv(path, fresh, append=True)
     else:
         # No existing data - enrich starting from the first tick as reference

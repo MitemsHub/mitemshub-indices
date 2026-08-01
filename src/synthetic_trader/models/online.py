@@ -80,6 +80,7 @@ class OnlineLogisticModel:
             "bias": self.bias,
             "updates": self.updates,
             "metadata": merged_metadata,
+            "replay_buffer": self.replay_buffer.to_dict(),
         }
         Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         self.metadata = merged_metadata
@@ -87,13 +88,18 @@ class OnlineLogisticModel:
     @classmethod
     def load(cls, path: str | Path) -> "OnlineLogisticModel":
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
-        return cls(
+        model = cls(
             config=ModelConfig(**payload["config"]),
             weights={str(key): float(value) for key, value in payload["weights"].items()},
             bias=float(payload["bias"]),
             updates=int(payload["updates"]),
             metadata={str(key): str(value) for key, value in payload.get("metadata", {}).items()},
         )
+        # Restore replay buffer if persisted
+        buf_payload = payload.get("replay_buffer")
+        if buf_payload is not None:
+            model.replay_buffer = ExperienceReplayBuffer.from_dict(buf_payload)
+        return model
 
     def clone(self) -> "OnlineLogisticModel":
         return type(self)(

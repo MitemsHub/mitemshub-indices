@@ -54,8 +54,8 @@ class RiskConfig:
     max_daily_loss_fraction: float = 0.02
     max_consecutive_losses: int = 4
     max_open_positions: int = 1
-    min_confidence: float = 0.58
-    min_reward_risk: float = 1.35
+    min_confidence: float = 0.48
+    min_reward_risk: float = 1.2
     max_volatility_z: float = 3.0
     stake_floor: float = 0.35
     min_session_quality: float = 0.35  # session filter gate: block bottom-third low-vol hours

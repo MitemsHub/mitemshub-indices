@@ -107,39 +107,46 @@ class ExperienceReplayBuffer:
 
     # ── Persistence ───────────────────────────────────────────────
 
-    def save(self, path: str | Path) -> None:
-        """Persist the buffer to a JSON file."""
-        payload = {
+    def to_dict(self) -> dict:
+        """Serialize the buffer to a JSON-compatible dict."""
+        return {
             "capacity": self.capacity,
             "mini_batch_size": self.mini_batch_size,
             "replay_ratio": self.replay_ratio,
-            "seen": self._seen,
+            "seen": self.total_seen,
             "entries": [
                 {"features": e.features, "label": e.label, "sample_weight": e.sample_weight}
                 for e in self._buffer
             ],
         }
-        Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     @classmethod
-    def load(cls, path: str | Path) -> "ExperienceReplayBuffer":
-        """Restore a buffer from a JSON file."""
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    def from_dict(cls, data: dict) -> "ExperienceReplayBuffer":
+        """Restore a buffer from a dict (e.g. parsed from JSON)."""
         buf = cls(
-            capacity=payload["capacity"],
-            mini_batch_size=payload["mini_batch_size"],
-            replay_ratio=payload["replay_ratio"],
+            capacity=data["capacity"],
+            mini_batch_size=data["mini_batch_size"],
+            replay_ratio=data["replay_ratio"],
         )
-        buf._seen = payload["seen"]
+        buf._seen = data["seen"]
         buf._buffer = [
             ReplayEntry(
                 features=e["features"],
                 label=e["label"],
                 sample_weight=e.get("sample_weight", 1.0),
             )
-            for e in payload["entries"]
+            for e in data.get("entries", [])
         ]
         return buf
+
+    def save(self, path: str | Path) -> None:
+        """Persist the buffer to a JSON file."""
+        Path(path).write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ExperienceReplayBuffer":
+        """Restore a buffer from a JSON file."""
+        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
     # ── Helpers ───────────────────────────────────────────────────
 

@@ -205,7 +205,7 @@ export async function GET() {
   if (existsSync(bridgePath)) {
     const t7 = performance.now();
     try {
-      const raw = readFile(bridgePath, "utf8");
+      const raw = await readFile(bridgePath, "utf8");
       timings.push({
         label: "read+parse:bridge_state.json (sync, module init)",
         ms: +(performance.now() - t7).toFixed(2),

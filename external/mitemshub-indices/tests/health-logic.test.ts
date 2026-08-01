@@ -16,9 +16,9 @@ const VELOCITY = {
 } as const;
 
 const FLAT = {
-  ok: 0,               // below warn threshold (2)
-  warn: 3,             // between warn (2) and crit (4)
-  crit: 5,             // above crit threshold (4)
+  ok: 0,               // below warn threshold (8)
+  warn: 9,             // between warn (8) and crit (16)
+  crit: 17,            // above crit threshold (16)
 } as const;
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -214,14 +214,14 @@ describe("evaluateHealth — alert thresholds", () => {
     it("fires warning at exactly flatTicksWarnPolls", () => {
       const metrics = metricsWithMt5(MT5.ok);
       const result = evaluateHealth(metrics, VELOCITY.ok, DEFAULT_THRESHOLDS.flatTicksWarnPolls);
-      // flatTicksWarnPolls = 2; flatPolls >= 2 => warn
+      // flatPolls >= flatTicksWarnPolls => warn
       expect(result.activeAlerts.filter((a) => a.type === "ticks_stalled")[0]?.severity).toBe("warn");
     });
 
     it("fires crit at exactly flatTicksCritPolls", () => {
       const metrics = metricsWithMt5(MT5.ok);
       const result = evaluateHealth(metrics, VELOCITY.ok, DEFAULT_THRESHOLDS.flatTicksCritPolls);
-      // flatTicksCritPolls = 4; flatPolls >= 4 => crit
+      // flatPolls >= flatTicksCritPolls => crit
       expect(result.activeAlerts.filter((a) => a.type === "ticks_stalled")[0]?.severity).toBe("crit");
     });
   });
@@ -248,7 +248,7 @@ describe("evaluateHealth — alert thresholds", () => {
       const metrics = metricsWithMt5(MT5.ok);
       const result = evaluateHealth(metrics, VELOCITY.ok, FLAT.crit);
       const flatAlert = result.activeAlerts.find((a) => a.type === "ticks_stalled");
-      expect(flatAlert?.message).toContain("5");
+      expect(flatAlert?.message).toContain("17");
     });
   });
 });

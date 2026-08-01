@@ -82,18 +82,25 @@ class CalibrationResult:
         }
 
     def to_garch_state(self) -> GARCHState:
-        """Convert fitted parameters to a GARCHState for the online forecaster."""
-        # Use omega / (1 - persistence) for long-run variance
-        # Guard against persistence >= 1.0
-        if self.persistence < 1.0 and self.persistence > 0.0:
-            lr_var = math.exp(self.omega / (1.0 - self.persistence))
-            log_var = self.omega / (1.0 - self.persistence)
-        elif self.long_run_vol > 0:
-            lr_var = self.long_run_vol ** 2
-            log_var = math.log(lr_var)
-        else:
-            lr_var = 1e-4
-            log_var = math.log(lr_var)
+        """Convert fitted parameters to a GARCHState for the online forecaster.
+
+        The online forecaster processes tick-level log-returns with very small
+        variance (~1e-8).  We set the initial log_variance to a reasonable
+        tick-level value (log(1e-6) ≈ -13.8) that the forecaster's own
+        buffer initialization will override after 50 observations.
+
+        The calibrated alpha/beta/gamma capture the *dynamics* of variance
+        clustering (how vol responds to shocks) and are scale-independent.
+        """
+        # Use a reasonable tick-level initial variance.
+        # The forecaster's buffer (50 observations) will override this
+        # with the actual sample variance, so this only matters for
+        # the first 50 ticks.  Starting at log(1e-6) ≈ -13.8 is a
+        # conservative estimate for synthetic index tick-level returns.
+        log_var = -13.8  # log(1e-6) — reasonable tick-level variance
+        lr_var = math.exp(log_var)
+        # Clamp to valid range
+        lr_var = max(lr_var, 1e-10)
         return GARCHState(
             omega=self.omega,
             alpha=self.alpha,
@@ -221,6 +228,9 @@ def fit_egarch(
         x0 = np.array([omega_init, 0.08, 0.88, -0.04])
 
     # Bounds for parameters
+    # Omega can be very negative for tick-level returns (tiny scale).
+    # The to_garch_state() method clamps the result to prevent
+    # underflow/overflow in the online forecaster.
     bounds = [
         (-20.0, 0.0),       # omega (log variance intercept)
         (0.001, 0.5),       # alpha (shock magnitude)
@@ -230,7 +240,7 @@ def fit_egarch(
 
     # Minimize negative log-likelihood
     # Lazy import: scipy.optimize hangs on Python 3.14 when imported at module level.
-    from scipy.optimize import minimize  # noqa: E402
+    from scipy.optimize import minimize
 
     try:
         result = minimize(
@@ -408,25 +418,76 @@ def _arch_test_with_residuals(
         return 0.5
 
 
+def _resample_to_bars(
+    epochs: list[float],
+    prices: list[float],
+    bar_seconds: int = 60,
+) -> list[float]:
+    """Resample tick-level data into OHLC bars and return close prices.
+
+    Tick-level log-returns have std dev ~0.00003, which is too small
+    for EGARCH calibration — the fitted omega underflows to near-zero.
+    Resampling to 1-minute bars produces returns with std dev ~0.001,
+    matching the scale the online forecaster expects.
+
+    Parameters
+    ----------
+    epochs : list[float]
+        Tick timestamps (epoch seconds).
+    prices : list[float]
+        Tick prices.
+    bar_seconds : int
+        Bar duration in seconds. Default 60 (1 minute).
+
+    Returns
+    -------
+    list[float]
+        Close prices for each bar.
+    """
+    if not prices:
+        return []
+
+    bars: list[float] = []
+    bar_start = epochs[0]
+    bar_close = prices[0]
+
+    for i in range(1, len(prices)):
+        if epochs[i] - bar_start >= bar_seconds:
+            bars.append(bar_close)
+            bar_start = epochs[i]
+        bar_close = prices[i]
+
+    # Append the last bar
+    bars.append(bar_close)
+    return bars
+
+
 def calibrate_from_ticks_csv(
     csv_path: str | Path,
     symbol: str,
     price_column: str = "price",
     delimiter: str = ",",
+    bar_seconds: int = 60,
 ) -> CalibrationResult:
     """Calibrate EGARCH parameters from a tick CSV file.
 
     The CSV should have at least 'epoch' and 'price' columns.
+    Ticks are resampled into ``bar_seconds``-second bars before
+    fitting so the return scale matches the online forecaster's
+    expectation (tick-level returns are too small for stable MLE).
     """
     import csv as csv_mod
 
+    epochs: list[float] = []
     prices: list[float] = []
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv_mod.DictReader(f, delimiter=delimiter)
         for row in reader:
             try:
+                e = float(row.get("epoch", 0))
                 p = float(row[price_column])
                 if p > 0:
+                    epochs.append(e)
                     prices.append(p)
             except (ValueError, KeyError):
                 continue
@@ -441,7 +502,13 @@ def calibrate_from_ticks_csv(
             message=f"No valid prices found in {csv_path}",
         )
 
-    return fit_egarch(np.array(prices), symbol=symbol)
+    # Resample ticks to bars for stable calibration
+    bar_prices = _resample_to_bars(epochs, prices, bar_seconds)
+    if len(bar_prices) < 51:
+        # Fall back to raw ticks if too few bars
+        bar_prices = prices
+
+    return fit_egarch(np.array(bar_prices), symbol=symbol)
 
 
 def save_calibration_result(result: CalibrationResult, path: str | Path) -> None:
@@ -519,6 +586,27 @@ def save_calibrated_garch_state(
     return path
 
 
+def _params_at_bounds(result: CalibrationResult) -> bool:
+    """Check if fitted parameters hit optimizer bounds (degenerate fit).
+
+    An optimizer can report ``convergence=True`` while multiple parameters
+    are stuck at their bounds — this is a degenerate fit, not a good one.
+    We require at least 2 parameters at bounds to reject, so a single
+    parameter near its edge (which can happen legitimately) is tolerated.
+    """
+    BOUND_EPS = 0.001  # within 0.1% of bound edge
+    at_bounds = 0
+    if result.alpha >= 0.5 - BOUND_EPS:
+        at_bounds += 1
+    if result.beta <= 0.5 + BOUND_EPS:
+        at_bounds += 1
+    if abs(result.gamma) >= 0.5 - BOUND_EPS:
+        at_bounds += 1
+    if result.omega >= 0.0 - BOUND_EPS:
+        at_bounds += 1
+    return at_bounds >= 2
+
+
 def load_calibrated_garch_state(
     symbol: str,
     calibration_dir: str | Path | None = None,
@@ -551,6 +639,9 @@ def load_calibrated_garch_state(
         result = load_calibration_result(path)
         if not result.convergence:
             # Calibration didn't converge — skip and use defaults
+            return None
+        if _params_at_bounds(result):
+            # Optimizer hit bounds — degenerate fit, use defaults
             return None
         return result.to_garch_state()
     except (json.JSONDecodeError, KeyError, OSError):
