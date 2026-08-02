@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from synthetic_trader.cli import main
 from synthetic_trader.models.online import OnlineLogisticModel
+from synthetic_trader.models.replay_buffer import ExperienceReplayBuffer
 
 
 class OnlineModelTests(unittest.TestCase):
@@ -165,6 +166,120 @@ class OnlineModelTests(unittest.TestCase):
         self.assertIn("model_saved=", output.getvalue())
         self.assertEqual(saved.metadata["command"], "prepare-live-model")
         self.assertEqual(saved.metadata["symbol"], "R_100")
+
+
+class ReplayBufferCorruptionTests(unittest.TestCase):
+    """Validate that ExperienceReplayBuffer.from_dict rejects corrupt data."""
+
+    def _good_dict(self) -> dict:
+        return {
+            "capacity": 100,
+            "mini_batch_size": 8,
+            "replay_ratio": 0.2,
+            "seen": 5,
+            "entries": [
+                {"features": {"atr_14": 1.0, "slope": 0.5}, "label": 1, "sample_weight": 1.0},
+                {"features": {"atr_14": 0.8}, "label": 0, "sample_weight": 0.5},
+            ],
+        }
+
+    def test_valid_dict_loads_cleanly(self) -> None:
+        buf = ExperienceReplayBuffer.from_dict(self._good_dict())
+        self.assertEqual(len(buf), 2)
+        self.assertEqual(buf.capacity, 100)
+        self.assertEqual(buf.total_seen, 5)
+
+    def test_missing_top_level_keys_use_defaults(self) -> None:
+        buf = ExperienceReplayBuffer.from_dict({"entries": []})
+        self.assertEqual(buf.capacity, 10_000)  # default
+        self.assertEqual(buf.mini_batch_size, 16)  # default
+        self.assertEqual(buf.replay_ratio, 0.2)  # default
+        self.assertEqual(buf.total_seen, 0)  # default
+
+    def test_negative_capacity_uses_default(self) -> None:
+        d = self._good_dict()
+        d["capacity"] = -5
+        buf = ExperienceReplayBuffer.from_dict(d)
+        self.assertEqual(buf.capacity, 10_000)
+
+    def test_string_capacity_uses_default(self) -> None:
+        d = self._good_dict()
+        d["capacity"] = "not_a_number"
+        buf = ExperienceReplayBuffer.from_dict(d)
+        self.assertEqual(buf.capacity, 10_000)
+
+    def test_replay_ratio_out_of_range_uses_default(self) -> None:
+        d = self._good_dict()
+        d["replay_ratio"] = 2.5
+        buf = ExperienceReplayBuffer.from_dict(d)
+        self.assertEqual(buf.replay_ratio, 0.2)
+
+    def test_negative_seen_uses_default(self) -> None:
+        d = self._good_dict()
+        d["seen"] = -100
+        buf = ExperienceReplayBuffer.from_dict(d)
+        self.assertEqual(buf.total_seen, 0)
+
+    def test_entries_not_a_list_uses_empty(self) -> None:
+        d = self._good_dict()
+        d["entries"] = "garbage"
+        buf = ExperienceReplayBuffer.from_dict(d)
+        self.assertEqual(len(buf), 0)
+
+    def test_corrupt_entry_skipped_valid_entries_kept(self) -> None:
+        d = self._good_dict()
+        d["entries"].append({"features": "not_a_dict", "label": 1})
+        d["entries"].append({"label": 99})  # missing features
+        d["entries"].append({"features": {"x": 1.0}, "label": 3})  # bad label
+        buf = ExperienceReplayBuffer.from_dict(d)
+        self.assertEqual(len(buf), 2)  # only the 2 good entries
+
+    def test_empty_features_entry_skipped(self) -> None:
+        d = self._good_dict()
+        d["entries"].append({"features": {}, "label": 1})
+        buf = ExperienceReplayBuffer.from_dict(d)
+        self.assertEqual(len(buf), 2)
+
+    def test_nan_feature_value_skips_entry(self) -> None:
+        import math
+        d = self._good_dict()
+        d["entries"].append({"features": {"atr": math.nan}, "label": 1})
+        buf = ExperienceReplayBuffer.from_dict(d)
+        self.assertEqual(len(buf), 2)
+
+    def test_inf_feature_value_skips_entry(self) -> None:
+        import math
+        d = self._good_dict()
+        d["entries"].append({"features": {"atr": math.inf}, "label": 1})
+        buf = ExperienceReplayBuffer.from_dict(d)
+        self.assertEqual(len(buf), 2)
+
+    def test_negative_sample_weight_defaults_to_one(self) -> None:
+        d = self._good_dict()
+        d["entries"][0]["sample_weight"] = -1.0
+        buf = ExperienceReplayBuffer.from_dict(d)
+        self.assertEqual(len(buf), 2)
+        self.assertEqual(buf._buffer[0].sample_weight, 1.0)
+
+    def test_nan_sample_weight_defaults_to_one(self) -> None:
+        import math
+        d = self._good_dict()
+        d["entries"][0]["sample_weight"] = math.nan
+        buf = ExperienceReplayBuffer.from_dict(d)
+        self.assertEqual(len(buf), 2)
+        self.assertEqual(buf._buffer[0].sample_weight, 1.0)
+
+    def test_completely_empty_dict_returns_empty_buffer(self) -> None:
+        buf = ExperienceReplayBuffer.from_dict({})
+        self.assertEqual(len(buf), 0)
+        self.assertEqual(buf.capacity, 10_000)
+
+    def test_load_from_corrupt_json_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "corrupt.json"
+            path.write_text("{invalid json!!!", encoding="utf-8")
+            with self.assertRaises(Exception):
+                ExperienceReplayBuffer.load(path)
 
 
 def _write_ticks_csv(path: Path, candles: int, symbol: str = "R_75") -> None:
