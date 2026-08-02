@@ -362,7 +362,7 @@ TRADING_MODE_PRESETS = {
         risk_max_volatility_z=3.0,
         model_decision_threshold=0.50,
         confidence_relaxation=0.10,
-        symbol_min_history_candles=30,
+        symbol_min_history_candles=20,
         symbol_min_primary_reward_risk=2.0,
         execution_mode="swing",
         swing_execution_timeframe_sec=900,
@@ -1634,6 +1634,20 @@ def analyze_live_snapshot(
             higher_timeframe_candles=confirmation_candles,
             trading_mode=mode,
         )
+    # ── Feed replay buffer from live analysis ──────────────────────
+    # Every snapshot evaluation produces features and a prediction.
+    # We store these in the replay buffer so the model can learn from
+    # live market data — not just backtest/paper outcomes.
+    # Label: 1 if model predicts up (>0.5), 0 if down (<=0.5).
+    # This is self-supervised: the model learns from its own predictions
+    # until real trade outcomes are available via missed-trade resolution.
+    if primary_candles:
+        try:
+            _live_label = 1 if model_long_probability and model_long_probability > 0.5 else 0
+            decision_engine.model.replay_buffer.add(dict(feature_snapshot.features), _live_label)
+        except Exception:
+            pass  # best-effort — never crash the snapshot
+
     # Auto-save engine state to disk (throttled to every N snapshots)
     _maybe_save_engine_state(f"{symbol}_{mode}", decision_engine)
     if report.signal is None:
