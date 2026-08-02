@@ -20,7 +20,8 @@ from synthetic_trader.strategy.top_down_bias import infer_top_down_bias
 from synthetic_trader.strategy.regime_models import regime_model
 import time as _time
 
-from synthetic_trader.strategy.volatility_harvesting import VolatilityHarvester
+# Sniper-only mode: VolatilityHarvester removed.
+# The engine focuses exclusively on structural analysis for swing trades.
 from synthetic_trader.models.regime_detector import RegimeShiftDetector, MarketState
 
 
@@ -185,7 +186,9 @@ class DecisionEngine:
         self.model = model or OnlineLogisticModel(config.model)
         self.calibration = CalibrationState()
         self.regime_detector = RegimeShiftDetector()
-        self.volatility_harvester = VolatilityHarvester()
+        # Sniper-only mode: VolatilityHarvester removed.
+        # The engine focuses exclusively on structural analysis for
+        # 4-6 hour swing trades.
         self._trading_mode = "intraday"
         self._call_lifecycle: dict[str, str] = {}
         self._save_count: int = 0
@@ -196,16 +199,10 @@ class DecisionEngine:
         candles: list[Candle],
         higher_timeframe_candles: list[Candle] | None = None,
         role_candles: dict[str, list[Candle]] | None = None,
-        trading_mode: str = "intraday",
+        trading_mode: str = "sniper",
     ) -> DecisionReport:
-        # Store trading mode for vol_harvest path activation
+        # Sniper-only mode: always use sniper presets
         self._trading_mode = trading_mode
-        # Activate harvest mode thresholds when in volatility_harvest mode;
-        # restore defaults otherwise so thresholds don't persist across switches.
-        if trading_mode == "volatility_harvest":
-            self.volatility_harvester.set_harvest_mode()
-        else:
-            self.volatility_harvester.set_default_mode()
 
         profile = self._profile(symbol)
         execution_candles = role_candles.get("execution", candles) if role_candles else candles
@@ -329,30 +326,10 @@ class DecisionEngine:
             confirmation.reason,
         )
 
-        # ── Volatility harvesting path ─────────────────────────────
-        # When GARCH detects an extreme z-score with high mean-revert
-        # probability, generate a mean-reversion trade exploiting the
-        # generator's variance scheduling (the ONE exploitable property).
-        # NOTE: Volatility harvesting BYPASSES the session filter — it
-        # explicitly exploits extreme moves that happen regardless of hour.
-        atr_14 = features.get("atr_14", 0.0)
-        vol_harvest_signal = self.volatility_harvester.evaluate(
-            features=features,
-            current_price=features.get("close", 0.0),
-            atr_14=atr_14,
-        )
-        if vol_harvest_signal is not None:
-            vol_signal = self.volatility_harvester.to_trade_signal(
-                signal=vol_harvest_signal,
-                symbol=symbol,
-                min_confidence=min_confidence,
-                position_scale=position_scale,
-                snapshot=snapshot,
-                model_version=self.model.version,
-            )
-            return DecisionReport(vol_signal, vol_signal.rationale)
-
-        # ── Formal setup check (used by session filter override) ──────
+        # ── Formal setup check ──────────────────────────────────────
+        # Sniper-only mode: volatility harvesting path removed.
+        # The engine focuses exclusively on structural analysis for
+        # 4-6 hour swing trades.
         has_formal_setup = (
             setup.state != "none"
             and confirmation.state in {"confirmed", "actionable"}
@@ -374,64 +351,16 @@ class DecisionEngine:
         # session_vol_rank in the feature snapshot.  We use those
         # features directly instead of maintaining a separate filter
         # instance, avoiding state duplication and inconsistency.
+        # ── Sniper-only mode: session filter DISABLED ────────────
+        # The session filter blocked signals during "low-volatility hours"
+        # which confused the sniper mode — a 4-6 hour swing trade doesn't
+        # care about intraday session timing.  Removed entirely so the
+        # engine focuses on structural quality instead of time-of-day.
         session_quality = features.get("session_quality", 0.5)
         session_vol_rank = features.get("session_vol_rank", 0.5)
         session_is_peak = features.get("session_is_peak", 0.0) == 1.0
         session_observations = features.get("session_total_observations", 0.0)
-        min_quality = self.config.risk.min_session_quality
         warmup = self.config.risk.session_filter_warmup
-
-        STRONG_SIGNAL_CONFIDENCE_THRESHOLD = 0.75
-        session_blocked = (
-            session_observations >= warmup
-            and session_quality < min_quality
-        )
-        strong_signal_override = (
-            session_blocked
-            and confidence >= STRONG_SIGNAL_CONFIDENCE_THRESHOLD
-            and has_formal_setup
-        )
-        if strong_signal_override:
-            logging.info(
-                "[%s] session filter bypassed — strong signal override: "
-                "confidence=%.3f >= %.3f, formal setup confirmed, "
-                "session quality %.2f < %.2f",
-                symbol, confidence, STRONG_SIGNAL_CONFIDENCE_THRESHOLD,
-                session_quality, min_quality,
-            )
-            rationale += (
-                f"⚠ strong signal override: confidence {confidence:.3f} >= 0.75, "
-                f"formal setup confirmed — session filter bypassed "
-                f"(quality {session_quality:.2f} < {min_quality:.2f})",
-            )
-
-        # During warmup, don't block — we need data to learn.
-        # When blocked (and not overridden), return a WAIT signal (not None)
-        # so the frontend shows the actual reason instead of a generic
-        # "Setup still forming".
-        if session_blocked and not strong_signal_override:
-            wait_signal = TradeSignal(
-                symbol=symbol,
-                direction=direction,
-                confidence=confidence,
-                min_confidence=min_confidence,
-                entry=0.0,
-                stop_loss=0.0,
-                take_profit=0.0,
-                horizon_sec=0,
-                snapshot=snapshot,
-                rationale=(f"session filter: quality {session_quality:.2f} < {min_quality:.2f} — low-volatility hour (rank={session_vol_rank:.2f}, peak={session_is_peak})",),
-                model_version=self.model.version,
-                execution_stop=0.0,
-                thesis_invalidation=None,
-                primary_target=0.0,
-                extended_target=0.0,
-                hold_horizon_minutes=0,
-                execution_trigger_type="session_filter_block",
-                signal_strength="wait",
-                position_scale=position_scale,
-            )
-            return DecisionReport(wait_signal, wait_signal.rationale)
 
         # ── Mean-reversion scalp path for range regimes ──────────────
         # When the market is range-bound (Hurst < 0.4) and the regime model

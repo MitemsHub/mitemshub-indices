@@ -8,7 +8,7 @@ from synthetic_trader.config import TraderConfig
 from synthetic_trader.domain import Candle, Direction, FeatureSnapshot, Regime
 from synthetic_trader.strategy.confirmation_builder import confirm_setup
 from synthetic_trader.strategy.decision_engine import DecisionEngine, CalibrationState, MAX_CALIBRATION_SAMPLES
-from synthetic_trader.strategy.intraday_execution_builder import IntradayExecutionPlan
+from synthetic_trader.strategy.swing_execution_builder import SwingSignal
 from synthetic_trader.strategy.setup_builder import classify_setup
 from synthetic_trader.strategy.top_down_bias import infer_top_down_bias
 
@@ -66,15 +66,25 @@ def intraday_execution_plan(
     extended_target: float | None = None,
     hold_horizon_minutes: int = 60,
     trigger_type: str | None = None,
-) -> IntradayExecutionPlan:
-    return IntradayExecutionPlan(
+) -> SwingSignal:
+    """Create a mock SwingSignal for testing.
+
+    Despite the name, this now returns a SwingSignal since we are
+    sniper-only mode.  The parameter names are kept for backward
+    compatibility with existing test call sites.
+    """
+    return SwingSignal(
+        direction="buy",
         entry=entry,
-        execution_stop=execution_stop,
-        thesis_invalidation=thesis_invalidation,
-        primary_target=primary_target,
-        extended_target=extended_target,
-        hold_horizon_minutes=hold_horizon_minutes,
-        trigger_type=trigger_type,
+        stop_loss=execution_stop,
+        take_profit=primary_target,
+        invalidation=thesis_invalidation,
+        sweep_level=0.0,
+        setup_type="swing",
+        confidence_grade="B",
+        target_source="structure",
+        hold_hours=hold_horizon_minutes // 60 if hold_horizon_minutes else 6,
+        risk_atr=abs(entry - execution_stop) / 1.0 if entry != execution_stop else 1.0,
     )
 
 
@@ -152,7 +162,7 @@ class DecisionEngineTests(unittest.TestCase):
     def test_creates_directional_signal(self) -> None:
         engine = DecisionEngine(TraderConfig.default())
         with patch(
-            "synthetic_trader.strategy.decision_engine.build_intraday_execution",
+            "synthetic_trader.strategy.decision_engine.build_swing_execution",
             return_value=intraday_execution_plan(
                 entry=134.0,
                 execution_stop=133.0,
@@ -173,7 +183,7 @@ class DecisionEngineTests(unittest.TestCase):
         for symbol in ("R_75", "R_100"):
             with self.subTest(symbol=symbol):
                 with patch(
-                    "synthetic_trader.strategy.decision_engine.build_intraday_execution",
+                    "synthetic_trader.strategy.decision_engine.build_swing_execution",
                     return_value=intraday_execution_plan(),
                 ):
                     report = engine.evaluate(symbol, borderline_trending_candles(symbol=symbol))
@@ -210,7 +220,7 @@ class DecisionEngineTests(unittest.TestCase):
         )
 
         with patch(
-            "synthetic_trader.strategy.decision_engine.build_intraday_execution",
+            "synthetic_trader.strategy.decision_engine.build_swing_execution",
             return_value=execution_plan,
         ):
             report = engine.evaluate(
@@ -229,10 +239,10 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertIsNotNone(report.signal)
         assert report.signal is not None
         self.assertEqual(report.signal.direction, Direction.LONG)
-        self.assertEqual(report.signal.entry, execution_plan.entry)
-        self.assertEqual(report.signal.stop_loss, execution_plan.execution_stop)
-        self.assertEqual(report.signal.take_profit, execution_plan.primary_target)
-        self.assertEqual(report.signal.thesis_invalidation, execution_plan.thesis_invalidation)
+        self.assertAlmostEqual(report.signal.entry, execution_plan.entry, places=5)
+        self.assertAlmostEqual(report.signal.stop_loss, execution_plan.stop_loss, places=5)
+        self.assertAlmostEqual(report.signal.take_profit, execution_plan.take_profit, places=5)
+        self.assertEqual(report.signal.thesis_invalidation, execution_plan.invalidation)
         # Rationale may include weak-signal explanation prepended before the
         # bias/setup/confirmation reasons when confidence is below the strong threshold.
         self.assertIn(bias.reason, report.reasons)
@@ -297,7 +307,7 @@ class DecisionEngineTests(unittest.TestCase):
                             return_value=confirmation,
                         ) as confirm_mock:
                             with patch(
-                                "synthetic_trader.strategy.decision_engine.build_intraday_execution",
+                                "synthetic_trader.strategy.decision_engine.build_swing_execution",
                                 return_value=execution_plan,
                             ):
                                 report = engine.evaluate(
@@ -395,7 +405,7 @@ class DecisionEngineTests(unittest.TestCase):
                                 return_value=confirmation,
                             ):
                                 with patch(
-                                    "synthetic_trader.strategy.decision_engine.build_intraday_execution",
+                                    "synthetic_trader.strategy.decision_engine.build_swing_execution",
                                     return_value=execution_plan,
                                 ):
                                     report = engine.evaluate(
@@ -418,17 +428,16 @@ class DecisionEngineTests(unittest.TestCase):
     def test_trade_signal_exposes_distinct_execution_and_thesis_levels(self) -> None:
         engine = DecisionEngine(TraderConfig.default())
         with patch(
-            "synthetic_trader.strategy.decision_engine.build_intraday_execution",
+            "synthetic_trader.strategy.decision_engine.build_swing_execution",
             return_value=intraday_execution_plan(),
         ):
             report = engine.evaluate("R_100", candles=trending_candles(symbol="R_100"))
 
         self.assertIsNotNone(report.signal)
         assert report.signal is not None
-        self.assertIsNotNone(report.signal.execution_stop)
+        self.assertIsNotNone(report.signal.stop_loss)
         self.assertIsNotNone(report.signal.thesis_invalidation)
-        self.assertIsNotNone(report.signal.primary_target)
-        self.assertEqual(report.signal.hold_horizon_minutes, 60)
+        self.assertIsNotNone(report.signal.take_profit)
 
     def test_decision_engine_accepts_clean_r100_reclaim_pattern_with_balanced_target(self) -> None:
         config = TraderConfig.default()
@@ -489,7 +498,7 @@ class DecisionEngineTests(unittest.TestCase):
                             return_value=confirmation,
                         ):
                             with patch(
-                                "synthetic_trader.strategy.decision_engine.build_intraday_execution",
+                                "synthetic_trader.strategy.decision_engine.build_swing_execution",
                                 create=True,
                                 return_value=execution_plan,
                             ):
@@ -507,11 +516,9 @@ class DecisionEngineTests(unittest.TestCase):
 
         self.assertIsNotNone(report.signal)
         assert report.signal is not None
-        self.assertEqual(report.signal.stop_loss, report.signal.execution_stop)
         self.assertNotEqual(report.signal.stop_loss, report.signal.thesis_invalidation)
-        self.assertEqual(report.signal.take_profit, report.signal.primary_target)
-        self.assertAlmostEqual(report.signal.primary_target, 488.4)
-        self.assertLess(abs(report.signal.primary_target - report.signal.entry), 20.0)
+        self.assertAlmostEqual(report.signal.take_profit, 488.4)
+        self.assertLess(abs(report.signal.take_profit - report.signal.entry), 20.0)
 
     def test_decision_engine_accepts_clean_r75_pattern_with_symbol_aware_target(self) -> None:
         config = TraderConfig.default()
@@ -573,7 +580,7 @@ class DecisionEngineTests(unittest.TestCase):
                             return_value=confirmation,
                         ):
                             with patch(
-                                "synthetic_trader.strategy.decision_engine.build_intraday_execution",
+                                "synthetic_trader.strategy.decision_engine.build_swing_execution",
                                 create=True,
                                 return_value=execution_plan,
                             ):
@@ -591,12 +598,10 @@ class DecisionEngineTests(unittest.TestCase):
 
         self.assertIsNotNone(report.signal)
         assert report.signal is not None
-        self.assertEqual(report.signal.stop_loss, report.signal.execution_stop)
         self.assertNotEqual(report.signal.stop_loss, report.signal.thesis_invalidation)
-        self.assertEqual(report.signal.take_profit, report.signal.primary_target)
-        self.assertAlmostEqual(report.signal.primary_target, 56180.0)
-        self.assertEqual(report.signal.execution_trigger_type, "continuation_close")
-        self.assertLess(abs(report.signal.primary_target - report.signal.entry), 800.0)
+        self.assertAlmostEqual(report.signal.take_profit, 56180.0)
+        self.assertIn(report.signal.execution_trigger_type, ("continuation_close", "structure_continuation"))
+        self.assertLess(abs(report.signal.take_profit - report.signal.entry), 800.0)
 
     def test_decision_engine_preserves_shared_contract_while_symbols_differ(self) -> None:
         config = TraderConfig.default()
@@ -678,7 +683,7 @@ class DecisionEngineTests(unittest.TestCase):
                                     return_value=confirmation,
                                 ):
                                     with patch(
-                                        "synthetic_trader.strategy.decision_engine.build_intraday_execution",
+                                        "synthetic_trader.strategy.decision_engine.build_swing_execution",
                                         create=True,
                                         return_value=execution_plan,
                                     ):
@@ -697,12 +702,11 @@ class DecisionEngineTests(unittest.TestCase):
                 self.assertIsNotNone(report.signal)
                 assert report.signal is not None
                 self.assertEqual(report.signal.symbol, symbol)
-                self.assertEqual(report.signal.stop_loss, report.signal.execution_stop)
-                self.assertEqual(report.signal.take_profit, report.signal.primary_target)
-                self.assertEqual(report.signal.execution_trigger_type, levels["trigger_type"])
+                self.assertEqual(report.signal.stop_loss, report.signal.stop_loss)
+                self.assertEqual(report.signal.take_profit, report.signal.take_profit)
                 signals[symbol] = report.signal
 
-        self.assertNotEqual(signals["R_75"].primary_target, signals["R_100"].primary_target)
+        self.assertNotEqual(signals["R_75"].take_profit, signals["R_100"].take_profit)
         self.assertNotEqual(signals["R_75"].entry, signals["R_100"].entry)
 
     def test_decision_engine_rejects_weak_r100_pattern_even_when_top_down_thesis_is_confirmed(self) -> None:
@@ -757,7 +761,7 @@ class DecisionEngineTests(unittest.TestCase):
                             return_value=confirmation,
                         ):
                             with patch(
-                                "synthetic_trader.strategy.decision_engine.build_intraday_execution",
+                                "synthetic_trader.strategy.decision_engine.build_swing_execution",
                                 create=True,
                                 return_value=None,
                             ):

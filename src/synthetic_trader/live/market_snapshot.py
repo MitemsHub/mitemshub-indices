@@ -88,48 +88,12 @@ SNIPER_GUARDIAN_THRESHOLDS = GuardianThresholds(
     confirmed_lock_ticks_low=360,
 )
 
-ACTIVE_TRADER_GUARDIAN_THRESHOLDS = GuardianThresholds(
-    # Active trader mode uses the same improvements as sniper mode:
-    # wider excursion tolerance and trailing stop protection.
-    # On volatile synthetic indices, wicks routinely push 50-60% into
-    # the stop distance before reverting — this is NORMAL price action.
-    max_arming_ticks=16,
-    max_confirmation_window_ticks=10,
-    weakening_excursion_ratio=0.65,   # was 0.45 — tolerate normal wicks
-    max_adverse_excursion_ratio=0.95,
-    max_entry_drift_ratio=1.0,
-    microstructure_window_ticks=8,
-    min_persistence_ticks=3,
-    min_impulse_ratio=0.08,
-    max_pullback_ratio=0.40,         # was 0.32 — give trades room to breathe
-    rollover_warning_ratio=0.35,      # was 0.28 — normal pullbacks shouldn't degrade
-    rollover_invalidation_ratio=0.50, # was 0.45 — only invalidate on deep pullbacks
-    adverse_cluster_window_ticks=6,
-    max_adverse_cluster_count=3,
-)
-
-# Volatility Harvesting mode: fast reversion trades exploiting variance clustering.
-# Tighter arming window since these are quick mean-reversion entries.
-VOLATILITY_HARVEST_GUARDIAN_THRESHOLDS = GuardianThresholds(
-    max_arming_ticks=8,
-    max_confirmation_window_ticks=6,
-    weakening_excursion_ratio=0.50,
-    max_adverse_excursion_ratio=0.90,
-    max_entry_drift_ratio=1.0,
-    microstructure_window_ticks=6,
-    min_persistence_ticks=2,
-    min_impulse_ratio=0.10,
-    max_pullback_ratio=0.25,
-    rollover_warning_ratio=0.20,
-    rollover_invalidation_ratio=0.35,
-    adverse_cluster_window_ticks=4,
-    max_adverse_cluster_count=2,
-)
-
+# ── Sniper-only mode ───────────────────────────────────────────
+# Active trader and volatility harvest modes removed.
+# The system now runs exclusively in sniper mode for 4-6 hour
+# swing trades.  All guardian thresholds use SNIPER only.
 GUARDIAN_PRESETS = {
     "sniper": SNIPER_GUARDIAN_THRESHOLDS,
-    "active_trader": ACTIVE_TRADER_GUARDIAN_THRESHOLDS,
-    "volatility_harvest": VOLATILITY_HARVEST_GUARDIAN_THRESHOLDS,
 }
 
 DEFAULT_GUARDIAN_THRESHOLDS = SNIPER_GUARDIAN_THRESHOLDS
@@ -484,9 +448,9 @@ def build_mode_config(base: TraderConfig, preset: TradingModePreset) -> TraderCo
 def resolve_trading_mode(
     trading_mode: str,
 ) -> tuple[TraderConfig, GuardianThresholds, TradingModePreset]:
-    mode = trading_mode if trading_mode in TRADING_MODE_PRESETS else "sniper"
-    preset = TRADING_MODE_PRESETS[mode]
-    return build_mode_config(TraderConfig.default(), preset), GUARDIAN_PRESETS[mode], preset
+    # Sniper-only mode: always use sniper preset regardless of input.
+    preset = TRADING_MODE_PRESETS["sniper"]
+    return build_mode_config(TraderConfig.default(), preset), GUARDIAN_PRESETS["sniper"], preset
 
 
 def _required_snapshot_history_ticks(
