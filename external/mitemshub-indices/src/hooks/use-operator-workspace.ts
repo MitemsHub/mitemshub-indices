@@ -417,6 +417,34 @@ export function useOperatorWorkspace() {
             ),
           );
 
+          // ── Auto-record signal for feedback tracking ──────────────
+          // When a valid signal is generated, automatically record it
+          // so the user can provide feedback (good/bad) and the system
+          // can track whether TP or SL was hit.
+          if (
+            normalizedPayload.trade_status === "valid" &&
+            normalizedPayload.entry != null &&
+            normalizedPayload.stop_loss != null &&
+            normalizedPayload.take_profit != null
+          ) {
+            void fetch("/api/feedback", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                action: "record_signal",
+                symbol: normalizedPayload.symbol,
+                direction: normalizedPayload.direction_bias ?? (normalizedPayload.call === "buy_candidate" ? "buy" : "sell"),
+                generated_at: normalizedPayload.generated_at,
+                entry: normalizedPayload.entry,
+                stop_loss: normalizedPayload.stop_loss,
+                take_profit: normalizedPayload.take_profit,
+                confidence: normalizedPayload.confidence ?? 0.5,
+                regime: normalizedPayload.regime ?? "unknown",
+                signal_strength: normalizedPayload.signal_strength ?? "weak_buy",
+              }),
+            }).catch(() => {}); // fire-and-forget
+          }
+
           return;
         }
       }
@@ -626,6 +654,25 @@ export function useOperatorWorkspace() {
             execution_mode: executionMode,
             mt5_ticket: executionMode === "live_mt5" ? Number(result.position_id) : null,
           });
+
+          // ── Record execution in feedback tracker ───────────────
+          // Mark the signal as "executed" so the outcome resolver
+          // can track whether TP or SL was hit and feed it into
+          // the calibration buffer for genuine learning.
+          const execSignalId = `${currentCall.symbol}_${currentCall.generated_at.replace(/:/g, "-").replace(/\./g, "-")}`;
+          void fetch("/api/feedback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "record_outcome",
+              signal_id: execSignalId,
+              outcome: "executed",
+              outcome_price: result.entry_price ?? entry,
+              pnl_pips: 0,
+              r_multiple: 0,
+            }),
+          }).catch(() => {}); // fire-and-forget
+
           // Show success toast
           const successMsg = executionMode === "live_mt5"
             ? `Trade executed on MT5 — Position #${result.position_id}`

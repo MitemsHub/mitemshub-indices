@@ -46,27 +46,28 @@ def _bias_direction_from_candles(candles: list[Candle]) -> str:
     atr_val = atr(candles, min(14, len(candles)))
     if atr_val <= 0:
         # Fallback: use simple close-to-close direction when ATR is unavailable
-        if pct_change > 0.001:
+        # Use 0.15% minimum to avoid noise-driven flips on volatile synthetics
+        if pct_change > 0.0015:
             return "bullish"
-        if pct_change < -0.001:
+        if pct_change < -0.0015:
             return "bearish"
         return "neutral"
     atr_pct = atr_val / end_price if end_price > 0 else 0
 
-    # Use a lower threshold (0.15) so the engine can detect bias earlier.
-    # The old threshold (0.5) required a move > half an ATR bar which
-    # was almost impossible with only 3-5 4H candles.
-    if pct_change > atr_pct * 0.15:
+    # Use 0.25x ATR threshold — requires a meaningful move beyond noise.
+    # The old 0.15 threshold was too sensitive and caused direction flips
+    # on every refresh when price oscillated around the threshold.
+    if pct_change > atr_pct * 0.25:
         return "bullish"
-    if pct_change < -atr_pct * 0.15:
+    if pct_change < -atr_pct * 0.25:
         return "bearish"
-    # Secondary check: consecutive close direction (last 3 candles)
+    # Secondary check: ALL of the last 3 candles must agree (not 2 of 3)
     if n >= 3:
         last3 = closes[-3:]
-        ups = sum(1 for i in range(1, len(last3)) if last3[i] > last3[i-1])
-        if ups == 2:
+        ups = sum(1 for i in range(1, len(last3)) if last3[i] > last3[i - 1])
+        if ups == 2 and all(last3[i] > last3[i - 1] for i in range(1, len(last3))):
             return "bullish"
-        if ups == 0:
+        if ups == 0 and all(last3[i] < last3[i - 1] for i in range(1, len(last3))):
             return "bearish"
     return "neutral"
 

@@ -51,12 +51,10 @@ DEFAULT_TICK_HISTORY_PAGE_SIZE = 5_000
 MAX_BUFFER_TICKS = 10_000
 
 # --- Trading mode presets ---------------------------------------------------
-# Sniper mode is the original conservative configuration. Active Trader mode
-# loosens the gates so the brain can surface more frequent, well-calculated
-# opportunities instead of waiting for a near-perfect "clean" setup.
+# Sniper mode generates 4-6 hour swing trade plans.
 SNIPER_GUARDIAN_THRESHOLDS = GuardianThresholds(
     # Sniper mode is a 4-6 HOUR swing trade.  The guardian must operate
-    # on a completely different timescale than active_trader.
+    # on a swing-trade timescale.
     #
     # Key design principles:
     # 1. After confirmation, the guardian only checks thesis invalidation
@@ -214,6 +212,171 @@ def _get_atr_14(features: dict[str, float]) -> float:
     return features.get("atr_14", 1.0)
 
 
+# ── Outcome-based replay buffer labeling ────────────────────────
+# This replaces the self-reinforcing loop where the model labeled
+# data based on its own prediction (prob > 0.5 → label=1).
+#
+# The new approach uses ACTUAL OUTCOMES:
+# 1. User feedback from the signal feedback tracker (best signal)
+# 2. Missed trade tracker resolution (auto-resolved after 6 hours)
+# 3. Delayed price movement check (1 ATR in 6 hours)
+#
+# This ensures the model learns from REAL market behavior,
+# not from its own biases.
+
+# Import here to avoid circular imports at module level
+from synthetic_trader.journal.signal_feedback import (
+    SignalFeedbackTracker,
+    make_signal_id,
+)
+
+# Module-level signal feedback tracker
+_signal_feedback_tracker: SignalFeedbackTracker | None = None
+
+
+def _get_signal_feedback_tracker() -> SignalFeedbackTracker:
+    """Get or create the signal feedback tracker singleton."""
+    global _signal_feedback_tracker
+    if _signal_feedback_tracker is None:
+        from pathlib import Path
+        _signal_feedback_tracker = SignalFeedbackTracker(
+            feedback_path=Path("data/signal_feedback.jsonl"),
+            outcomes_path=Path("data/signal_outcomes.jsonl"),
+            resolution_minutes=360,  # 6 hours
+        )
+    return _signal_feedback_tracker
+
+
+def _compute_outcome_label(
+    *,
+    symbol: str,
+    model_long_probability: float | None,
+    features: dict[str, float],
+    current_close: float | None,
+) -> int | None:
+    """Compute an outcome-based label for the replay buffer.
+
+    Returns 1 (bullish) or 0 (bearish) based on ACTUAL market behavior,
+    or None if we can't determine an outcome yet.
+
+    Priority:
+    1. Check signal feedback tracker for user-confirmed outcomes
+    2. Check missed trade tracker for auto-resolved outcomes
+    3. Use delayed price movement (1 ATR in 6 hours)
+    """
+    if model_long_probability is None or current_close is None:
+        return None
+
+    atr = _get_atr_14(features)
+    if atr <= 0:
+        return None
+
+    # ── Priority 1: Signal feedback tracker ───────────────────────
+    # Check if we have a recent signal with user feedback
+    tracker = _get_signal_feedback_tracker()
+    recent_signals = tracker.get_all_signals(limit=10)
+
+    for signal in recent_signals:
+        if signal.symbol != symbol:
+            continue
+        if signal.outcome is None:
+            continue
+
+        # Use the outcome if it's recent (within 6 hours)
+        from datetime import datetime
+        try:
+            gen_dt = datetime.fromisoformat(signal.generated_at.replace("Z", "+00:00"))
+            elapsed_hours = (time.time() - gen_dt.timestamp()) / 3600
+            if elapsed_hours > 6:
+                continue  # Too old
+        except (ValueError, TypeError):
+            continue
+
+        # Use user feedback if available, otherwise outcome
+        if signal.user_feedback == "good" and signal.outcome in ("tp_hit", "manual_win"):
+            return 1
+        if signal.user_feedback == "bad" and signal.outcome in ("sl_hit", "manual_loss"):
+            return 0
+        if signal.outcome in ("tp_hit", "manual_win"):
+            return 1
+        if signal.outcome in ("sl_hit", "manual_loss"):
+            return 0
+        # Expired — use pnl direction
+        if signal.pnl_pips is not None:
+            return 1 if signal.pnl_pips > 0 else 0
+
+    # ── Priority 2: Missed trade tracker ──────────────────────────
+    # Check for recently resolved missed trades
+    outcomes_path = Path("data/missed_trade_outcomes.jsonl")
+    if outcomes_path.exists():
+        try:
+            import json
+            for line in outcomes_path.read_text(encoding="utf-8").splitlines()[-20:]:
+                if not line.strip():
+                    continue
+                outcome = json.loads(line)
+                if outcome.get("symbol") != symbol:
+                    continue
+                resolved_at = outcome.get("resolved_at", 0)
+                if time.time() - resolved_at > 3600:  # 1 hour max
+                    continue
+                # outcome=1 means missed opportunity (price moved in predicted direction)
+                # outcome=0 means correctly stayed out
+                return outcome.get("outcome", 0)
+        except Exception:
+            pass
+
+    # ── Priority 3: Delayed price movement ────────────────────────
+    # If no feedback or missed trade data, use delayed price movement
+    # Check if price moved 1 ATR in the predicted direction recently
+    ticks = _load_csv_ticks(symbol, max_ticks=1000)
+    if not ticks or len(ticks) < 100:
+        return None
+
+    # Use the last 6 hours of ticks
+    now = time.time()
+    six_hours_ago = now - 6 * 3600
+    recent_ticks = [t for t in ticks if t.epoch >= six_hours_ago]
+    if len(recent_ticks) < 50:
+        return None
+
+    # Calculate price movement
+    start_price = recent_ticks[0].price
+    end_price = recent_ticks[-1].price
+    max_price = max(t.price for t in recent_ticks)
+    min_price = min(t.price for t in recent_ticks)
+
+    # Determine direction based on model prediction
+    model_lean_long = model_long_probability > 0.5
+
+    if model_lean_long:
+        # Model predicted bullish — did price go up by 1 ATR?
+        max_up = max_price - start_price
+        if max_up >= atr:
+            return 1  # Model was right — price moved up
+        # Also check if price ended higher
+        if end_price > start_price and (end_price - start_price) >= atr * 0.5:
+            return 1
+    else:
+        # Model predicted bearish — did price go down by 1 ATR?
+        max_down = start_price - min_price
+        if max_down >= atr:
+            return 0  # Model was right — price moved down
+        # Also check if price ended lower
+        if end_price < start_price and (start_price - end_price) >= atr * 0.5:
+            return 0
+
+    # Price didn't move significantly — model was uncertain
+    # Use the direction of actual movement as the label
+    if end_price > start_price + atr * 0.25:
+        return 1  # Price moved up — bullish label
+    if end_price < start_price - atr * 0.25:
+        return 0  # Price moved down — bearish label
+
+    # No significant movement — skip this sample
+    return None
+
+
 def _maybe_record_missed_trade(
     *,
     symbol: str,
@@ -261,6 +424,52 @@ def _maybe_record_missed_trade(
     )
 
 
+def _maybe_resolve_feedback_outcomes(decision_engine: DecisionEngine) -> None:
+    """Resolve signal feedback outcomes and feed into calibration.
+
+    Reads the calibration_outcomes.jsonl file written by the Next.js API
+    and feeds each (prediction, label) pair into the decision engine's
+    calibration buffer. This closes the learning loop:
+    signal generated → user rates → outcome resolved → calibration updated.
+    """
+    outcomes_path = Path("data/calibration_outcomes.jsonl")
+    if not outcomes_path.exists():
+        return
+    try:
+        lines = outcomes_path.read_text(encoding="utf-8").splitlines()
+        fed = 0
+        new_lines = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                if record.get("fed_to_calibration"):
+                    new_lines.append(line)
+                    continue
+                prediction = record.get("prediction", 0.5)
+                label = record.get("label")
+                if label is None:
+                    new_lines.append(line)
+                    continue
+                decision_engine.update_calibration(float(prediction), int(label))
+                record["fed_to_calibration"] = True
+                record["fed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+                new_lines.append(json.dumps(record))
+                fed += 1
+            except (json.JSONDecodeError, KeyError, ValueError):
+                new_lines.append(line)
+                continue
+        if fed > 0:
+            outcomes_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            logging.info(
+                "[feedback] Fed %d resolved outcomes into calibration buffer",
+                fed,
+            )
+    except Exception as exc:
+        logging.debug("[feedback] Failed to resolve feedback outcomes: %s", exc)
+
+
 def _maybe_resolve_missed_trades(decision_engine: DecisionEngine) -> None:
     """Resolve pending missed trade records and feed into calibration.
 
@@ -274,6 +483,9 @@ def _maybe_resolve_missed_trades(decision_engine: DecisionEngine) -> None:
     if _missed_trade_tracker.pending_count == 0:
         return
     _last_missed_resolution_at = now
+
+    # Also resolve signal feedback outcomes and feed into calibration
+    _maybe_resolve_feedback_outcomes(decision_engine)
 
     def _price_lookup(symbol: str) -> list[tuple[float, float]]:
         ticks = _load_csv_ticks(symbol)
@@ -1575,13 +1787,27 @@ def analyze_live_snapshot(
     # Every snapshot evaluation produces features and a prediction.
     # We store these in the replay buffer so the model can learn from
     # live market data — not just backtest/paper outcomes.
-    # Label: 1 if model predicts up (>0.5), 0 if down (<=0.5).
-    # This is self-supervised: the model learns from its own predictions
-    # until real trade outcomes are available via missed-trade resolution.
+    #
+    # CRITICAL FIX: Previously used self-reinforcing labels where the
+    # model's own prediction determined the label (prob > 0.5 → label=1).
+    # This created a closed feedback loop that never improved.
+    #
+    # Now uses OUTCOME-BASED labels:
+    # 1. If we have a recent signal with user feedback → use that
+    # 2. If we have a resolved missed trade → use that outcome
+    # 3. Otherwise → use delayed price movement (1 ATR in 6 hours)
     if primary_candles:
         try:
-            _live_label = 1 if model_long_probability and model_long_probability > 0.5 else 0
-            decision_engine.model.replay_buffer.add(dict(feature_snapshot.features), _live_label)
+            _live_label = _compute_outcome_label(
+                symbol=symbol,
+                model_long_probability=model_long_probability,
+                features=dict(feature_snapshot.features),
+                current_close=current_close,
+            )
+            if _live_label is not None:
+                decision_engine.model.replay_buffer.add(
+                    dict(feature_snapshot.features), _live_label
+                )
         except Exception:
             pass  # best-effort — never crash the snapshot
 

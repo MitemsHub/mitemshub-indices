@@ -20,18 +20,19 @@ def classify_setup(*, bias: TopDownBias, setup_candles: list[Candle]) -> SetupDe
 
     # Determine direction from bias, or fall back to recent candle structure
     direction = bias.direction
-    if direction == "neutral" and len(setup_candles) >= 3:
-        # Infer direction from recent setup candle closes when bias is neutral.
-        # Use 2 of 5 (instead of 3 of 5) to be more responsive — synthetic
-        # indices oscillate frequently and waiting for 3/5 consensus means
-        # the setup is often already halfway through the move.
+    if direction == "neutral" and len(setup_candles) >= 5:
+        # Sniper-only mode: When 4H bias is neutral, require STRONGER
+        # evidence from setup candles before committing to a direction.
+        # Use 4 of 5 (not 2 of 5) to avoid noise-driven flips.
+        # A 4-6 hour swing trade should not flip on a single candle.
         closes = [c.close for c in setup_candles[-5:]]
-        if len(closes) >= 2:
-            ups = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i-1])
-            if ups >= 2:
-                direction = "bullish"
-            elif ups <= 1:
-                direction = "bearish"
+        ups = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i - 1])
+        downs = len(closes) - 1 - ups
+        if ups >= 4:
+            direction = "bullish"
+        elif downs >= 4:
+            direction = "bearish"
+        # Otherwise stay neutral — don't force a direction from noise
 
     state = "continuation" if direction in {"bullish", "bearish"} else "none"
     trade_direction = "buy" if direction == "bullish" else "sell"

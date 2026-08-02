@@ -38,7 +38,10 @@ def get_replay_buffer_stats(engine_root: str) -> dict:
 
     for symbol in ("r_75", "r_100"):
         # Model state is saved as {symbol}_sniper.json (sniper-only mode)
-        model_path = state_dir / f"{symbol}_sniper.json"
+        # Check both uppercase (R_75) and lowercase (r_75) variants
+        model_path_upper = state_dir / f"{symbol.upper()}_sniper.json"
+        model_path_lower = state_dir / f"{symbol}_sniper.json"
+        model_path = model_path_upper if model_path_upper.exists() else model_path_lower
         if not model_path.exists():
             stats[symbol] = None
             continue

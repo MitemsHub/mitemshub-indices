@@ -85,13 +85,10 @@ class GuardianContext:
     # Real ATR_14 from features — used for trailing stop calculations.
     # Avoids approximating ATR from stop_distance which is fragile.
     atr_14: float | None = None
-    # Trading mode: "sniper", "active_trader", or "volatility_harvest".
-    # Used to apply mode-specific guardian behavior:
-    #   - sniper: after confirmation, skip microstructure re-evaluation;
-    #     only check thesis invalidation (stop hit).  Swing trades target
-    #     4-6 hour holds so tick-level microstructure noise is irrelevant.
-    #   - active_trader/volatility_harvest: re-evaluate microstructure
-    #     on every tick as before.
+    # Trading mode (sniper only).
+    # After confirmation, skip microstructure re-evaluation;
+    # only check thesis invalidation (stop hit).  Swing trades target
+    # 4-6 hour holds so tick-level microstructure noise is irrelevant.
     trading_mode: str | None = None
 
 

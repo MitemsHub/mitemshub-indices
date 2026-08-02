@@ -348,9 +348,11 @@ export function PriceChart() {
   }, [isStreaming, reconnecting, prevConnectionLost]);
 
   // Filtered chart data based on selected symbol
+  // When showing a single symbol, only include data points where that symbol has a value
   const chartData = useMemo(() => {
     if (symbolFilter === "all") return data;
-    return data.map((d) => ({
+    const key = symbolFilter === "V75" ? "V75" : "V100";
+    return data.filter((d) => d[key] !== null).map((d) => ({
       ...d,
       V75: symbolFilter === "V75" ? d.V75 : null,
       V100: symbolFilter === "V100" ? d.V100 : null,

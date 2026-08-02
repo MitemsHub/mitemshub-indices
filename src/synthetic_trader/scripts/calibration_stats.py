@@ -25,7 +25,8 @@ def get_calibration_stats(engine_root: str) -> dict[str, object]:
         return result
 
     for state_file in sorted(state_dir.glob("*.json")):
-        if state_file.name == ".gitkeep":
+        # Skip .gitkeep and old active_trader mode files (system is sniper-only now)
+        if state_file.name == ".gitkeep" or "_active_trader" in state_file.name:
             continue
         try:
             data = json.loads(state_file.read_text(encoding="utf-8"))

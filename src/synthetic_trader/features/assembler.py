@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from synthetic_trader.domain import Candle, Regime, Tick, FeatureSnapshot
 from synthetic_trader.features.market_structure import market_structure_features
+from synthetic_trader.features.smc_enhanced import smc_features
 from synthetic_trader.features.regimes import classify_regime
 from synthetic_trader.features.tick_integration import compute_tick_flow_features
 from synthetic_trader.models.garch import EGARCHVarianceForecaster
@@ -77,6 +78,16 @@ def build_snapshot(
     structure = market_structure_features(candles)
     features = dict(base_features)
     features.update(structure)
+
+    # ── SMC institutional features ──────────────────────────────
+    # Bring smart-money-concepts intelligence into the feature vector.
+    # These complement the basic structure features with institutional-
+    # grade FVG, BOS/CHoCH, Order Blocks, and Liquidity analysis.
+    try:
+        smc_feats = smc_features(candles)
+        features.update(smc_feats)
+    except Exception:
+        pass  # SMC features are supplementary — never crash the pipeline
 
     # ── EGARCH variance forecast ──────────────────────────────────
     # Feed the latest log-return into the EGARCH forecaster to get

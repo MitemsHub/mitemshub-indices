@@ -1,6 +1,6 @@
 """Professional 5-layer stop loss system shared across execution builders.
 
-Both sniper (swing) and active_trader (intraday) modes use this module
+Sniper (swing) mode uses this module
 to calculate stop losses based on:
 
 Layer 0: ORDER BLOCK STOP — ICT/SMC institutional stop placement.
