@@ -426,32 +426,47 @@ def evaluate_signal_guardian(
         )
 
     if not _sniper_confirmed_and_stable:
-        rollover_state, rollover_reason = _detect_rollover(micro, thresholds)
-        if rollover_state == "failing":
-            # During confirmed lock, suppress 'failing' — the setup was
-            # validated and normal pullbacks shouldn't downgrade it.
-            if _in_confirmed_lock:
-                rollover_state = None
-                rollover_reason = None
-            else:
-                # ── Grace period: don't degrade during the first few ticks ──
-                in_grace_period = context.ticks_since_armed <= GRACE_PERIOD_TICKS
-                orderly_early_post_entry_move = (
-                    context.ticks_since_armed <= thresholds.min_persistence_ticks + 2
-                    and adverse_ratio < thresholds.rollover_warning_ratio
-                    and micro.pullback_ratio < thresholds.rollover_warning_ratio
-                    and micro.rejection_imbalance > 0
-                )
-                if in_grace_period or orderly_early_post_entry_move:
+        # For sniper mode, skip _detect_rollover entirely when the setup
+        # is still "actionable" (not yet confirmed).  The rollover check
+        # evaluates pullback_ratio against the stop distance, but on
+        # volatile synthetics the price often pulls back 50-70% of the
+        # stop distance WHILE the setup is forming — this is normal price
+        # action, not thesis deterioration.  The entry gate (below) is
+        # the proper gatekeeper for confirmation.
+        _skip_rollover_for_sniper = (
+            _is_sniper
+            and context.previous_guardian_state != "confirmed"
+        )
+        if not _skip_rollover_for_sniper:
+            rollover_state, rollover_reason = _detect_rollover(micro, thresholds)
+            if rollover_state == "failing":
+                # During confirmed lock, suppress 'failing' — the setup was
+                # validated and normal pullbacks shouldn't downgrade it.
+                if _in_confirmed_lock:
                     rollover_state = None
                     rollover_reason = None
-        if rollover_state:
-            return GuardianEvaluation(
-                rollover_state,
-                rollover_reason or "Setup is weakening.",
-            )
+                else:
+                    # ── Grace period: don't degrade during the first few ticks ──
+                    in_grace_period = context.ticks_since_armed <= GRACE_PERIOD_TICKS
+                    orderly_early_post_entry_move = (
+                        context.ticks_since_armed <= thresholds.min_persistence_ticks + 2
+                        and adverse_ratio < thresholds.rollover_warning_ratio
+                        and micro.pullback_ratio < thresholds.rollover_warning_ratio
+                        and micro.rejection_imbalance > 0
+                    )
+                    if in_grace_period or orderly_early_post_entry_move:
+                        rollover_state = None
+                        rollover_reason = None
+            if rollover_state:
+                return GuardianEvaluation(
+                    rollover_state,
+                    rollover_reason or "Setup is weakening.",
+                )
 
-        if adverse_ratio >= thresholds.weakening_excursion_ratio:
+        # For sniper mode during actionable phase, skip adverse excursion
+        # check — same logic as rollover skip above.  The price moving
+        # against the entry is normal on volatile synthetics.
+        if adverse_ratio >= thresholds.weakening_excursion_ratio and not _skip_rollover_for_sniper:
             # During confirmed lock, suppress 'failing' from adverse excursion
             # unless it's genuinely severe (approaching max).
             if _in_confirmed_lock and adverse_ratio < thresholds.max_adverse_excursion_ratio * 0.8:
