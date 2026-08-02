@@ -594,10 +594,14 @@ function PriceSummaryCard({
   label,
   current,
   previous,
+  highlighted = false,
+  onClick,
 }: {
   label: string;
   current: number | null;
   previous: number | null;
+  highlighted?: boolean;
+  onClick?: () => void;
 }) {
   const change =
     current !== null && previous !== null ? current - previous : null;
@@ -607,8 +611,17 @@ function PriceSummaryCard({
 
   return (
     <div
-      className="rounded-xl border border-[var(--line-subtle)] px-3 py-2"
-      style={{ background: "var(--bg-panel-muted)" }}
+      className={`rounded-xl border px-3 py-2 transition-all duration-150 cursor-pointer select-none
+        ${highlighted
+          ? "border-[var(--accent-ink)] bg-[var(--accent-ink-soft)]"
+          : "border-[var(--line-subtle)]"
+        }`
+      }
+      style={{ background: highlighted ? undefined : "var(--bg-panel-muted)" }}
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (onClick && (e.key === "Enter" || e.key === " ")) onClick(); }}
     >
       <p className="text-xs text-[var(--text-muted)]">{label}</p>
       <p className="font-mono text-lg font-semibold text-[var(--text-strong)]">
