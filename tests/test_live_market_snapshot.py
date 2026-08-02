@@ -975,6 +975,12 @@ class LiveSnapshotAnalysisTests(unittest.TestCase):
             def evaluate(self, symbol: str, candles, higher_timeframe_candles=None, **kwargs) -> DecisionReport:
                 return DecisionReport(signal=signal, reasons=("unit-test signal",))
 
+            def save_state(self, path: Path) -> None:
+                pass
+
+            def load_state(self, path: Path) -> bool:
+                return False
+
         with patch("synthetic_trader.live.market_snapshot.build_snapshot", return_value=signal_snapshot):
             with patch("synthetic_trader.live.market_snapshot.DecisionEngine", _FakeDecisionEngine):
                 with patch(
@@ -1032,6 +1038,12 @@ class LiveSnapshotAnalysisTests(unittest.TestCase):
 
             def evaluate(self, symbol: str, candles, higher_timeframe_candles=None, **kwargs) -> DecisionReport:
                 return DecisionReport(signal=signal, reasons=("unit-test signal",))
+
+            def save_state(self, path: Path) -> None:
+                pass
+
+            def load_state(self, path: Path) -> bool:
+                return False
 
         with patch("synthetic_trader.live.market_snapshot.build_snapshot", return_value=signal_snapshot):
             with patch("synthetic_trader.live.market_snapshot.DecisionEngine", _FakeDecisionEngine):
@@ -1105,6 +1117,12 @@ class LiveSnapshotAnalysisTests(unittest.TestCase):
             def evaluate(self, symbol: str, candles, higher_timeframe_candles=None, **kwargs) -> DecisionReport:
                 return DecisionReport(signal=signal, reasons=("unit-test signal",))
 
+            def save_state(self, path: Path) -> None:
+                pass
+
+            def load_state(self, path: Path) -> bool:
+                return False
+
         with patch("synthetic_trader.live.market_snapshot.build_snapshot", return_value=signal_snapshot):
             with patch("synthetic_trader.live.market_snapshot.DecisionEngine", _FakeDecisionEngine):
                 with patch(
@@ -1176,6 +1194,12 @@ class LiveSnapshotAnalysisTests(unittest.TestCase):
 
             def evaluate(self, symbol: str, candles, higher_timeframe_candles=None, **kwargs) -> DecisionReport:
                 return DecisionReport(signal=signal, reasons=("unit-test signal",))
+
+            def save_state(self, path: Path) -> None:
+                pass
+
+            def load_state(self, path: Path) -> bool:
+                return False
 
         with patch("synthetic_trader.live.market_snapshot.build_snapshot", return_value=signal_snapshot):
             with patch("synthetic_trader.live.market_snapshot.DecisionEngine", _FakeDecisionEngine):
@@ -1250,6 +1274,12 @@ class LiveSnapshotAnalysisTests(unittest.TestCase):
             def evaluate(self, symbol: str, candles, higher_timeframe_candles=None, **kwargs) -> DecisionReport:
                 return DecisionReport(signal=signal, reasons=("unit-test signal",))
 
+            def save_state(self, path: Path) -> None:
+                pass
+
+            def load_state(self, path: Path) -> bool:
+                return False
+
         with patch("synthetic_trader.live.market_snapshot.build_snapshot", return_value=signal_snapshot):
             with patch("synthetic_trader.live.market_snapshot.DecisionEngine", _FakeDecisionEngine):
                 with patch(
@@ -1316,6 +1346,12 @@ class LiveSnapshotAnalysisTests(unittest.TestCase):
             def evaluate(self, symbol: str, candles, higher_timeframe_candles=None, **kwargs) -> DecisionReport:
                 return DecisionReport(signal=signal, reasons=("unit-test signal",))
 
+            def save_state(self, path: Path) -> None:
+                pass
+
+            def load_state(self, path: Path) -> bool:
+                return False
+
         with patch("synthetic_trader.live.market_snapshot.build_snapshot", return_value=signal_snapshot):
             with patch("synthetic_trader.live.market_snapshot.DecisionEngine", _FakeDecisionEngine):
                 with patch(
@@ -1374,6 +1410,12 @@ class LiveSnapshotAnalysisTests(unittest.TestCase):
                         "model long probability 0.500",
                     ),
                 )
+
+            def save_state(self, path: Path) -> None:
+                pass
+
+            def load_state(self, path: Path) -> bool:
+                return False
 
         with patch("synthetic_trader.live.market_snapshot.build_snapshot", return_value=feature_snapshot):
             with patch("synthetic_trader.live.market_snapshot.DecisionEngine", _CapturingDecisionEngine):

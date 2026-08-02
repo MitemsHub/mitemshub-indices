@@ -202,17 +202,31 @@ def _get_persistent_decision_engine(
 
 
 def _maybe_save_engine_state(key: str, engine: DecisionEngine) -> None:
-    """Auto-save engine state to disk at most once every _MODEL_STATE_SAVE_INTERVAL snapshots.
+    """Auto-save engine state to disk.
+
+    Saves on the first snapshot of each process lifetime AND then every
+    _MODEL_STATE_SAVE_INTERVAL snapshots thereafter.
+
+    The first-save-per-process ensures that even short-lived subprocess
+    calls (which reset _snapshot_counter to 0 each time) still persist
+    at least one state file to disk, so the calibration-stats API has
+    data to return.
 
     The save is fire-and-forget — errors are logged but never raised.
     """
     global _snapshot_counter
-    _snapshot_counter[key] = _snapshot_counter.get(key, 0) + 1
-    if _snapshot_counter[key] % _MODEL_STATE_SAVE_INTERVAL != 0:
+    count = _snapshot_counter.get(key, 0) + 1
+    _snapshot_counter[key] = count
+    # Save on the very first snapshot (count == 1) OR every Nth snapshot.
+    is_first_snapshot = count == 1
+    is_interval = count % _MODEL_STATE_SAVE_INTERVAL == 0
+    if not is_first_snapshot and not is_interval:
         return
     state_path = _MODEL_STATE_DIR / f"{key}.json"
     try:
         engine.save_state(state_path)
+        if is_first_snapshot:
+            logging.info("[market_snapshot] saved engine state for %s (first snapshot of process)", key)
     except Exception as exc:
         logging.warning("[market_snapshot] failed to save engine state for %s: %s", key, exc)
 
