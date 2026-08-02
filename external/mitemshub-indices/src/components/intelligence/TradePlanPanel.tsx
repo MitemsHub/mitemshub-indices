@@ -96,6 +96,31 @@ export function TradePlanPanel({ plan }: TradePlanPanelProps) {
       <div className="flex items-center justify-between">
         <p className="utility-copy text-xs uppercase tracking-[0.2em]">Primary Trade Plan</p>
         <div className="flex items-center gap-2">
+          {/* BOS/CHoCH Signal Badges */}
+          {(plan.smc_bos_up ?? 0) > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] bg-[var(--accent-positive-soft)] text-[var(--accent-positive)] border border-[rgba(15,107,87,0.2)]">
+              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15" /></svg>
+              BOS ▲
+            </span>
+          )}
+          {(plan.smc_bos_down ?? 0) > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] bg-[var(--accent-danger-soft)] text-[var(--accent-danger)] border border-[rgba(196,68,58,0.2)]">
+              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+              BOS ▼
+            </span>
+          )}
+          {(plan.smc_choch_up ?? 0) > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] bg-[var(--accent-ink-soft)] text-[var(--accent-ink)] border border-[rgba(31,75,153,0.2)]">
+              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15" /></svg>
+              CHoCH ▲
+            </span>
+          )}
+          {(plan.smc_choch_down ?? 0) > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] bg-[var(--accent-warn-soft)] text-[var(--accent-warn)] border border-[rgba(184,134,11,0.2)]">
+              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+              CHoCH ▼
+            </span>
+          )}
           <CopyToMt5Button plan={plan} />
           <span className={`info-chip rounded-full px-3 py-1 text-sm font-medium ${plan.direction === "long" ? "text-[var(--accent-positive)] bg-[var(--accent-positive-soft)]" : "text-[var(--accent-danger)] bg-[var(--accent-danger-soft)]"}`}>
             {plan.direction.toUpperCase()}

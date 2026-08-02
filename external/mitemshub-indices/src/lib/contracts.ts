@@ -309,6 +309,17 @@ export const marketIntelligenceSchema = z.object({
   garch_sigma: z.number().nullable().optional(),
   garch_vol_regime: z.enum(["low", "normal", "high"]).nullable().optional(),
   garch_mean_revert_signal: z.number().nullable().optional(),
+  smc_fvg_count: z.number().optional(),
+  smc_ob_count: z.number().optional(),
+  smc_bullish_ob: z.number().optional(),
+  smc_bearish_ob: z.number().optional(),
+  smc_bullish_fvg: z.number().optional(),
+  smc_bearish_fvg: z.number().optional(),
+  smc_bos_up: z.number().optional(),
+  smc_bos_down: z.number().optional(),
+  smc_choch_up: z.number().optional(),
+  smc_choch_down: z.number().optional(),
+  smc_ob_strength: z.number().optional(),
   session_quality: z.number().nullable().optional(),
   session_is_peak: z.boolean().optional(),
   key_levels: z.object({
@@ -376,6 +387,10 @@ export const marketThesisSchema = z.object({
 export type MarketThesis = z.infer<typeof marketThesisSchema>;
 
 export const tradePlanSchema = z.object({
+  smc_bos_up: z.number().optional(),
+  smc_bos_down: z.number().optional(),
+  smc_choch_up: z.number().optional(),
+  smc_choch_down: z.number().optional(),
   direction: z.enum(["long", "short"]),
   entry: z.number(),
   executionStop: z.number(),

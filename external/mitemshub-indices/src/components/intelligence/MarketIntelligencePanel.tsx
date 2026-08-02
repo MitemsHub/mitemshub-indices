@@ -213,6 +213,22 @@ export function MarketIntelligencePanel({
         />
       </div>
 
+      {/* SMC Institutional Analysis — only shown when data is available */}
+      {(intelligence.smc_fvg_count ?? 0) > 0 || (intelligence.smc_ob_count ?? 0) > 0 || (intelligence.smc_bos_up ?? 0) > 0 || (intelligence.smc_bos_down ?? 0) > 0 || (intelligence.smc_choch_up ?? 0) > 0 || (intelligence.smc_choch_down ?? 0) > 0 ? (
+        <div className="mt-3 md:mt-4">
+          <DetailCard
+            title="SMC Institutional Analysis"
+            items={[
+              { label: "FVGs Detected", value: String(Math.round(intelligence.smc_fvg_count ?? 0)), hint: (intelligence.smc_bullish_fvg ?? 0) > 0 ? "Bullish FVG active" : (intelligence.smc_bearish_fvg ?? 0) > 0 ? "Bearish FVG active" : "No active FVGs" },
+              { label: "Order Blocks", value: String(Math.round(intelligence.smc_ob_count ?? 0)), hint: (intelligence.smc_bullish_ob ?? 0) > 0 ? "Bullish OB (demand)" : (intelligence.smc_bearish_ob ?? 0) > 0 ? "Bearish OB (supply)" : "No OBs detected" },
+              { label: "BOS", value: (intelligence.smc_bos_up ?? 0) > 0 ? "▲ Bullish" : (intelligence.smc_bos_down ?? 0) > 0 ? "▼ Bearish" : "None", hint: "Break of Structure" },
+              { label: "CHoCH", value: (intelligence.smc_choch_up ?? 0) > 0 ? "▲ Bullish" : (intelligence.smc_choch_down ?? 0) > 0 ? "▼ Bearish" : "None", hint: "Change of Character" },
+              { label: "OB Strength", value: `${((intelligence.smc_ob_strength ?? 0) * 100).toFixed(0)}%`, hint: (intelligence.smc_ob_strength ?? 0) > 0.7 ? "Strong institutional level" : (intelligence.smc_ob_strength ?? 0) > 0.4 ? "Moderate" : "Weak" },
+            ]}
+          />
+        </div>
+      ) : null}
+
       {/* GARCH Volatility Forecast — only shown when data is available */}
       {intelligence.garch_sigma != null && (
         <div className="mt-3 md:mt-4">

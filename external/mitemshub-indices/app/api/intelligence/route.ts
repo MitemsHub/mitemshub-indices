@@ -294,6 +294,17 @@ function buildMarketIntelligence(call: any, symbol: string) {
       garch_mean_revert_signal: features.garch_mean_revert_signal ?? null,
       session_quality: features.session_quality ?? null,
       session_is_peak: features.session_is_peak === 1.0,
+      smc_fvg_count: features.smc_fvg_count ?? 0,
+      smc_ob_count: features.smc_order_block_count ?? 0,
+      smc_bullish_ob: features.smc_ob_bullish ?? 0,
+      smc_bearish_ob: features.smc_ob_bearish ?? 0,
+      smc_bullish_fvg: features.smc_bullish_fvg ?? 0,
+      smc_bearish_fvg: features.smc_bearish_fvg ?? 0,
+      smc_bos_up: features.smc_bos_up ?? (features.smc_bos === 1.0 && (features.structure_bias ?? 0) > 0 ? 1 : 0),
+      smc_bos_down: features.smc_bos_down ?? (features.smc_bos === 1.0 && (features.structure_bias ?? 0) < 0 ? 1 : 0),
+      smc_choch_up: features.smc_choch_up ?? (features.smc_choch === 1.0 && (features.structure_bias ?? 0) > 0 ? 1 : 0),
+      smc_choch_down: features.smc_choch_down ?? (features.smc_choch === 1.0 && (features.structure_bias ?? 0) < 0 ? 1 : 0),
+      smc_ob_strength: features.smc_ob_strength ?? 0,
       key_levels: {
         recent_swing_high: swingHigh || 0,
         recent_swing_low: swingLow || 0,
@@ -711,9 +722,14 @@ function buildTradePlan(call: any) {
   const direction = call.direction_bias === "buy" ? "long" : call.direction_bias === "sell" ? "short" : "neutral";
   const entry = call.entry || call.current_close;
   const stop = call.execution_stop || call.stop_loss || call.thesis_invalidation;
+  const features = call.raw_features || {};
   
   return {
     direction,
+    smc_bos_up: features.smc_bos_up ?? (features.smc_bos === 1.0 && (features.structure_bias ?? 0) > 0 ? 1 : 0),
+    smc_bos_down: features.smc_bos_down ?? (features.smc_bos === 1.0 && (features.structure_bias ?? 0) < 0 ? 1 : 0),
+    smc_choch_up: features.smc_choch_up ?? (features.smc_choch === 1.0 && (features.structure_bias ?? 0) > 0 ? 1 : 0),
+    smc_choch_down: features.smc_choch_down ?? (features.smc_choch === 1.0 && (features.structure_bias ?? 0) < 0 ? 1 : 0),
     entry: entry || null,
     executionStop: stop || null,
     thesisInvalidation: call.thesis_invalidation || null,
