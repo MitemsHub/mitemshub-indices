@@ -134,7 +134,7 @@ export function MobileNavDrawer({
             </div>
           </fieldset>
 
-          {/* ── Trading mode ──────────────────────── */}
+          {/* ── Trading mode (sniper only) ────────────── */}
           <fieldset>
             <legend className="mb-2 text-[10px] uppercase tracking-[0.2em] text-[var(--text-label)]">
               Strategy
@@ -146,17 +146,10 @@ export function MobileNavDrawer({
                 className="mode-toggle rounded-full px-4 py-2 text-sm font-medium flex-1"
                 onClick={() => { onSelectTradingMode("sniper"); onClose(); }}
               >
-                Sniper
-              </button>
-              <button
-                type="button"
-                aria-pressed={tradingMode === "active_trader"}
-                className="mode-toggle rounded-full px-4 py-2 text-sm font-medium flex-1"
-                onClick={() => { onSelectTradingMode("active_trader"); onClose(); }}
-              >
-                Active
+                Sniper (Swing)
               </button>
             </div>
+            <p className="text-xs text-[var(--text-muted)] mt-1">4–6 hour swing trades only</p>
           </fieldset>
 
           {/* ── Status ────────────────────────────── */}

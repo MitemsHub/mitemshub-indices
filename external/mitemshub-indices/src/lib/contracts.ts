@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const accountModeSchema = z.enum(["own_account", "prop_firm"]);
 
-export const tradingModeSchema = z.enum(["sniper", "active_trader", "volatility_harvest"]);
+export const tradingModeSchema = z.enum(["sniper"]);
 export type TradingMode = z.infer<typeof tradingModeSchema>;
 
 export const propComplianceSchema = z.enum([

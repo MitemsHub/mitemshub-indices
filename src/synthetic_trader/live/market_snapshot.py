@@ -348,39 +348,6 @@ TRADING_MODE_PRESETS = {
         swing_take_profit_rr=3.5,
         max_stop_distance_pct=0.06,  # wider cap for swing trades
     ),
-    "active_trader": TradingModePreset(
-        confidence_above=0.34,
-        confidence_near=0.28,
-        bias_buy_threshold=0.50,
-        bias_sell_threshold=0.50,
-        risk_min_confidence=0.24,
-        risk_min_reward_risk=0.85,
-        risk_max_volatility_z=4.5,
-        model_decision_threshold=0.43,
-        confidence_relaxation=0.08,
-        symbol_min_history_candles=15,
-        symbol_min_primary_reward_risk=0.85,
-        execution_mode="intraday",
-        max_stop_distance_pct=0.03,  # tighter cap for faster exits
-    ),
-    # Volatility Harvesting: trades ONLY on GARCH mean-reversion signals.
-    # Bypasses session filter, structure bias, and multi-TF alignment.
-    # Relies solely on variance clustering — the ONE exploitable property.
-    "volatility_harvest": TradingModePreset(
-        confidence_above=0.30,
-        confidence_near=0.24,
-        bias_buy_threshold=0.50,
-        bias_sell_threshold=0.50,
-        risk_min_confidence=0.20,
-        risk_min_reward_risk=1.0,
-        risk_max_volatility_z=5.0,
-        model_decision_threshold=0.40,
-        confidence_relaxation=0.12,
-        symbol_min_history_candles=10,
-        symbol_min_primary_reward_risk=1.0,
-        execution_mode="intraday",
-        max_stop_distance_pct=0.04,
-    ),
 }
 
 
@@ -769,22 +736,14 @@ def build_guardian_snapshot(
     snapshot: dict[str, object],
     ticks: list[Tick],
     guardian_thresholds: GuardianThresholds | None = None,
-    trading_mode: str = "active_trader",
+    trading_mode: str = "sniper",
 ) -> dict[str, object]:
     current_close = ticks[-1].price if ticks else snapshot.get("current_close")
     enriched = dict(snapshot)
     enriched["current_close"] = current_close
 
-    # ── Sniper mode: use full microstructure evaluation ──────────
-    # Sniper mode previously used simple heuristics (checking entry/stop_loss
-    # presence and signal_strength).  Now it uses the same microstructure
-    # evaluation as active_trader and volatility_harvest modes, so sniper
-    # users get detailed signal quality feedback (persistence, impulse,
-    # pullback depth, adverse excursion) instead of just "actionable".
-    #
-    # The SNIPER_GUARDIAN_THRESHOLDS are tuned for conservative swing
-    # entries: longer arming window (30 ticks), wider adverse excursion
-    # tolerance (0.95), and relaxed pullback limits (0.85).
+    # Sniper-only mode: full microstructure evaluation with
+    # conservative swing-trade thresholds.
 
     thresholds = guardian_thresholds or DEFAULT_GUARDIAN_THRESHOLDS
     signal_snapshot = GuardianSnapshot(

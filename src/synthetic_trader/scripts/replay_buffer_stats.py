@@ -16,41 +16,80 @@ from pathlib import Path
 
 
 def get_replay_buffer_stats(engine_root: str) -> dict:
-    """Read model artifacts and return replay buffer statistics."""
-    artifacts_dir = Path(engine_root) / "artifacts"
+    """Read DecisionEngine state files and return replay buffer statistics.
+
+    Model state is persisted to data/model_state/{symbol}_{mode}.json
+    by the _maybe_save_engine_state() function in market_snapshot.py.
+
+    The state file structure is:
+    {
+      "model": {
+        "replay_buffer": { ... },
+        "weights": { ... },
+        "updates": N,
+        ...
+      },
+      "calibration": { ... },
+      "versioning": { ... },
+    }
+    """
+    state_dir = Path(engine_root) / "data" / "model_state"
     stats = {}
 
     for symbol in ("r_75", "r_100"):
-        # Try both naming conventions: r_75_live_seed_model.json and r75_live_seed_model.json
-        model_path = artifacts_dir / f"{symbol}_live_seed_model.json"
-        if not model_path.exists():
-            model_path = artifacts_dir / f"{symbol.replace('_', '')}_live_seed_model.json"
+        # Model state is saved as {symbol}_sniper.json (sniper-only mode)
+        model_path = state_dir / f"{symbol}_sniper.json"
         if not model_path.exists():
             stats[symbol] = None
             continue
 
         try:
-            sys.path.insert(0, str(Path(engine_root) / "src"))
-            from synthetic_trader.models.online import OnlineLogisticModel
+            data = json.loads(model_path.read_text(encoding="utf-8"))
+            model_section = data.get("model", {})
+            buf_payload = model_section.get("replay_buffer")
 
-            model = OnlineLogisticModel.load(model_path)
-            buf = model.replay_buffer
+            if buf_payload is None:
+                # No replay buffer persisted — show empty state
+                stats[symbol] = {
+                    "buffer_size": 0,
+                    "capacity": 10_000,
+                    "fill_pct": 0.0,
+                    "total_seen": 0,
+                    "mini_batch_size": 16,
+                    "replay_ratio": 0.2,
+                    "label_0_count": 0,
+                    "label_1_count": 0,
+                    "label_balance": 0.5,
+                    "model_updates": model_section.get("updates", 0),
+                    "model_version": model_section.get("metadata", {}).get("version", "0.1.0"),
+                }
+                continue
 
-            label_dist = buf.label_distribution
-            total_labels = sum(label_dist.values()) or 1
+            # Parse the replay buffer dict directly
+            entries = buf_payload.get("entries", [])
+            capacity = buf_payload.get("capacity", 10_000)
+            total_seen = buf_payload.get("seen", 0)
+            mini_batch_size = buf_payload.get("mini_batch_size", 16)
+            replay_ratio = buf_payload.get("replay_ratio", 0.2)
+            buffer_size = len(entries)
+
+            # Compute label distribution from entries
+            label_0 = sum(1 for e in entries if e.get("label", 0) == 0)
+            label_1 = sum(1 for e in entries if e.get("label", 0) == 1)
+            total_labels = label_0 + label_1 or 1
 
             stats[symbol] = {
-                "buffer_size": len(buf),
-                "capacity": buf.capacity,
-                "fill_pct": round(len(buf) / buf.capacity * 100, 1) if buf.capacity > 0 else 0,
-                "total_seen": buf.total_seen,
-                "mini_batch_size": buf.mini_batch_size,
-                "replay_ratio": buf.replay_ratio,
-                "label_0_count": label_dist.get(0, 0),
-                "label_1_count": label_dist.get(1, 0),
-                "label_balance": round(label_dist.get(0, 0) / total_labels, 3),
-                "model_updates": model.updates,
-                "model_version": model.version,
+                "buffer_size": buffer_size,
+                "capacity": capacity,
+                "fill_pct": round(buffer_size / capacity * 100, 1) if capacity > 0 else 0,
+                "total_seen": total_seen,
+                "mini_batch_size": mini_batch_size,
+                "replay_ratio": replay_ratio,
+                "label_0_count": label_0,
+                "label_1_count": label_1,
+                "label_balance": round(label_0 / total_labels, 3),
+                "model_updates": model_section.get("updates", 0),
+                "model_version": model_section.get("metadata", {}).get("version", "0.1.0"),
             }
         except Exception as e:
             stats[symbol] = {"error": str(e)}

@@ -115,7 +115,7 @@ const PREPARED_CALL_NEAR_THRESHOLD_RECHECK_CONFIDENCE = 0.48;
 const DEFAULT_PREPARED_CALL_WARMUP_REFRESH_MS = 45 * 1000;
 const DEFAULT_WARMUP_TICK_SAMPLE_COUNT = 4;
 const PREPARED_CALL_WARMUP_SYMBOLS: SymbolCode[] = ["R_75", "R_100"];
-const PREPARED_CALL_WARMUP_MODES: TradingMode[] = ["sniper", "active_trader"];
+const PREPARED_CALL_WARMUP_MODES: TradingMode[] = ["sniper"];
 
 // ── Bridge state persistence (survives hot reloads) ────────────
 // Persists the warmup cache to `{engineRoot}/data/bridge_state.json` so that
@@ -1784,7 +1784,7 @@ function normalizeText(value: unknown): string | null {
 }
 
 function normalizeTradingMode(value: unknown): TradingMode | null {
-  return value === "sniper" || value === "active_trader" ? value : null;
+  return value === "sniper" ? value : null;
 }
 
 function normalizeGuardianState(
@@ -2483,8 +2483,7 @@ export async function warmPreparedCalls(): Promise<void> {
     // "Run" on a symbol), which connect to MT5 and append live ticks to
     // the CSV. The warmup then reads the updated CSV on its next cycle.
     //
-    // The same-symbol warmups (sniper + active_trader) share a single
-    // CSV read — no duplicate work.
+    // The same-symbol warmup reads CSV for the single sniper mode.
     await Promise.all(
       PREPARED_CALL_WARMUP_SYMBOLS.flatMap((symbol) =>
         PREPARED_CALL_WARMUP_MODES.map(async (tradingMode) => {

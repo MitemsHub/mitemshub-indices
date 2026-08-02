@@ -9,7 +9,7 @@ export async function POST(request: Request) {
     };
 
     const symbol = body.symbol === "R_75" || body.symbol === "R_100" ? body.symbol : "R_100";
-    const tradingMode = body.trading_mode === "sniper" || body.trading_mode === "active_trader" ? body.trading_mode : "sniper";
+    const tradingMode = "sniper";
 
     cancelLiveSnapshot(symbol, tradingMode);
 

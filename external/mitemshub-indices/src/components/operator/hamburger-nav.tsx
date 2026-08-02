@@ -140,7 +140,7 @@ export function HamburgerNav({
           </div>
         </div>
 
-        {/* Strategy mode */}
+        {/* Strategy mode (sniper only) */}
         <div className="mobile-nav-section">
           <h3>Strategy</h3>
           <div className="mode-row">
@@ -150,25 +150,10 @@ export function HamburgerNav({
               className="mode-toggle rounded-full px-4 py-2 text-sm font-medium"
               onClick={() => { onSetTradingMode("sniper"); onClose(); }}
             >
-              Sniper
-            </button>
-            <button
-              type="button"
-              aria-pressed={tradingMode === "active_trader"}
-              className="mode-toggle rounded-full px-4 py-2 text-sm font-medium"
-              onClick={() => { onSetTradingMode("active_trader"); onClose(); }}
-            >
-              Active
-            </button>
-            <button
-              type="button"
-              aria-pressed={tradingMode === "volatility_harvest"}
-              className="mode-toggle rounded-full px-4 py-2 text-sm font-medium"
-              onClick={() => { onSetTradingMode("volatility_harvest"); onClose(); }}
-            >
-              Vol Harvest
+              Sniper (Swing)
             </button>
           </div>
+          <p className="text-xs text-[var(--text-muted)] mt-1">4–6 hour swing trades only</p>
         </div>
 
         {/* Execution mode */}

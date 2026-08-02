@@ -203,29 +203,11 @@ export function CommandBar({
           <button
             type="button"
             aria-pressed={tradingMode === "sniper"}
-            title="Conservative. Fewer, higher-conviction trade plans."
+            title="4–6 hour swing trades. Fewer, higher-conviction setups."
             className="mode-toggle rounded-full px-3.5 py-1.5 text-xs font-medium"
             onClick={() => onSelectTradingMode("sniper")}
           >
-            Sniper
-          </button>
-          <button
-            type="button"
-            aria-pressed={tradingMode === "active_trader"}
-            title="Frequent. More trade plans with calculated risk."
-            className="mode-toggle rounded-full px-3.5 py-1.5 text-xs font-medium"
-            onClick={() => onSelectTradingMode("active_trader")}
-          >
-            Active
-          </button>
-          <button
-            type="button"
-            aria-pressed={tradingMode === "volatility_harvest"}
-            title="Exploits variance clustering. Trades only on GARCH mean-reversion signals."
-            className="mode-toggle rounded-full px-3.5 py-1.5 text-xs font-medium"
-            onClick={() => onSelectTradingMode("volatility_harvest")}
-          >
-            Vol Harvest
+            Sniper (Swing)
           </button>
         </div>
       </div>

@@ -26,12 +26,9 @@ export type IntelPanelFlag = {
   description: string;
 };
 
-/** Default enabled panels per trading mode. Sniper shows everything;
- * active_trader hides the heavier analysis panels (multi-TF, evidence)
- * since the mode prioritises faster read frequency over depth. */
+/** Default enabled panels per trading mode. Sniper shows everything. */
 export const INTEL_PANEL_DEFAULTS: Record<string, IntelPanelId[]> = {
   sniper: ["market_intelligence", "multi_timeframe", "evidence_summary", "market_thesis"],
-  active_trader: ["market_intelligence", "market_thesis"],
 };
 
 export const INTEL_PANELS: IntelPanelFlag[] = [

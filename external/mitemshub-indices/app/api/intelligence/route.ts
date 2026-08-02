@@ -81,9 +81,7 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const symbol = (searchParams.get("symbol") ?? "R_100") as "R_75" | "R_100";
   const includeHistory = searchParams.get("history") === "true";
-  const tradingMode = (searchParams.get("trading_mode") ?? "sniper") as
-    | "sniper"
-    | "active_trader";
+  const tradingMode = "sniper";
 
   try {
     // Same as POST: skip the expensive getCurrentPropProfile() call.
