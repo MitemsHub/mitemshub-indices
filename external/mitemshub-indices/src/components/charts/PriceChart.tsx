@@ -295,9 +295,12 @@ const Toast = React.memo(function Toast({ message, type, onDismiss }: { message:
   );
 });
 
+type SymbolFilter = "all" | "V75" | "V100";
+
 export function PriceChart() {
   const { data, lastUpdate, error, isStreaming, connectionLost, reconnecting, reconnectNow } = useTickStream(100);
   const [collapsed, setCollapsed] = useState(true);
+  const [symbolFilter, setSymbolFilter] = useState<SymbolFilter>("V75");
   const prevConnectionLostRef = useRef(false);
   const [toast, setToast] = useState<{ message: string; type: ToastType } | null>(null);
   const prevWasStreamingRef = useRef(false);
@@ -344,11 +347,21 @@ export function PriceChart() {
     prevWasStreamingRef.current = isStreaming;
   }, [isStreaming, reconnecting, prevConnectionLost]);
 
-  // Compute price range for Y-axis domain (memoized to avoid re-computation on every render)
+  // Filtered chart data based on selected symbol
+  const chartData = useMemo(() => {
+    if (symbolFilter === "all") return data;
+    return data.map((d) => ({
+      ...d,
+      V75: symbolFilter === "V75" ? d.V75 : null,
+      V100: symbolFilter === "V100" ? d.V100 : null,
+    }));
+  }, [data, symbolFilter]);
+
+  // Compute price range for Y-axis domain — scale to visible symbol only
   const [yMin, yMax] = useMemo(() => {
     let minPrice = Infinity;
     let maxPrice = -Infinity;
-    for (const d of data) {
+    for (const d of chartData) {
       if (d.V75 !== null) {
         minPrice = Math.min(minPrice, d.V75);
         maxPrice = Math.max(maxPrice, d.V75);
@@ -358,9 +371,10 @@ export function PriceChart() {
         maxPrice = Math.max(maxPrice, d.V100);
       }
     }
+    if (!isFinite(minPrice) || !isFinite(maxPrice)) return [0, 100];
     const range = maxPrice - minPrice || 10;
     return [Math.floor(minPrice - range * 0.05), Math.ceil(maxPrice + range * 0.05)];
-  }, [data]);
+  }, [chartData]);
 
   // Latest prices for collapsed view — find last non-null value for each symbol
   const latestV75 = useMemo(() => findLastNonNull(data, "V75") as number | null, [data]);
@@ -412,7 +426,7 @@ export function PriceChart() {
                 </>
               ) : (
                 <>
-                  Last {data.length} ticks · V75 & V100
+                  Last {data.length} ticks · {symbolFilter === "all" ? "V75 & V100" : symbolFilter}
                 </>
               )}
             </p>
@@ -453,6 +467,24 @@ export function PriceChart() {
         style={{ maxHeight: collapsed ? 0 : '600px', opacity: collapsed ? 0 : 1 }}
       >
         <div className="px-4 pb-4 md:px-5 md:pb-5">
+          {/* Symbol filter toggle */}
+          <div className="flex items-center gap-1.5 mb-3">
+            {(["V75", "V100", "all"] as SymbolFilter[]).map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setSymbolFilter(s)}
+                className={`px-3 py-1 rounded-lg text-xs font-medium transition-all duration-150
+                  ${symbolFilter === s
+                    ? "bg-[var(--accent-ink)] text-white shadow-sm"
+                    : "bg-[var(--bg-panel-muted)] text-[var(--text-body)] hover:bg-[var(--bg-surface-hover)] border border-[var(--line-subtle)]"
+                  }`
+                }
+              >
+                {s === "all" ? "Both" : s === "V75" ? "V75" : "V100"}
+              </button>
+            ))}
+          </div>
           {error ? (
             <div className="flex h-48 items-center justify-center text-sm text-[var(--accent-danger)]">
               {error}
@@ -467,7 +499,7 @@ export function PriceChart() {
           ) : (
             <div className="h-56 md:h-64">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={data} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>
+                <LineChart data={chartData} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>
                   <CartesianGrid
                     strokeDasharray="3 3"
                     stroke="var(--line-subtle)"
@@ -497,24 +529,28 @@ export function PriceChart() {
                     height={28}
                     wrapperStyle={{ fontSize: 11, paddingTop: 0 }}
                   />
-                  <Line
-                    type="monotone"
-                    dataKey="V75"
-                    stroke="#1f4b99"
-                    strokeWidth={2}
-                    dot={false}
-                    activeDot={{ r: 4, strokeWidth: 2 }}
-                    animationDuration={300}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="V100"
-                    stroke="#0f6b57"
-                    strokeWidth={2}
-                    dot={false}
-                    activeDot={{ r: 4, strokeWidth: 2 }}
-                    animationDuration={300}
-                  />
+                  {(symbolFilter === "all" || symbolFilter === "V75") && (
+                    <Line
+                      type="monotone"
+                      dataKey="V75"
+                      stroke="#1f4b99"
+                      strokeWidth={2}
+                      dot={false}
+                      activeDot={{ r: 4, strokeWidth: 2 }}
+                      animationDuration={300}
+                    />
+                  )}
+                  {(symbolFilter === "all" || symbolFilter === "V100") && (
+                    <Line
+                      type="monotone"
+                      dataKey="V100"
+                      stroke="#0f6b57"
+                      strokeWidth={2}
+                      dot={false}
+                      activeDot={{ r: 4, strokeWidth: 2 }}
+                      animationDuration={300}
+                    />
+                  )}
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -527,11 +563,15 @@ export function PriceChart() {
             label="Volatility 75"
             current={latestV75}
             previous={prevV75}
+            highlighted={symbolFilter === "V75"}
+            onClick={() => setSymbolFilter(symbolFilter === "V75" ? "all" : "V75")}
           />
           <PriceSummaryCard
             label="Volatility 100"
             current={latestV100}
             previous={prevV100}
+            highlighted={symbolFilter === "V100"}
+            onClick={() => setSymbolFilter(symbolFilter === "V100" ? "all" : "V100")}
           />
         </div>
       )}

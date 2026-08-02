@@ -46,3 +46,6 @@ node_modules/
 terraform.exe
 terraform.zip
 terraform
+.agents/
+.claude/
+skills-lock.json
