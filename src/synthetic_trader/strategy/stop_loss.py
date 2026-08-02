@@ -84,6 +84,7 @@ def find_order_block_stop(
     candles: list[Candle],
     direction: str,
     atr_14: float,
+    smc_order_blocks: list[dict] | None = None,
 ) -> float | None:
     """Find order block-based stop using ICT/SMC institutional logic.
 
@@ -96,21 +97,56 @@ def find_order_block_stop(
     2. The order block represents where smart money accumulated — once
        mitigated, the zone has served its purpose.
 
+    If smc_order_blocks is provided (from smc_enhanced.detect_smc_order_blocks),
+    those are used first — they use the smartmoneyconcepts library's
+    institutional-grade OB detection.  Otherwise, falls back to custom
+    detection by scanning for opposing candles before BOS.
+
     For a bullish trade (buy):
-    - Find the most recent BOS to the upside
-    - Scan backwards to find the last bearish candle (Close < Open)
-      before the BOS — this is the Bullish Order Block
-    - Stop = OB candle low - ATR buffer
+    - Find bullish OB zone (bottom of the OB)
+    - Stop = OB bottom - ATR buffer
 
     For a bearish trade (sell):
-    - Find the most recent BOS to the downside
-    - Scan backwards to find the last bullish candle (Close > Open)
-      before the BOS — this is the Bearish Order Block
-    - Stop = OB candle high + ATR buffer
+    - Find bearish OB zone (top of the OB)
+    - Stop = OB top + ATR buffer
     """
     if len(candles) < 15:
         return None
 
+    # ── Priority 1: Use SMC-detected Order Blocks (institutional-grade) ──
+    # If smc_order_blocks is provided from smc_enhanced.detect_smc_order_blocks,
+    # use those for the most accurate OB-based stop placement.
+    if smc_order_blocks:
+        buffer = atr_14 * 0.5
+        current_price = candles[-1].close
+
+        if direction == "buy":
+            # Find bullish OBs BELOW current price (demand zones)
+            bullish_obs = [
+                ob for ob in smc_order_blocks
+                if ob.get("direction") == "bullish"
+                and ob.get("bottom", 0) < current_price
+            ]
+            if bullish_obs:
+                # Use the most recent bullish OB (highest index = most recent)
+                # Place stop below the OB's bottom with ATR buffer
+                most_recent = max(bullish_obs, key=lambda ob: ob.get("index", 0))
+                return most_recent["bottom"] - buffer
+
+        elif direction == "sell":
+            # Find bearish OBs ABOVE current price (supply zones)
+            bearish_obs = [
+                ob for ob in smc_order_blocks
+                if ob.get("direction") == "bearish"
+                and ob.get("top", 0) > current_price
+            ]
+            if bearish_obs:
+                # Use the most recent bearish OB (highest index = most recent)
+                # Place stop above the OB's top with ATR buffer
+                most_recent = max(bearish_obs, key=lambda ob: ob.get("index", 0))
+                return most_recent["top"] + buffer
+
+    # ── Priority 2: Fallback to custom BOS-based detection ──
     bos_index = _detect_bos_index(candles, direction, lookback=50)
     if bos_index is None or bos_index < 2:
         return None
@@ -321,6 +357,7 @@ def smart_stop_loss(
     reference_level: float,
     atr_14: float,
     entry: float,
+    smc_order_blocks: list[dict] | None = None,
 ) -> float:
     """Calculate stop loss using the professional 5-layer approach.
 
@@ -329,7 +366,8 @@ def smart_stop_loss(
 
     Layer 0: ORDER BLOCK STOP — ICT/SMC institutional stop placement.
     Finds the last opposing candle before an impulsive BOS and places
-    the stop beyond its wick.
+    the stop beyond its wick.  Uses SMC-detected order blocks when
+    available (from smc_enhanced.detect_smc_order_blocks).
 
     Layer 1: STRUCTURAL STOP — Historical swing points from the
     higher timeframe (4H/daily).
@@ -346,7 +384,7 @@ def smart_stop_loss(
     The FINAL STOP = WIDEST of the five candidates.
     """
     # Layer 0: Order block stop from ICT/SMC institutional logic
-    ob_stop = find_order_block_stop(htf_candles, direction, atr_14)
+    ob_stop = find_order_block_stop(htf_candles, direction, atr_14, smc_order_blocks)
 
     # Layer 1: Structural stop from higher timeframe swing points
     structural_stop = find_structural_stop(htf_candles, direction, entry, atr_14)

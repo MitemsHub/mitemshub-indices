@@ -6,6 +6,7 @@ from synthetic_trader.config import TraderConfig
 from synthetic_trader.domain import Candle
 from synthetic_trader.features.indicators import atr
 from synthetic_trader.strategy.stop_loss import smart_stop_loss
+from synthetic_trader.features.smc_enhanced import smc_features
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,16 @@ def select_execution_stop(
         if reference_level is None:
             reference_level = entry * 0.99 if direction == "buy" else entry * 1.01
 
+        # Detect SMC Order Blocks for institutional-grade stop placement
+        smc_obs = None
+        try:
+            smc_data = smc_features(htf_candles)
+            if smc_data.get("smc_ob_bullish", 0.0) > 0 or smc_data.get("smc_ob_bearish", 0.0) > 0:
+                from synthetic_trader.features.smc_enhanced import detect_smc_order_blocks
+                smc_obs = detect_smc_order_blocks(htf_candles)
+        except Exception:
+            pass  # Fall back to BOS-based detection
+
         stop = smart_stop_loss(
             htf_candles=htf_candles,
             ltf_candles=execution_candles,
@@ -152,6 +163,7 @@ def select_execution_stop(
             reference_level=reference_level,
             atr_14=atr_14,
             entry=entry,
+            smc_order_blocks=smc_obs,
         )
     else:
         # Legacy path: wick-based stop when no HTF data available

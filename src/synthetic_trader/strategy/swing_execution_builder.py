@@ -10,6 +10,7 @@ from synthetic_trader.strategy.stop_loss import (
     find_structural_stop,
     smart_stop_loss,
 )
+from synthetic_trader.features.smc_enhanced import smc_features
 
 
 @dataclass(frozen=True)
@@ -190,7 +191,19 @@ def build_swing_execution(
     # "last week's highest drop" view that professional traders use.
     # Falls back to setup_candles if 4H data isn't available.
     htf_candles = bias_candles if bias_candles and len(bias_candles) >= 10 else setup_candles
-    stop_loss = smart_stop_loss(htf_candles, setup_candles, direction, sweep_level, atr_14, entry)
+
+    # Detect SMC Order Blocks for institutional-grade stop placement
+    smc_obs = None
+    try:
+        smc_data = smc_features(htf_candles)
+        # Extract order block data from SMC features
+        if smc_data.get("smc_ob_bullish", 0.0) > 0 or smc_data.get("smc_ob_bearish", 0.0) > 0:
+            from synthetic_trader.features.smc_enhanced import detect_smc_order_blocks
+            smc_obs = detect_smc_order_blocks(htf_candles)
+    except Exception:
+        pass  # Fall back to BOS-based detection
+
+    stop_loss = smart_stop_loss(htf_candles, setup_candles, direction, sweep_level, atr_14, entry, smc_order_blocks=smc_obs)
 
     risk = abs(entry - stop_loss)
     if risk <= 0 or risk < atr_14 * 0.5:
