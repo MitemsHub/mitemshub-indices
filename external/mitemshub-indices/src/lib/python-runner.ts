@@ -248,13 +248,16 @@ export function createTtlCache<T>(ttlMs: number): TtlCache<T> {
       return store.entries();
     },
   };
-}
-
-// ── Python import cache (60s TTL) ──────────────────────────────
+}// ── Python import cache (60s TTL, 5s for failures) ────────────
 // Repeated calls to checkPythonImport within a warmup cycle would
-// each spawn a separate subprocess. The cache avoids this.
+// each spawn a separate subprocess.  The cache avoids this.
+//
+// IMPORTANT: Failures use a shorter 5-second TTL so a transient
+// Python error (e.g. file lock, import race) doesn't block the
+// bridge for 60 seconds.  Successes still cache for 60s.
 
 const checkImportCache = createTtlCache<{ ok: boolean }>(60_000);
+const checkImportFailureCache = createTtlCache<{ ok: boolean }>(5_000);
 
 /**
  * Quick import-time smoke test for a Python module.
@@ -268,9 +271,15 @@ const checkImportCache = createTtlCache<{ ok: boolean }>(60_000);
  */
 export async function checkPythonImport(engineRoot: string, importModule?: string): Promise<boolean> {
   const cacheKey = importModule ? `${engineRoot}::import::${importModule}` : engineRoot;
+  // Check success cache first (60s TTL)
   const cached = checkImportCache.get(cacheKey);
   if (cached !== undefined) {
     return cached.ok;
+  }
+  // Check failure cache (5s TTL) — prevents transient errors from blocking
+  const cachedFailure = checkImportFailureCache.get(cacheKey);
+  if (cachedFailure !== undefined) {
+    return cachedFailure.ok;
   }
 
   const importStmt = importModule ?? "from synthetic_trader.live.market_snapshot import build_watch_alert";
@@ -282,10 +291,20 @@ export async function checkPythonImport(engineRoot: string, importModule?: strin
       label: importModule ? `checkImport:${importModule.slice(0, 80)}` : "checkPythonImport",
     });
     const ok = stdout.trim() === "OK";
-    checkImportCache.set(cacheKey, { ok });
+    if (ok) {
+      checkImportCache.set(cacheKey, { ok: true });
+      // Clear any stale failure entry so the next call after the
+      // 60s success TTL expires re-checks cleanly.
+      checkImportFailureCache.delete(cacheKey);
+    } else {
+      checkImportFailureCache.set(cacheKey, { ok: false });
+    }
     return ok;
   } catch {
-    checkImportCache.set(cacheKey, { ok: false });
+    // Short TTL for failures — transient Python errors shouldn't block
+    // the bridge for 60 seconds.  On success, the failure cache entry
+    // expires naturally and the next call re-checks.
+    checkImportFailureCache.set(cacheKey, { ok: false });
     return false;
   }
 }
@@ -293,6 +312,7 @@ export async function checkPythonImport(engineRoot: string, importModule?: strin
 /** Test-only helper: clear the import cache so the next call re-checks. */
 export function __testResetImportCache(): void {
   checkImportCache.clear();
+  checkImportFailureCache.clear();
 }
 
 /**

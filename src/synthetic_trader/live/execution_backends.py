@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time as _time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -42,6 +44,21 @@ class TrackedMt5Position:
     signal: object
     stake: float
     volume: float
+
+
+@dataclass
+class TrailingStopState:
+    """Tracks trailing stop state for an open MT5 position.
+
+    The guardian evaluator computes a recommended_stop level on each
+    evaluation cycle.  This state tracks the last stop that was
+    actually sent to MT5 to avoid redundant modify calls, and records
+    the modification history for diagnostics.
+    """
+    current_stop: float = 0.0
+    last_modified_stop: float = 0.0
+    modification_count: int = 0
+    last_modified_at: float = 0.0  # epoch seconds
 
 
 class ExecutionBackend(Protocol):
@@ -90,6 +107,7 @@ class Mt5LiveExecutionBackend:
         self._journal = journal
         self._mt5_module = mt5_module
         self._tracked_positions: dict[int, TrackedMt5Position] = {}
+        self._trailing_stops: dict[int, TrailingStopState] = {}
         self._last_sync = Mt5SyncResult(
             ready=True,
             failures=(),
@@ -139,6 +157,13 @@ class Mt5LiveExecutionBackend:
                     signal=intent.signal,
                     stake=intent.stake,
                     volume=position.volume,
+                )
+                # Initialize trailing stop state from the signal's stop loss
+                # so the first apply_trailing_stop call doesn't trigger a
+                # modify from 0.0 (which would always be far away).
+                self._trailing_stops[position.ticket] = TrailingStopState(
+                    current_stop=intent.signal.stop_loss,
+                    last_modified_stop=intent.signal.stop_loss,
                 )
             return SubmitResult(
                 accepted=True,
@@ -287,6 +312,123 @@ class Mt5LiveExecutionBackend:
             return None
         return self._modify_position(position, stop_loss=stop_loss, take_profit=take_profit)
 
+    # ── Trailing stop auto-modify ──────────────────────────────────
+    # When the guardian evaluator computes a recommended_stop level,
+    # this method automatically modifies the MT5 order if the new stop
+    # is meaningfully different from the current stop.  This prevents
+    # winning trades from turning into losers — the #1 cause of
+    # premature trade closures on volatile synthetic indices.
+    #
+    # Called from the snapshot pipeline after guardian evaluation.
+    # The recommended_stop comes from GuardianEvaluation.recommended_stop
+    # which is already computed in signal_guardian.py._compute_trailing_stop.
+    #
+    # Threshold: only modify if the new stop is >= 0.5 pips away from the
+    # current stop to avoid noise-driven micro-modifications.
+    MIN_STOP_MODIFY_DISTANCE_PIPS = 0.5
+
+    def apply_trailing_stop(
+        self,
+        position_id: str,
+        recommended_stop: float,
+    ) -> Mt5OrderResult | None:
+        """Auto-modify the stop loss when the guardian recommends a new level.
+
+        Only modifies when the new stop is meaningfully different from
+        the current stop (>= 0.5 pips).  Records the modification in
+        the journal for diagnostics.
+        """
+        try:
+            ticket = int(position_id)
+        except (ValueError, TypeError):
+            return None
+
+        position = self._tracked_positions.get(ticket)
+        if position is None:
+            return None
+
+        # Get or create trailing stop state
+        ts = self._trailing_stops.get(ticket)
+        if ts is None:
+            signal_stop = getattr(position.signal, 'stop_loss', 0.0)
+            ts = TrailingStopState(current_stop=signal_stop, last_modified_stop=signal_stop)
+            self._trailing_stops[ticket] = ts
+
+        # Check if the new stop is meaningfully different
+        stop_distance = abs(recommended_stop - ts.current_stop)
+        signal = position.signal
+        entry = getattr(signal, 'entry', 0.0)
+        # Use the signal's pip_size if available, otherwise derive from entry.
+        # Synthetic indices like V75 (entry ~1700) use pip_size=0.01, while
+        # V100 (entry ~350) also uses 0.01.  The old fallback of 0.0001 was
+        # wrong for these instruments.  Derive from entry with a reasonable
+        # default: 0.01 for indices above 100, 0.0001 for forex-like prices.
+        pip_size = 0.01 if entry > 100 else 0.0001
+        pip_value = pip_size
+
+        if stop_distance < self.MIN_STOP_MODIFY_DISTANCE_PIPS * pip_value:
+            return None  # too small a change — skip to avoid noise
+
+        # Ensure recommended stop never moves against the trade
+        direction = getattr(signal, 'direction', Direction.LONG)
+        if direction is Direction.LONG and recommended_stop < ts.current_stop:
+            return None  # don't move stop backward for longs
+        if direction is Direction.SHORT and recommended_stop > ts.current_stop:
+            return None  # don't move stop backward for shorts
+
+        # Execute the modify
+        result = self._modify_position(position, stop_loss=recommended_stop)
+
+        if result.accepted:
+            old_stop = ts.current_stop
+            ts.current_stop = recommended_stop
+            ts.last_modified_stop = old_stop
+            ts.modification_count += 1
+            ts.last_modified_at = _time.time()
+
+            self._journal.record_event(
+                "mt5_trailing_stop_modified",
+                {
+                    "symbol": signal.symbol,
+                    "venue_symbol": position.venue_symbol,
+                    "ticket": ticket,
+                    "old_stop": old_stop,
+                    "new_stop": recommended_stop,
+                    "stop_distance": stop_distance,
+                    "modification_count": ts.modification_count,
+                },
+            )
+            logging.info(
+                "[Mt5Backend] trailing stop modified: ticket=%d old=%.5f new=%.5f dist=%.5f count=%d",
+                ticket, ts.last_modified_stop, recommended_stop,
+                stop_distance, ts.modification_count,
+            )
+        else:
+            self._journal.record_event(
+                "mt5_trailing_stop_modify_failed",
+                {
+                    "symbol": signal.symbol,
+                    "ticket": ticket,
+                    "recommended_stop": recommended_stop,
+                    "retcode": result.retcode,
+                    "message": result.message,
+                },
+            )
+            logging.warning(
+                "[Mt5Backend] trailing stop modify FAILED: ticket=%d recommended=%.5f retcode=%d msg=%s",
+                ticket, recommended_stop, result.retcode, result.message,
+            )
+
+        return result
+
+    def get_trailing_stop_state(self, position_id: str) -> TrailingStopState | None:
+        """Return the trailing stop state for a position, or None if not tracked."""
+        try:
+            ticket = int(position_id)
+        except (ValueError, TypeError):
+            return None
+        return self._trailing_stops.get(ticket)
+
     def _maybe_close_tracked_position(
         self,
         tracked: TrackedMt5Position,
@@ -313,6 +455,9 @@ class Mt5LiveExecutionBackend:
 
         if exit_price is None:
             return None
+
+        # Clean up trailing stop state when position is closed
+        self._trailing_stops.pop(tracked.ticket, None)
 
         close_result = self._close_position(
             Mt5PositionSnapshot(

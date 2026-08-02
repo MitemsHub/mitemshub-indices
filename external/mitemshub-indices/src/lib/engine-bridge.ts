@@ -2697,17 +2697,35 @@ export async function runFreshCall({
       try {
         const raw = await readLiveSnapshotWithRetry({ engineRoot, symbol, tradingMode, signal });
         // ── Result quality check ──────────────────────────────
-        // The Python subprocess can succeed (HTTP 200) but return
-        // unusable stale data (guardian_state: "unavailable"). In
-        // that case the catch block is never reached, so we check
-        // the result explicitly and fall back to buildFallbackFreshCall.
-        if (raw.guardian_state === "unavailable") {
+        // The Python subprocess can succeed but return guardian_state:
+        // "unavailable" during warmup or when stop_distance is 0.
+        // IMPORTANT: When the subprocess SUCCEEDS, always use the snapshot
+        // data — even if guardian says unavailable.  The analysis, features,
+        // and market structure are still valid.  Only fall back to cached
+        // data when the subprocess itself FAILS (catch block below).
+        //
+        // Previously this caused "Live read unavailable" because the bridge
+        // was discarding valid analysis data when the guardian couldn't
+        // score it yet (e.g. during first few ticks of warmup).
+        if (raw.guardian_state === "unavailable" && raw.confidence === null && raw.entry === null) {
+          // Only fall back when the snapshot is TRULY empty (no analysis at all).
+          // If confidence or entry is set, the analysis is usable even if guardian
+          // says unavailable — the setup is still forming but data is valid.
           result = await buildFallbackFreshCall({
             symbol,
             tradingMode,
             accountMode,
             propAccountState,
             detail: "Live data is stale — using cached analysis.",
+          });
+        } else if (raw.guardian_state === "unavailable") {
+          // Snapshot has partial data — use it directly instead of falling back.
+          // The frontend shows 'Setup still forming' which is accurate.
+          const base = sanitizeUnavailableExecutionLevels(raw);
+          result = applyAccountMode({
+            base,
+            accountMode,
+            propAccountState,
           });
         } else {
           const base = sanitizeUnavailableExecutionLevels(raw);
