@@ -20,6 +20,7 @@ from synthetic_trader.execution.mt5 import (
     synchronize_mt5_positions,
 )
 from synthetic_trader.execution.paper import PaperBroker
+from synthetic_trader.journal.signal_feedback import SignalFeedbackTracker, make_signal_id
 
 
 @dataclass(frozen=True)
@@ -498,6 +499,20 @@ class Mt5LiveExecutionBackend:
         else:
             return_r = (signal.entry - exit_price) / risk_distance
         pnl = tracked.stake * return_r
+
+        # ── Record close outcome in feedback tracker ──────────────
+        # When MT5 auto-closes a position (TP/SL hit or expiry),
+        # immediately record the outcome so it feeds into calibration
+        # without waiting for the 6-hour bulk_resolve timer.
+        self._record_feedback_outcome(
+            symbol=signal.symbol,
+            generated_at=signal.snapshot.epoch,
+            outcome="tp_hit" if target_hit else ("sl_hit" if stop_hit else "expired"),
+            exit_price=exit_price,
+            pnl_pips=exit_price - signal.entry if signal.direction is Direction.LONG else signal.entry - exit_price,
+            r_multiple=return_r,
+        )
+
         return TradeOutcome(
             position_id=str(tracked.ticket),
             symbol=signal.symbol,
@@ -511,6 +526,59 @@ class Mt5LiveExecutionBackend:
             features=signal.snapshot.features,
             won=pnl > 0,
         )
+
+    def _record_feedback_outcome(
+        self,
+        *,
+        symbol: str,
+        generated_at: float,
+        outcome: str,
+        exit_price: float,
+        pnl_pips: float,
+        r_multiple: float,
+    ) -> None:
+        """Record a trade close outcome in the signal feedback tracker.
+
+        Writes to data/calibration_outcomes.jsonl which the Python snapshot
+        pipeline reads on the next refresh to feed into the calibration buffer.
+        This closes the MT5 close → learning loop instantly.
+        """
+        try:
+            from pathlib import Path
+            import json as _json
+
+            # Build the signal ID matching the frontend's format
+            import datetime as _dt
+            gen_dt = _dt.datetime.fromtimestamp(generated_at, tz=_dt.timezone.utc)
+            gen_iso = gen_dt.strftime("%Y-%m-%dT%H:%M:%S")
+            signal_id = make_signal_id(symbol, gen_iso)
+
+            # Determine label: 1 = win, 0 = loss
+            label = 1 if outcome in ("tp_hit",) else 0
+
+            # Write to calibration_outcomes.jsonl for the Python backend to pick up
+            outcomes_path = Path("data/calibration_outcomes.jsonl")
+            outcomes_path.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "signal_id": signal_id,
+                "prediction": 0.5,  # neutral prediction — actual outcome is what matters
+                "label": label,
+                "outcome": outcome,
+                "exit_price": exit_price,
+                "pnl_pips": pnl_pips,
+                "r_multiple": r_multiple,
+                "source": "mt5_close",
+                "fed_at": _dt.datetime.now(tz=_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            with outcomes_path.open("a", encoding="utf-8") as f:
+                f.write(_json.dumps(record) + "\n")
+
+            logging.info(
+                "[Mt5Backend] feedback outcome recorded: signal=%s outcome=%s r=%.2f",
+                signal_id, outcome, r_multiple,
+            )
+        except Exception as exc:
+            logging.debug("[Mt5Backend] failed to record feedback outcome: %s", exc)
 
 
 def build_execution_backend(

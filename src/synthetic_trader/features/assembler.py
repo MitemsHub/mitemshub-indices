@@ -5,7 +5,7 @@ from synthetic_trader.features.market_structure import market_structure_features
 from synthetic_trader.features.smc_enhanced import smc_features
 from synthetic_trader.features.regimes import classify_regime
 from synthetic_trader.features.tick_integration import compute_tick_flow_features
-from synthetic_trader.models.garch import EGARCHVarianceForecaster
+from synthetic_trader.features.arch_garch import ArchGarchForecaster
 from synthetic_trader.models.garch_calibration import load_calibrated_garch_state
 from synthetic_trader.features.session_filter import SessionVolatilityFilter
 from synthetic_trader.features.generator_fingerprint import GeneratorFingerprintDetector
@@ -13,7 +13,7 @@ import time as _time
 
 
 # Module-level GARCH forecasters — one per symbol to maintain state across snapshots.
-_garch_forecasters: dict[str, EGARCHVarianceForecaster] = {}
+_garch_forecasters: dict[str, ArchGarchForecaster] = {}
 # Tracks whether each symbol's forecaster was initialized from a
 # market-calibrated calibration file (True) or from defaults (False).
 _garch_calibrated: dict[str, bool] = {}
@@ -33,7 +33,7 @@ def clear_assembler_caches() -> None:
     _fingerprint_detectors.clear()
 
 
-def _get_garch_forecaster(symbol: str) -> EGARCHVarianceForecaster:
+def _get_garch_forecaster(symbol: str) -> ArchGarchForecaster:
     """Get or create the GARCH forecaster for a symbol.
 
     On first access, checks for a calibrated calibration file at
@@ -42,26 +42,29 @@ def _get_garch_forecaster(symbol: str) -> EGARCHVarianceForecaster:
     those market-calibrated parameters instead of the generic defaults.
     This means the online forecaster starts with priors that reflect
     actual Blueberry Markets synthetic index behavior.
+
+    The arch library's ArchGarchForecaster provides:
+    - EWMA online volatility (fast, no dependencies)
+    - Periodic arch model fitting every 100 observations (MLE validation)
+    - Proper persistence and long-run variance estimation
+    - Z-score and mean reversion signal computation
     """
     if symbol not in _garch_forecasters:
         calibrated_state = load_calibrated_garch_state(symbol)
         if calibrated_state is not None:
             # Initialize forecaster with calibrated parameters.
-            # Use a larger prior for _grad_sq_ema to prevent the first
-            # few online updates from overshooting (RMSProp denominator
-            # would otherwise be tiny with the default 1e-6).
-            forecaster = EGARCHVarianceForecaster(
+            # Convert GARCHState to ArchGarchForecaster parameters.
+            forecaster = ArchGarchForecaster(
                 long_run_var_prior=calibrated_state.long_run_variance,
+                min_observations=10,  # Start fitting sooner with calibrated priors
             )
-            forecaster.state = calibrated_state
-            forecaster._grad_sq_ema = {
-                "omega": 1e-3, "alpha": 1e-3,
-                "gamma": 1e-3, "beta": 1e-3,
-            }
+            # Initialize the online state with calibrated persistence
+            forecaster.state.persistence = calibrated_state.persistence
+            forecaster.state.long_run_variance = calibrated_state.long_run_variance
             _garch_forecasters[symbol] = forecaster
             _garch_calibrated[symbol] = True
         else:
-            _garch_forecasters[symbol] = EGARCHVarianceForecaster()
+            _garch_forecasters[symbol] = ArchGarchForecaster()
             _garch_calibrated[symbol] = False
     return _garch_forecasters[symbol]
 

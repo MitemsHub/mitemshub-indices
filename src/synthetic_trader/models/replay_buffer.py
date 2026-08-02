@@ -27,9 +27,11 @@ class ExperienceReplayBuffer:
     equal probability of being in the buffer, regardless of stream order.
 
     Parameters
-    ----------
-    capacity : int
-        Maximum number of entries to retain (default 10 000).
+    ----------        capacity : int
+        Maximum number of entries to retain (default 500).
+        Old entries are automatically pruned via reservoir sampling
+        when this limit is reached, preventing unbounded growth
+        during long-running sessions.
     mini_batch_size : int
         Number of samples to replay per update call (default 16).
     replay_ratio : float
@@ -39,7 +41,7 @@ class ExperienceReplayBuffer:
 
     def __init__(
         self,
-        capacity: int = 10_000,
+        capacity: int = 500,
         mini_batch_size: int = 16,
         replay_ratio: float = 0.2,
     ) -> None:
@@ -131,7 +133,7 @@ class ExperienceReplayBuffer:
         a partially-corrupt state file still yields a usable buffer.
         """
         # ── Validate top-level fields ───────────────────────────
-        capacity = cls._validate_positive_int(data.get("capacity"), "capacity", default=10_000)
+        capacity = cls._validate_positive_int(data.get("capacity"), "capacity", default=500)
         mini_batch_size = cls._validate_positive_int(data.get("mini_batch_size"), "mini_batch_size", default=16)
         replay_ratio = cls._validate_float_range(data.get("replay_ratio"), "replay_ratio", 0.0, 1.0, default=0.2)
         seen = cls._validate_non_negative_int(data.get("seen"), "seen", default=0)

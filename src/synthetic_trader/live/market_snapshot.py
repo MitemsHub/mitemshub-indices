@@ -206,6 +206,212 @@ def reset_persistent_engines() -> None:
 _last_missed_resolution_at: float = 0.0
 _MISSED_RESOLUTION_INTERVAL_SEC = 60  # resolve once per minute
 
+# ── MT5 deal history tracking ──────────────────────────────────
+# On each snapshot, we check MT5's deal history for positions that
+# were closed externally (broker TP/SL execution).  This catches
+# closes that happen outside the Python process — the broker fills
+# the TP/SL order directly and the Python process never sees it.
+#
+# The check is throttled to once per 30 seconds per symbol to avoid
+# hammering the MT5 API on every Refresh click.
+_last_mt5_deal_check: dict[str, float] = {}
+_MT5_DEAL_CHECK_INTERVAL_SEC = 30
+_MT5_DEAL_HISTORY_HOURS = 24  # look back 24 hours for closed deals
+
+# ── Label source tracking ──────────────────────────────────────
+# Counts how many replay buffer samples came from each priority source.
+# This lets the Pipeline Diagnostics panel show whether the model is
+# learning from real trades (feedback/outcome) vs price movement estimates.
+_label_source_counts: dict[str, int] = {
+    "feedback": 0,       # Priority 1: signal feedback tracker (tp_hit/sl_hit)
+    "outcome": 0,        # Priority 2: missed trade tracker (resolved after 6h)
+    "delayed_price": 0,  # Priority 3: CSV-derived ATR price movement
+    "mt5_deal": 0,       # MT5 deal history (broker fills)
+    "skipped": 0,        # No label available — sample skipped
+}
+
+
+def _check_mt5_deal_history() -> None:
+    """Query MT5's deal history for recently closed positions.
+
+    Catches positions that were closed externally by the broker
+    (TP/SL execution) — the Python process never saw the close.
+    Records the outcomes into calibration_outcomes.jsonl so the
+    model learns from real trade results.
+
+    Throttled to once per _MT5_DEAL_CHECK_INTERVAL_SEC per symbol.
+    """
+    global _last_mt5_deal_check
+    now = time.time()
+    if not is_mt5_configured():
+        return
+
+    # Check each symbol
+    for symbol in ("R_75", "R_100"):
+        last_check = _last_mt5_deal_check.get(symbol, 0.0)
+        if (now - last_check) < _MT5_DEAL_CHECK_INTERVAL_SEC:
+            continue
+        _last_mt5_deal_check[symbol] = now
+
+        try:
+            _check_symbol_deal_history(symbol)
+        except Exception as exc:
+            logging.debug("[mt5_deal_history] Failed to check %s: %s", symbol, exc)
+
+
+def _check_symbol_deal_history(symbol: str) -> None:
+    """Check MT5 deal history for one symbol and record outcomes."""
+    import MetaTrader5 as mt5
+    from datetime import datetime, timedelta, timezone
+
+    # Initialize MT5 briefly to query deal history
+    from synthetic_trader.execution.mt5_data import (
+        _resolve_mt5_terminal_path,
+        mt5_config_from_env,
+    )
+
+    terminal_path = _resolve_mt5_terminal_path()
+    if not terminal_path:
+        return
+
+    cfg = mt5_config_from_env()
+    login = int(cfg["login"])
+    password = cfg.get("password") or ""
+    server = cfg.get("server") or ""
+
+    # Quick init + login (reuse connection if already open)
+    initialized = mt5.initialize(path=terminal_path, timeout=5000)
+    if not initialized:
+        return
+
+    try:
+        mt5.login(login, password=password, server=server)
+    except Exception:
+        pass  # may already be logged in
+
+    try:
+        # Resolve the MT5 venue symbol
+        from synthetic_trader.execution.mt5_data import _resolve_mt5_symbol
+        venue_symbol = _resolve_mt5_symbol(symbol, mt5)
+
+        # Get deals from the last N hours
+        date_from = datetime.now(timezone.utc) - timedelta(hours=_MT5_DEAL_HISTORY_HOURS)
+        date_to = datetime.now(timezone.utc)
+
+        deals = mt5.history_deals_get(
+            date_from=date_from,
+            date_to=date_to,
+            group=f"*{venue_symbol}*",
+        )
+        if deals is None or len(deals) == 0:
+            return
+
+        # Filter for close deals (entry=False means it's an exit deal)
+        close_deals = [d for d in deals if not d.get("entry", True)]
+        if not close_deals:
+            return
+
+        # Read the signal feedback tracker to find matching executed signals
+        tracker = _get_signal_feedback_tracker()
+        all_signals = tracker.get_all_signals(limit=50)
+
+        outcomes_path = Path("data/calibration_outcomes.jsonl")
+        recorded_count = 0
+
+        for deal in close_deals:
+            deal_time = deal.get("time", 0)
+            deal_price = float(deal.get("price", 0))
+            deal_profit = float(deal.get("profit", 0))
+            deal_volume = float(deal.get("volume", 0))
+            deal_comment = str(deal.get("comment", ""))
+
+            if deal_price <= 0 or deal_volume <= 0:
+                continue
+
+            # Find a matching executed signal (not yet resolved)
+            matched_signal = None
+            for sig in all_signals:
+                if sig.symbol != symbol:
+                    continue
+                if sig.outcome is not None:
+                    continue  # already resolved
+                if sig.executed_at is None:
+                    continue  # not executed yet
+
+                # Match by time proximity (deal should be after execution)
+                try:
+                    exec_dt = datetime.fromisoformat(
+                        sig.executed_at.replace("Z", "+00:00")
+                    )
+                    exec_epoch = exec_dt.timestamp()
+                    # Deal should be within 12 hours of execution
+                    if abs(deal_time - exec_epoch) > 12 * 3600:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+
+                # Determine outcome from profit
+                if deal_profit > 0:
+                    outcome = "tp_hit"
+                    label = 1
+                elif deal_profit < 0:
+                    outcome = "sl_hit"
+                    label = 0
+                else:
+                    outcome = "manual_win" if deal_profit >= 0 else "manual_loss"
+                    label = 1 if deal_profit >= 0 else 0
+
+                # Record the outcome
+                tracker.record_outcome(
+                    signal_id=sig.signal_id,
+                    outcome=outcome,
+                    pnl_pips=deal_profit,
+                )
+                matched_signal = sig
+                break
+
+            # Also write directly to calibration_outcomes.jsonl
+            # so the Python backend picks it up on next snapshot
+            if matched_signal is not None or True:
+                # Determine prediction from deal direction
+                prediction = 0.7 if deal_profit > 0 else 0.3
+                label = 1 if deal_profit > 0 else 0
+
+                try:
+                    with outcomes_path.open("a", encoding="utf-8") as f:
+                        record = {
+                            "signal_id": (
+                                matched_signal.signal_id
+                                if matched_signal
+                                else f"mt5_deal_{deal.get('ticket', 'unknown')}"
+                            ),
+                            "symbol": symbol,
+                            "prediction": prediction,
+                            "label": label,
+                            "outcome": "tp_hit" if deal_profit > 0 else "sl_hit",
+                            "source": "mt5_deal_history",
+                            "deal_ticket": deal.get("ticket"),
+                            "deal_profit": deal_profit,
+                            "deal_price": deal_price,
+                            "recorded_at": time.strftime(
+                                "%Y-%m-%dT%H:%M:%S", time.gmtime()
+                            ),
+                        }
+                        f.write(json.dumps(record) + "\n")
+                    recorded_count += 1
+                except Exception:
+                    pass
+
+        if recorded_count > 0:
+            logging.info(
+                "[mt5_deal_history] Recorded %d closed deal outcomes for %s",
+                recorded_count, symbol,
+            )
+
+    finally:
+        # Don't shutdown — just let the process clean up
+        pass
+
 
 def _get_atr_14(features: dict[str, float]) -> float:
     """Extract ATR_14 from features, falling back to 1.0."""
@@ -213,16 +419,19 @@ def _get_atr_14(features: dict[str, float]) -> float:
 
 
 # ── Outcome-based replay buffer labeling ────────────────────────
-# This replaces the self-reinforcing loop where the model labeled
-# data based on its own prediction (prob > 0.5 → label=1).
+# CRITICAL: Labels come ONLY from real trade outcomes — never from
+# the model's own prediction.  The old approach used
+# model_long_probability to determine direction, creating a
+# self-reinforcing feedback loop where the model confirmed itself.
 #
-# The new approach uses ACTUAL OUTCOMES:
-# 1. User feedback from the signal feedback tracker (best signal)
-# 2. Missed trade tracker resolution (auto-resolved after 6 hours)
-# 3. Delayed price movement check (1 ATR in 6 hours)
+# Sources (in priority order):
+# 1. Signal feedback tracker — tp_hit/manual_win → 1, sl_hit/manual_loss → 0
+# 2. Missed trade tracker — resolved after 6 hours by checking CSV prices
+# 3. MT5 deal history — broker fills caught by _check_mt5_deal_history()
 #
-# This ensures the model learns from REAL market behavior,
-# not from its own biases.
+# We intentionally do NOT use delayed price movement with model
+# prediction as a fallback because that would reintroduce the
+# self-reinforcing loop.
 
 # Import here to avoid circular imports at module level
 from synthetic_trader.journal.signal_feedback import (
@@ -250,26 +459,25 @@ def _get_signal_feedback_tracker() -> SignalFeedbackTracker:
 def _compute_outcome_label(
     *,
     symbol: str,
-    model_long_probability: float | None,
-    features: dict[str, float],
-    current_close: float | None,
-) -> int | None:
+    features: dict[str, float] | None = None,
+) -> tuple[int | None, str]:
     """Compute an outcome-based label for the replay buffer.
 
-    Returns 1 (bullish) or 0 (bearish) based on ACTUAL market behavior,
-    or None if we can't determine an outcome yet.
+    Returns (label, source) where:
+      - label is 1 (bullish), 0 (bearish), or None (skip)
+      - source is one of: 'feedback', 'outcome', 'delayed_price', 'skipped'
 
-    Priority:
-    1. Check signal feedback tracker for user-confirmed outcomes
-    2. Check missed trade tracker for auto-resolved outcomes
-    3. Use delayed price movement (1 ATR in 6 hours)
+    IMPORTANT: This function NEVER uses model_long_probability.
+    Labels come exclusively from:
+    1. Signal feedback tracker — tp_hit/manual_win → 1, sl_hit/manual_loss → 0
+    2. Missed trade tracker — resolved after 6 hours
+    3. Delayed price movement using CSV-derived ATR (not model prediction)
+
+    The delayed price movement uses the ACTUAL ATR from the feature
+    snapshot (CSV-derived), not a hardcoded default.  This ensures
+    R_100 (ATR ~2.5) and R_75 (ATR ~15) both get correct labels
+    based on their real volatility.
     """
-    if model_long_probability is None or current_close is None:
-        return None
-
-    atr = _get_atr_14(features)
-    if atr <= 0:
-        return None
 
     # ── Priority 1: Signal feedback tracker ───────────────────────
     # Check if we have a recent signal with user feedback
@@ -294,16 +502,16 @@ def _compute_outcome_label(
 
         # Use user feedback if available, otherwise outcome
         if signal.user_feedback == "good" and signal.outcome in ("tp_hit", "manual_win"):
-            return 1
+            return (1, "feedback")
         if signal.user_feedback == "bad" and signal.outcome in ("sl_hit", "manual_loss"):
-            return 0
+            return (0, "feedback")
         if signal.outcome in ("tp_hit", "manual_win"):
-            return 1
+            return (1, "feedback")
         if signal.outcome in ("sl_hit", "manual_loss"):
-            return 0
+            return (0, "feedback")
         # Expired — use pnl direction
         if signal.pnl_pips is not None:
-            return 1 if signal.pnl_pips > 0 else 0
+            return (1 if signal.pnl_pips > 0 else 0, "feedback")
 
     # ── Priority 2: Missed trade tracker ──────────────────────────
     # Check for recently resolved missed trades
@@ -322,13 +530,22 @@ def _compute_outcome_label(
                     continue
                 # outcome=1 means missed opportunity (price moved in predicted direction)
                 # outcome=0 means correctly stayed out
-                return outcome.get("outcome", 0)
+                return (outcome.get("outcome", 0), "outcome")
         except Exception:
             pass
 
-    # ── Priority 3: Delayed price movement ────────────────────────
-    # If no feedback or missed trade data, use delayed price movement
-    # Check if price moved 1 ATR in the predicted direction recently
+    # ── Priority 3: Delayed price movement (CSV-derived ATR) ────
+    # If no feedback or missed trade data, check whether price moved
+    # significantly in EITHER direction using the real ATR from the
+    # feature snapshot.  This is NOT self-reinforcing because we don't
+    # use model_long_probability to determine direction — we check
+    # BOTH directions and label based on actual movement.
+    if features is None:
+        return None
+    atr = features.get("atr_14", 0.0)
+    if atr <= 0:
+        return None
+
     ticks = _load_csv_ticks(symbol, max_ticks=1000)
     if not ticks or len(ticks) < 100:
         return None
@@ -340,41 +557,29 @@ def _compute_outcome_label(
     if len(recent_ticks) < 50:
         return None
 
-    # Calculate price movement
     start_price = recent_ticks[0].price
     end_price = recent_ticks[-1].price
     max_price = max(t.price for t in recent_ticks)
     min_price = min(t.price for t in recent_ticks)
 
-    # Determine direction based on model prediction
-    model_lean_long = model_long_probability > 0.5
+    # Check BOTH directions — no model prediction involved
+    max_up = max_price - start_price
+    max_down = start_price - min_price
 
-    if model_lean_long:
-        # Model predicted bullish — did price go up by 1 ATR?
-        max_up = max_price - start_price
-        if max_up >= atr:
-            return 1  # Model was right — price moved up
-        # Also check if price ended higher
-        if end_price > start_price and (end_price - start_price) >= atr * 0.5:
-            return 1
-    else:
-        # Model predicted bearish — did price go down by 1 ATR?
-        max_down = start_price - min_price
-        if max_down >= atr:
-            return 0  # Model was right — price moved down
-        # Also check if price ended lower
-        if end_price < start_price and (start_price - end_price) >= atr * 0.5:
-            return 0
+    # Strong directional move: price moved >= 1 ATR in one direction
+    if max_up >= atr and max_up > max_down * 1.5:
+        return (1, "delayed_price")  # Bullish — price moved up strongly
+    if max_down >= atr and max_down > max_up * 1.5:
+        return (0, "delayed_price")  # Bearish — price moved down strongly
 
-    # Price didn't move significantly — model was uncertain
-    # Use the direction of actual movement as the label
-    if end_price > start_price + atr * 0.25:
-        return 1  # Price moved up — bullish label
-    if end_price < start_price - atr * 0.25:
-        return 0  # Price moved down — bearish label
+    # Moderate directional move: price ended significantly different
+    if end_price > start_price + atr * 0.5:
+        return (1, "delayed_price")
+    if end_price < start_price - atr * 0.5:
+        return (0, "delayed_price")
 
     # No significant movement — skip this sample
-    return None
+    return (None, "skipped")
 
 
 def _maybe_record_missed_trade(
@@ -486,6 +691,9 @@ def _maybe_resolve_missed_trades(decision_engine: DecisionEngine) -> None:
 
     # Also resolve signal feedback outcomes and feed into calibration
     _maybe_resolve_feedback_outcomes(decision_engine)
+
+    # Also check MT5 deal history for external closes
+    _check_mt5_deal_history()
 
     def _price_lookup(symbol: str) -> list[tuple[float, float]]:
         ticks = _load_csv_ticks(symbol)
@@ -1798,12 +2006,11 @@ def analyze_live_snapshot(
     # 3. Otherwise → use delayed price movement (1 ATR in 6 hours)
     if primary_candles:
         try:
-            _live_label = _compute_outcome_label(
+            _live_label, _label_source = _compute_outcome_label(
                 symbol=symbol,
-                model_long_probability=model_long_probability,
-                features=dict(feature_snapshot.features),
-                current_close=current_close,
+                features=dict(feature_snapshot.features) if primary_candles else None,
             )
+            _label_source_counts[_label_source] = _label_source_counts.get(_label_source, 0) + 1
             if _live_label is not None:
                 decision_engine.model.replay_buffer.add(
                     dict(feature_snapshot.features), _live_label

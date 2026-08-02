@@ -162,20 +162,31 @@ class ArchGarchForecaster:
             logging.debug("[arch_garch] Arch fit failed (expected during warmup): %s", e)
 
     def get_forecast(self) -> dict[str, float]:
-        """Return current GARCH features as a dict."""
+        """Return current GARCH features as a dict.
+
+        Includes backward-compatible keys from the old EGARCHVarianceForecaster
+        (garch_long_run_vol, garch_alpha, garch_half_life, garch_gamma) so the
+        decision engine and assembler work without modification.
+        """
+        long_run_vol = math.sqrt(max(self.state.long_run_variance, 1e-10))
+        persistence = self.state.persistence
+        half_life = math.log(0.5) / math.log(persistence) if 0 < persistence < 1.0 else 999.0
+        vol_ratio = self.state.current_sigma / long_run_vol if long_run_vol > 1e-10 else 1.0
         return {
             "garch_sigma": self.state.current_sigma,
             "garch_forecast": math.sqrt(max(self.state.forecast_variance, 1e-10)),
             "garch_z_score": self.state.z_score,
             "garch_vol_regime": self.state.vol_regime,
-            "garch_persistence": self.state.persistence,
+            "garch_persistence": persistence,
             "garch_mean_revert_signal": self.state.mean_revert_signal,
-            "garch_vol_ratio": (
-                self.state.current_sigma / math.sqrt(max(self.state.long_run_variance, 1e-10))
-                if self.state.long_run_variance > 0 else 1.0
-            ),
+            "garch_vol_ratio": vol_ratio,
             "garch_sigma_annualized": self.state.current_sigma * math.sqrt(252 * 24),
             "garch_model_fitted": 1.0 if self.state.model_fitted else 0.0,
+            # Backward-compatible keys from EGARCHVarianceForecaster
+            "garch_long_run_vol": long_run_vol,
+            "garch_half_life": min(half_life, 999.0),
+            "garch_alpha": 0.0,  # arch library doesn't expose alpha separately
+            "garch_gamma": 0.0,  # arch library doesn't expose gamma separately
         }
 
     def to_dict(self) -> dict:

@@ -22,6 +22,7 @@ import { IntelAccordion } from "./intel-accordion";
 import { IntelPanelToggles } from "./intel-panel-toggles";
 import { HealthDashboard } from "./health-dashboard";
 import { PipelineDiagnosticsPanel } from "./pipeline-diagnostics-panel";
+import { SignalQualityPanel } from "./signal-quality-panel";
 import { CombinedMenuButton } from "./combined-menu-button";
 import { NotificationBell } from "./notification-bell";
 import { LotSizeCalculator } from "./lot-size-calculator";
@@ -587,6 +588,13 @@ export function OperatorShell() {
               takeProfit={workspace.currentCall?.take_profit ?? null}
               symbol={workspace.activeSymbol}
             />
+          </ErrorBoundary>
+        </section>
+
+        {/* ── Signal Quality ────────────────────────────────────── */}
+        <section className="mt-6">
+          <ErrorBoundary label="Signal quality">
+            <SignalQualityPanel />
           </ErrorBoundary>
         </section>
 

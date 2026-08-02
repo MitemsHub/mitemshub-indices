@@ -570,6 +570,32 @@ export function useOperatorWorkspace() {
     return () => clearInterval(intervalId);
   }, [currentCall?.call_age_seconds, loading, activeSymbol]);
 
+  // ── Periodic trade outcome resolution ───────────────────────
+  // Every 5 minutes, trigger bulk_resolve to check whether executed
+  // trades have hit TP or SL after the hold horizon.  This closes
+  // the learning loop: Execute → wait 6 hours → outcome resolved →
+  // fed into calibration so probabilities improve.
+  useEffect(() => {
+    const RESOLVE_INTERVAL = 5 * 60_000; // 5 minutes
+
+    const intervalId = setInterval(() => {
+      void fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "bulk_resolve" }),
+      }).catch(() => {}); // fire-and-forget
+    }, RESOLVE_INTERVAL);
+
+    // Also run once on mount so any signals that expired while the page was closed get resolved
+    void fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "bulk_resolve" }),
+    }).catch(() => {});
+
+    return () => clearInterval(intervalId);
+  }, []);
+
   // Re-run when trading mode changes to get a fresh call with new parameters
   const prevTradingMode = useRef(tradingMode);
   const switchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -656,20 +682,16 @@ export function useOperatorWorkspace() {
           });
 
           // ── Record execution in feedback tracker ───────────────
-          // Mark the signal as "executed" so the outcome resolver
-          // can track whether TP or SL was hit and feed it into
-          // the calibration buffer for genuine learning.
+          // Mark the signal as "executed" (NOT resolved) so the
+          // bulk_resolve checker can later determine the real outcome
+          // (TP hit, SL hit, etc.) and feed it into calibration.
           const execSignalId = `${currentCall.symbol}_${currentCall.generated_at.replace(/:/g, "-").replace(/\./g, "-")}`;
           void fetch("/api/feedback", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              action: "record_outcome",
+              action: "record_execution",
               signal_id: execSignalId,
-              outcome: "executed",
-              outcome_price: result.entry_price ?? entry,
-              pnl_pips: 0,
-              r_multiple: 0,
             }),
           }).catch(() => {}); // fire-and-forget
 
@@ -742,6 +764,46 @@ export function useOperatorWorkspace() {
       if (response.ok) {
         const result = await response.json();
         if (result.closed) {
+          // ── Record close outcome in feedback tracker ────────
+          // Determine whether TP or SL was hit based on close price
+          // vs entry/SL/TP, then record the outcome immediately
+          // so it feeds into calibration without waiting for bulk_resolve.
+          const closeSignalId = `${trackedPosition.symbol}_${currentCall?.generated_at?.replace(/:/g, "-").replace(/\./g, "-") ?? ""}`;
+          const closePrice = trackedPosition.current_price ?? trackedPosition.entry_price;
+          const entry = trackedPosition.entry_price;
+          const sl = trackedPosition.stop_loss;
+          const tp = trackedPosition.take_profit;
+          const dir = trackedPosition.direction;
+
+          let outcome = "manual_close";
+          let pnlPips = 0;
+          let rMultiple = 0;
+          const stopDist = Math.abs(entry - sl);
+
+          if (dir === "buy") {
+            if (closePrice >= tp) { outcome = "tp_hit"; }
+            else if (closePrice <= sl) { outcome = "sl_hit"; }
+            pnlPips = closePrice - entry;
+          } else {
+            if (closePrice <= tp) { outcome = "tp_hit"; }
+            else if (closePrice >= sl) { outcome = "sl_hit"; }
+            pnlPips = entry - closePrice;
+          }
+          rMultiple = stopDist > 0 ? pnlPips / stopDist : 0;
+
+          void fetch("/api/feedback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "record_outcome",
+              signal_id: closeSignalId,
+              outcome,
+              outcome_price: closePrice,
+              pnl_pips: pnlPips,
+              r_multiple: rMultiple,
+            }),
+          }).catch(() => {}); // fire-and-forget
+
           setTrackedPosition(null);
         }
         return result;

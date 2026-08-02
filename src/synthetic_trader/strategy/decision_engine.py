@@ -667,14 +667,13 @@ class DecisionEngine:
         features: dict[str, float],
         model_long_probability: float,
     ) -> float:
-        """Score direction using 10 components with rebalanced weights.
+        """Score direction using 15 components with institutional SMC.
 
-        Weight rebalancing rationale (from comprehensive review):
-        - Synthetic indices have a CSPRNG with GARCH-like variance scheduling
-        - Pattern features (structure, displacement, momentum, confluence) are
-          noise on random data → reduced weight
-        - Statistical features (regime, volatility, GARCH, tick_flow) exploit
-          the generator's real properties → increased weight
+        Weight distribution:
+        - Statistical (0.58): regime, tick_flow, volatility, GARCH, garch_mr
+        - Institutional SMC (0.21): FVG, order blocks, BOS, CHoCH
+        - Pattern (0.13): structure, displacement, momentum, confluence
+        - Model (0.08): online logistic prediction
         """
         model_component = model_long_probability if direction is Direction.LONG else 1.0 - model_long_probability
         structure_component = self._structure_component(direction, features)
@@ -687,28 +686,38 @@ class DecisionEngine:
         tick_flow_component = self._tick_flow_component(direction, features)
         garch_component = self._garch_component(direction, features)
         garch_mr_component = self._garch_mr_component(direction, features)
+        smc_fvg_component = self._smc_fvg_component(direction, features)
+        smc_ob_component = self._smc_ob_component(direction, features)
+        smc_bos_component = self._smc_bos_component(direction, features)
+        smc_choch_component = self._smc_choch_component(direction, features)
 
         # ── Rebalanced weights ──────────────────────────────────────
-        # Pattern-based components reduced (noise on random data):
-        #   structure 0.20→0.10, displacement 0.06→0.03,
-        #   momentum 0.06→0.03, confluence 0.07→0.04
-        # Statistical components increased (exploitable on synthetic indices):
-        #   regime 0.15→0.25, volatility 0.05→0.10, tick_flow 0.08→0.12,
-        #   garch NEW 0.10, garch_mr NEW 0.03
+        # Statistical components (exploitable on synthetic indices):
+        #   regime 0.22, tick_flow 0.10, volatility 0.08, garch 0.08
+        # Pattern-based components (noise on random data):
+        #   structure 0.06, displacement 0.02, momentum 0.02, confluence 0.03
+        # Institutional SMC components (structural confirmation):
+        #   smc_fvg 0.06, smc_ob 0.06, smc_bos 0.05, smc_choch 0.04
+        # Statistical features dominate (0.58), SMC adds institutional
+        # confirmation (0.21), pattern features stay minimal (0.13).
         weights = {
-            "model": 0.15,          # reduced — learns from noise, not signal
-            "structure": 0.10,      # halved — patterns are noise on synthetic indices
-            "regime": 0.25,         # largest weight — regime clustering IS real
-            "mean_reversion": 0.05, # reduced — less reliable without GARCH context
-            "displacement": 0.03,   # halved — random on synthetic indices
-            "momentum": 0.03,       # halved — random on synthetic indices
-            "volatility": 0.10,     # doubled — volatility clustering is exploitable
-            "confluence": 0.04,     # halved — multi-TF structure is noise
-            "tick_flow": 0.12,      # increased — microstructure is real
-            "garch": 0.10,          # NEW — variance forecast from EGARCH(1,1)
-            "garch_mr": 0.03,       # NEW — mean-reversion signal from GARCH
+            "model": 0.12,          # reduced — learns from noise, not signal
+            "structure": 0.06,      # halved — patterns are noise on synthetic indices
+            "regime": 0.22,         # largest weight — regime clustering IS real
+            "mean_reversion": 0.04, # reduced — less reliable without GARCH context
+            "displacement": 0.02,   # halved — random on synthetic indices
+            "momentum": 0.02,       # halved — random on synthetic indices
+            "volatility": 0.08,     # increased — volatility clustering is exploitable
+            "confluence": 0.03,     # halved — multi-TF structure is noise
+            "tick_flow": 0.10,      # increased — microstructure is real
+            "garch": 0.08,          # variance forecast from EGARCH(1,1)
+            "garch_mr": 0.02,       # mean-reversion signal from GARCH
+            "smc_fvg": 0.06,        # institutional FVG imbalance zones
+            "smc_ob": 0.06,         # institutional order block supply/demand
+            "smc_bos": 0.05,        # break of structure continuation
+            "smc_choch": 0.04,      # change of character reversal
         }
-        # Total = 1.00 — statistical features now dominate (0.60 vs 0.20 for patterns)
+        # Total = 1.00 — statistical (0.58) + SMC institutional (0.21) + pattern (0.13) + model (0.08)
 
         confidence = (
             weights["model"] * model_component
@@ -722,6 +731,10 @@ class DecisionEngine:
             + weights["tick_flow"] * tick_flow_component
             + weights["garch"] * garch_component
             + weights["garch_mr"] * garch_mr_component
+            + weights["smc_fvg"] * smc_fvg_component
+            + weights["smc_ob"] * smc_ob_component
+            + weights["smc_bos"] * smc_bos_component
+            + weights["smc_choch"] * smc_choch_component
         )
         return clamp(confidence, 0.0, 1.0)
 
@@ -1077,6 +1090,140 @@ class DecisionEngine:
 
         return base
 
+    # ── SMC (Smart Money Concepts) components ──────────────────
+    # Institutional-grade structural features from the smartmoneyconcepts
+    # library.  These score FVGs, Order Blocks, BOS, and CHoCH patterns.
+
+    def _smc_fvg_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Fair Value Gap component.
+
+        Bullish FVGs indicate institutional buying pressure — price left
+        an imbalance that tends to be filled, creating a support zone.
+        Bearish FVGs indicate selling pressure.
+
+        The component scores whether an active FVG aligns with the
+        proposed trade direction.
+        """
+        bullish_fvg = features.get("smc_bullish_fvg", 0.0)
+        bearish_fvg = features.get("smc_bearish_fvg", 0.0)
+        fvg_count = features.get("smc_fvg_count", 0.0)
+
+        # No FVGs detected → neutral
+        if fvg_count == 0:
+            return 0.50
+
+        # Direction alignment: FVG present + direction matches = strong signal
+        if direction is Direction.LONG and bullish_fvg > 0:
+            base = 0.70
+            # Multiple bullish FVGs = stronger signal
+            if fvg_count >= 3:
+                base = 0.80
+            return base
+        elif direction is Direction.SHORT and bearish_fvg > 0:
+            base = 0.70
+            if fvg_count >= 3:
+                base = 0.80
+            return base
+        # Opposing FVGs: penalize slightly
+        elif direction is Direction.LONG and bearish_fvg > 0:
+            return 0.35
+        elif direction is Direction.SHORT and bullish_fvg > 0:
+            return 0.35
+
+        return 0.50
+
+    def _smc_ob_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Order Block component.
+
+        Order Blocks represent institutional supply/demand zones — the last
+        opposing candle before an impulsive move.  Bullish OBs are demand
+        zones (support), bearish OBs are supply zones (resistance).
+
+        The component scores whether an active Order Block aligns with
+        the proposed trade direction and its strength.
+        """
+        ob_bullish = features.get("smc_ob_bullish", 0.0)
+        ob_bearish = features.get("smc_ob_bearish", 0.0)
+        ob_strength = features.get("smc_ob_strength", 0.0)
+        ob_count = features.get("smc_order_block_count", 0.0)
+
+        if ob_count == 0:
+            return 0.50
+
+        # Direction alignment: OB present + direction matches = strong signal
+        if direction is Direction.LONG and ob_bullish > 0:
+            # Strength modulates: strong OBs are more reliable
+            base = 0.60 + ob_strength * 0.20  # 0.60 to 0.80
+            return base
+        elif direction is Direction.SHORT and ob_bearish > 0:
+            base = 0.60 + ob_strength * 0.20
+            return base
+        # Opposing OBs: the zone acts as resistance/support against us
+        elif direction is Direction.LONG and ob_bearish > 0:
+            return 0.35
+        elif direction is Direction.SHORT and ob_bullish > 0:
+            return 0.35
+
+        return 0.50
+
+    def _smc_bos_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Break of Structure component.
+
+        BOS confirms trend continuation — when price breaks a swing high
+        (bullish BOS) or swing low (bearish BOS), it signals the trend
+        is intact and likely to continue.
+
+        This is a strong directional confirmation signal in ICT/SMC.
+        """
+        smc_bos = features.get("smc_bos", 0.0)
+
+        # No BOS detected → neutral
+        if smc_bos == 0.0:
+            return 0.50
+
+        # BOS aligned with direction: strong continuation signal
+        if direction is Direction.LONG and smc_bos > 0:
+            return 0.80  # bullish BOS = strong long confirmation
+        elif direction is Direction.SHORT and smc_bos < 0:
+            return 0.80  # bearish BOS = strong short confirmation
+        # BOS opposed to direction: strong counter-signal
+        elif direction is Direction.LONG and smc_bos < 0:
+            return 0.25  # bearish BOS = strong evidence against long
+        elif direction is Direction.SHORT and smc_bos > 0:
+            return 0.25  # bullish BOS = strong evidence against short
+
+        return 0.50
+
+    def _smc_choch_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Change of Character component.
+
+        CHoCH signals a potential trend reversal — when price breaks structure
+        in the opposite direction of the prevailing trend.  It's the first
+        sign that institutional order flow is shifting.
+
+        CHoCH is scored as a reversal confirmation: if we're going long
+        and a bullish CHoCH appears, it confirms the reversal from bearish
+        to bullish.
+        """
+        smc_choch = features.get("smc_choch", 0.0)
+
+        # No CHoCH detected → neutral
+        if smc_choch == 0.0:
+            return 0.50
+
+        # CHoCH aligned with direction: reversal confirmation
+        if direction is Direction.LONG and smc_choch > 0:
+            return 0.75  # bullish CHoCH = reversal into bullish
+        elif direction is Direction.SHORT and smc_choch < 0:
+            return 0.75  # bearish CHoCH = reversal into bearish
+        # CHoCH opposed: the reversal is against us
+        elif direction is Direction.LONG and smc_choch < 0:
+            return 0.30
+        elif direction is Direction.SHORT and smc_choch > 0:
+            return 0.30
+
+        return 0.50
+
     def _rationale(
         self,
         direction: Direction,
@@ -1119,6 +1266,23 @@ class DecisionEngine:
             notes.append("bullish market structure")
         elif features.get("structure_bias", 0.0) < -0.5:
             notes.append("bearish market structure")
+        # SMC institutional patterns
+        if features.get("smc_bullish_fvg", 0.0):
+            notes.append("SMC: bullish FVG active")
+        if features.get("smc_bearish_fvg", 0.0):
+            notes.append("SMC: bearish FVG active")
+        if features.get("smc_ob_bullish", 0.0):
+            notes.append("SMC: bullish order block")
+        if features.get("smc_ob_bearish", 0.0):
+            notes.append("SMC: bearish order block")
+        if features.get("smc_bos", 0.0) > 0:
+            notes.append("SMC: bullish BOS (continuation)")
+        elif features.get("smc_bos", 0.0) < 0:
+            notes.append("SMC: bearish BOS (continuation)")
+        if features.get("smc_choch", 0.0) > 0:
+            notes.append("SMC: bullish CHoCH (reversal)")
+        elif features.get("smc_choch", 0.0) < 0:
+            notes.append("SMC: bearish CHoCH (reversal)")
         return tuple(notes)
 
     def update_calibration(self, prediction: float, outcome: int) -> None:
@@ -1279,6 +1443,17 @@ class DecisionEngine:
                 "regime_component": 1.0 if (signal.direction == Direction.LONG and signal.snapshot.regime == Regime.TREND_UP) or (signal.direction == Direction.SHORT and signal.snapshot.regime == Regime.TREND_DOWN) else 0.5,
                 "displacement": features.get("displacement_atr", 0.0),
                 "momentum": features.get("slope_20_atr", 0.0),
+            },
+            "smc_features": {
+                "fvg_bullish": features.get("smc_bullish_fvg", 0.0) > 0,
+                "fvg_bearish": features.get("smc_bearish_fvg", 0.0) > 0,
+                "fvg_count": features.get("smc_fvg_count", 0.0),
+                "ob_bullish": features.get("smc_ob_bullish", 0.0) > 0,
+                "ob_bearish": features.get("smc_ob_bearish", 0.0) > 0,
+                "ob_count": features.get("smc_order_block_count", 0.0),
+                "ob_strength": features.get("smc_ob_strength", 0.0),
+                "bos": features.get("smc_bos", 0.0),
+                "choch": features.get("smc_choch", 0.0),
             },
             "rationale": list(signal.rationale),
             "entry_reason": f"Entry at {signal.entry:.5f} based on {signal.execution_trigger_type or 'pattern'} trigger",

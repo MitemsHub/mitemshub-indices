@@ -47,6 +47,9 @@ class SignalFeedback:
     feedback_at: str | None = None
     feedback_notes: str | None = None  # optional user notes
 
+    # Execution tracking
+    executed_at: str | None = None  # when user clicked Execute (ISO timestamp)
+
     # Auto-tracked outcome
     outcome: str | None = None  # "tp_hit", "sl_hit", "expired", "manual_win", "manual_loss"
     outcome_price: float | None = None
@@ -173,6 +176,25 @@ class SignalFeedbackTracker:
         signal.user_feedback = feedback
         signal.feedback_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
         signal.feedback_notes = notes
+        self._persist()
+        return True
+
+    def record_execution(
+        self,
+        *,
+        signal_id: str,
+        entry_price: float | None = None,
+    ) -> bool:
+        """Mark a signal as executed by the user.
+
+        This does NOT set the outcome — the outcome will be determined
+        later by resolve_outcomes() after the hold horizon expires.
+        """
+        signal = self._signals.get(signal_id)
+        if signal is None:
+            return False
+
+        signal.executed_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
         self._persist()
         return True
 

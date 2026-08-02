@@ -260,6 +260,32 @@ export async function POST(request: Request) {
     return NextResponse.json({ success: true });
   }
 
+  if (action === "record_execution") {
+    // Mark a signal as executed by the user. Does NOT set outcome —
+    // the outcome will be determined later by bulk_resolve after
+    // the hold horizon expires.
+    const { signal_id } = body;
+    if (!signal_id) {
+      return NextResponse.json({ error: "signal_id required" }, { status: 400 });
+    }
+
+    const signals = await readJsonl(getFeedbackPath());
+    const signal = signals.find((s) => s.signal_id === signal_id);
+    if (!signal) {
+      return NextResponse.json({ error: "Signal not found" }, { status: 404 });
+    }
+
+    signal.executed_at = new Date().toISOString();
+
+    // Rewrite the file
+    const path = getFeedbackPath();
+    await mkdir(join(path, ".."), { recursive: true });
+    const content = signals.map((s) => JSON.stringify(s)).join("\n") + "\n";
+    await writeFile(path, content, "utf8");
+
+    return NextResponse.json({ success: true });
+  }
+
   if (action === "record_outcome") {
     // Record outcome for a signal
     const { signal_id, outcome, outcome_price, pnl_pips, r_multiple } = body;
@@ -290,40 +316,40 @@ export async function POST(request: Request) {
 
   if (action === "bulk_resolve") {
     // Auto-resolve signals that have passed their hold horizon.
-    // For "executed" trades, reads the CSV tick file to check whether
-    // TP or SL was hit — this is the core outcome-tracking loop.
-    const { readFile: fsReadFile } = await import("node:fs/promises");
-    const { existsSync: fsExists } = await import("node:fs");
+    // Priority order:
+    //   1. Executed trades (executed_at set) — check CSV for TP/SL hits
+    //   2. Non-executed signals — check CSV for directional movement
+    //   3. No price data — mark as expired
     const signals = await readJsonl(getFeedbackPath());
     let resolved = 0;
     const calibrationOutcomes: Array<{ signal_id: string; prediction: number; label: number }> = [];
 
+    // Hold horizon: 6 hours for sniper mode (4-6 hour swing trades)
+    const HOLD_MINUTES = 360;
+    const now = Date.now();
+
     for (const signal of signals) {
-      if (signal.outcome !== null) continue;
+      if (signal.outcome !== null) continue; // already resolved
 
       const generatedAt = new Date(signal.generated_at).getTime();
-      const now = Date.now();
-      const holdMinutes = 360; // 6 hours
       const elapsed = (now - generatedAt) / (1000 * 60);
 
-      if (elapsed < holdMinutes) continue;
+      if (elapsed < HOLD_MINUTES) continue; // not yet time to resolve
 
-      // For executed trades, check CSV for TP/SL hits
-      if (signal.direction === "buy" || signal.direction === "sell") {
-        const outcome = await resolveTradeOutcome(signal);
-        signal.outcome = outcome.label;
-        signal.outcome_price = outcome.exit_price;
-        signal.pnl_pips = outcome.pnl_pips;
-        signal.r_multiple = outcome.r_multiple;
-      } else {
-        signal.outcome = "expired";
-      }
+      // Resolve the outcome from CSV tick data
+      const outcome = await resolveTradeOutcome(signal);
+      signal.outcome = outcome.label;
+      signal.outcome_price = outcome.exit_price;
+      signal.pnl_pips = outcome.pnl_pips;
+      signal.r_multiple = outcome.r_multiple;
       signal.outcome_at = new Date().toISOString();
       resolved++;
 
-      // Queue for calibration feed
-      if (signal.outcome === "tp_hit" || signal.outcome === "sl_hit") {
-        const label = signal.outcome === "tp_hit" ? 1 : 0;
+      // Feed real outcomes (tp_hit, sl_hit, manual_win, manual_loss) into calibration
+      // These are genuine market outcomes that the model can learn from.
+      if (outcome.label === "tp_hit" || outcome.label === "sl_hit" ||
+          outcome.label === "manual_win" || outcome.label === "manual_loss") {
+        const label = (outcome.label === "tp_hit" || outcome.label === "manual_win") ? 1 : 0;
         calibrationOutcomes.push({
           signal_id: signal.signal_id,
           prediction: signal.confidence,
@@ -344,7 +370,16 @@ export async function POST(request: Request) {
       await feedOutcomesToCalibration(calibrationOutcomes);
     }
 
-    return NextResponse.json({ success: true, resolved, calibration_fed: calibrationOutcomes.length });
+    return NextResponse.json({
+      success: true,
+      resolved,
+      calibration_fed: calibrationOutcomes.length,
+      details: calibrationOutcomes.map((o) => ({
+        signal_id: o.signal_id,
+        label: o.label === 1 ? "win" : "loss",
+        confidence: o.prediction,
+      })),
+    });
   }
 
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });
