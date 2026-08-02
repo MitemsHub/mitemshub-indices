@@ -32,6 +32,26 @@ class DecisionReport:
 
 MAX_CALIBRATION_SAMPLES = 500
 
+# ── Auto-raise min_confidence constants ──────────────────────
+# When calibration_samples > 30, the system has enough data to
+# evaluate its own prediction quality.  As the Brier score improves
+# (lower = better), the confidence bar for signal generation is
+# automatically raised so only higher-quality setups pass.
+#
+# BRIER_FLOOR (0.25) = coin-flip quality → no raise, use base threshold
+# BRIER_CEIL (0.10) = excellent quality → raise to max threshold
+# MIN_RAISE_SAMPLES = 30 → need at least this many predictions before
+#   the auto-raise kicks in (below this, use the static base threshold)
+#
+# The raise is linear interpolation between floor and ceil:
+#   progress = (BRIER_FLOOR - brier) / (BRIER_FLOOR - BRIER_CEIL)
+#   auto_min = base + progress * (MAX_RAISED - base)
+BRIER_FLOOR = 0.25
+BRIER_CEIL = 0.10
+MIN_RAISE_SAMPLES = 30
+BASE_MIN_CONFIDENCE = 0.48
+MAX_RAISED_CONFIDENCE = 0.55
+
 
 @dataclass
 class CalibrationState:
@@ -263,9 +283,18 @@ class DecisionEngine:
         confidence = long_score if direction is Direction.LONG else short_score
         if setup.state != "none" and confirmation.state in {"confirmed", "actionable"}:
             confidence = max(confidence, profile.confirmed_setup_confidence_floor)
+        # ── Dynamic min_confidence: auto-raise as model learns ─────
+        # When calibration_samples > 30, the system has enough data to
+        # evaluate its own prediction quality.  As Brier score improves
+        # (lower = better), the confidence bar is automatically raised
+        # so only higher-quality setups pass the gate.
+        #
+        # The profile.confidence_relaxation still applies — some symbols
+        # legitimately need lower thresholds (e.g. volatile indices).
+        dynamic_min = self._dynamic_min_confidence()
         min_confidence = max(
             0.0,
-            self.config.risk.min_confidence - profile.confidence_relaxation,
+            dynamic_min - profile.confidence_relaxation,
         )
 
         # --- NEVER return None when data exists. ---
@@ -629,6 +658,39 @@ class DecisionEngine:
             position_scale=position_scale,
         )
         return DecisionReport(signal, rationale)
+
+    def _dynamic_min_confidence(self) -> float:
+        """Return the dynamic min_confidence threshold, raised when the model learns.
+
+        When calibration_samples <= MIN_RAISE_SAMPLES, returns the base
+        threshold (0.48).  Once we have enough calibration data, the
+        threshold is linearly interpolated between BASE_MIN_CONFIDENCE
+        and MAX_RAISED_CONFIDENCE based on Brier score quality:
+
+          - Brier >= 0.25 (coin-flip) → no raise, use base
+          - Brier <= 0.10 (excellent)  → full raise to max
+          - Brier in between → proportional raise
+
+        This ensures that as the model's probability estimates become
+        more accurate, only higher-confidence setups pass the gate,
+        naturally tightening signal quality without manual tuning.
+        """
+        n = len(self.calibration.predictions)
+        if n < MIN_RAISE_SAMPLES:
+            return BASE_MIN_CONFIDENCE
+
+        brier = self.calibration.brier_score()
+        if brier is None:
+            return BASE_MIN_CONFIDENCE
+
+        # Clamp brier to [BRIER_CEIL, BRIER_FLOOR] for interpolation
+        brier_clamped = max(BRIER_CEIL, min(BRIER_FLOOR, brier))
+
+        # Linear interpolation: progress 0.0 (poor) → 1.0 (excellent)
+        progress = (BRIER_FLOOR - brier_clamped) / (BRIER_FLOOR - BRIER_CEIL)
+        dynamic_min = BASE_MIN_CONFIDENCE + progress * (MAX_RAISED_CONFIDENCE - BASE_MIN_CONFIDENCE)
+
+        return clamp(dynamic_min, BASE_MIN_CONFIDENCE, MAX_RAISED_CONFIDENCE)
 
     def _classify_signal_strength(
         self,
