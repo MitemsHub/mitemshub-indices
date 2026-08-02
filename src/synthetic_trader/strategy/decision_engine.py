@@ -709,10 +709,16 @@ class DecisionEngine:
 
         Returns one of: "strong_buy", "weak_buy", "wait", "weak_sell", "strong_sell"
         """
-        STRONG_THRESHOLD = 0.65
+        # When a formal setup is confirmed, use a lower threshold (0.52)
+        # for strong classification.  The setup itself provides structural
+        # validation — we don't need the model to also have high confidence.
+        # Without a formal setup, require the higher 0.65 threshold.
+        STRONG_WITH_SETUP = 0.52
+        STRONG_WITHOUT_SETUP = 0.65
         dir_suffix = "buy" if direction is Direction.LONG else "sell"
 
-        if confidence >= STRONG_THRESHOLD and has_formal_setup:
+        threshold = STRONG_WITH_SETUP if has_formal_setup else STRONG_WITHOUT_SETUP
+        if confidence >= threshold and has_formal_setup:
             return f"strong_{dir_suffix}"
         elif confidence >= min_confidence:
             return f"weak_{dir_suffix}"

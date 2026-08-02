@@ -13,7 +13,12 @@ GRACE_PERIOD_TICKS = 8
 # normal pullbacks on volatile synthetics will always trigger "failing".
 # After confirmation, the guardian should only check thesis invalidation
 # (stop hit) on sniper mode.
-SNIPER_MICRO_REEVAL_INTERVAL_TICKS = 360  # 30 minutes between micro re-evals
+SNIPER_MICRO_REEVAL_INTERVAL_TICKS = 0  # Immediately skip microstructure after confirmation for sniper mode
+# Sniper trades target 4-6 hour holds.  Once confirmed, the guardian should
+# ONLY check thesis invalidation (stop hit / max adverse excursion).
+# Normal pullbacks on volatile synthetics will ALWAYS trigger "failing"
+# via pullback_ratio or acceleration_shift checks — this is the root cause
+# of "Plan is losing strength" appearing within seconds of a confirmed call.
 
 
 @dataclass(frozen=True)
