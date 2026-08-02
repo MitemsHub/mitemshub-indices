@@ -218,16 +218,11 @@ def _passes_entry_gate(
             False,
             "The setup is actionable, but live continuation still needs more persistence.",
         )
-    if micro.persistence_ticks < thresholds.min_persistence_ticks:
-        return (
-            False,
-            "The setup is actionable, but persistence is still too weak for confirmation.",
-        )
-    if micro.impulse_ratio < thresholds.min_impulse_ratio:
-        return (
-            False,
-            "The setup is actionable, but impulse quality is still too weak for confirmation.",
-        )
+    # Sniper-only mode: persistence and impulse checks relaxed.
+    # For a 4-6 hour swing trade, the structural analysis (setup +
+    # confirmation) is what matters — not tick-level persistence.
+    # The price will naturally fluctuate on volatile synthetics.
+    # These checks are only relevant for intraday scalping.
     if micro.pullback_ratio > thresholds.max_pullback_ratio:
         return (
             False,
@@ -243,11 +238,11 @@ def _passes_entry_gate(
             False,
             "The setup is actionable, but the confirmation window has already gone stale.",
         )
-    if micro.rejection_imbalance <= 0:
-        return (
-            False,
-            "The setup is actionable, but rejection quality is still too mixed for confirmation.",
-        )
+    # Sniper-only mode: rejection_imbalance check REMOVED.
+    # On volatile synthetic indices, the microstructure window often has
+    # more adverse ticks than positive ticks even when the overall trend
+    # is bullish.  For a 4-6 hour swing trade, the structural analysis
+    # (setup + confirmation) is what matters — not tick-level noise.
     return True, ""
 
 
