@@ -204,3 +204,38 @@ export function notifyBridgeReconnected(): boolean {
     renotify: true,
   });
 }
+
+// ── Learning milestone notifications ────────────────────────
+
+const MILESTONE_LABELS: Record<number, { emoji: string; label: string; body: string }> = {
+  30: {
+    emoji: "🧠",
+    label: "First Calibration",
+    body: "Model has 30 calibration samples — probability estimates are now statistically reliable.",
+  },
+  100: {
+    emoji: "🎯",
+    label: "Mature Calibration",
+    body: "Model has 100 calibration samples — high-confidence probability calibration active.",
+  },
+  500: {
+    emoji: "🏆",
+    label: "Expert Calibration",
+    body: "Model has 500 calibration samples — enterprise-grade probability calibration.",
+  },
+};
+
+export function notifyLearningMilestone(params: {
+  symbol: string;
+  milestone: number;
+}): boolean {
+  const info = MILESTONE_LABELS[params.milestone];
+  if (!info) return false;
+  const label = params.symbol.replace(/_/g, " ").toUpperCase();
+  return sendNotification({
+    title: `${info.emoji} ${info.label} — ${label}`,
+    body: info.body,
+    tag: `learning-milestone-${params.symbol}-${params.milestone}`,
+    renotify: true,
+  });
+}

@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import { isNotificationSupported, notifyLearningMilestone } from "../../lib/notifications";
 
 type SubprocessHistoryEntry = {
   label: string;
@@ -70,6 +71,10 @@ type CalibrationSymbolStats = {
   last_save_epoch?: number;
   last_save_age_seconds?: number;
   file_size_bytes?: number;
+  milestones_reached?: number[];
+  milestone_30?: boolean;
+  milestone_100?: boolean;
+  milestone_500?: boolean;
 } | null | { error: string };
 
 type CalibrationStats = Record<string, CalibrationSymbolStats>;
@@ -143,6 +148,26 @@ export function PipelineDiagnosticsPanel() {
   const [sseStatus, setSseStatus] = useState<SseStatusData | null>(null);
   const [replayStats, setReplayStats] = useState<ReplayBufferStats | null>(null);
   const [calibrationStats, setCalibrationStats] = useState<CalibrationStats | null>(null);
+
+  // ── Learning milestone notification dedup ──────────────────
+  // Track which milestones have already been notified to avoid
+  // duplicate browser notifications on each 10s poll cycle.
+  const notifiedMilestonesRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!calibrationStats || !isNotificationSupported()) return;
+    for (const [key, stats] of Object.entries(calibrationStats)) {
+      if (!stats || "error" in stats) continue;
+      const s = stats as { total_samples: number; milestones_reached?: number[] };
+      for (const milestone of s.milestones_reached ?? []) {
+        const dedupKey = `${key}-${milestone}`;
+        if (!notifiedMilestonesRef.current.has(dedupKey)) {
+          notifiedMilestonesRef.current.add(dedupKey);
+          notifyLearningMilestone({ symbol: key, milestone });
+        }
+      }
+    }
+  }, [calibrationStats]);
 
   // useCallback keeps a stable reference for the useEffect dependency.
   // Without it, the effect would re-run on every render.

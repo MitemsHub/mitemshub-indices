@@ -59,6 +59,33 @@ def get_calibration_stats(engine_root: str) -> dict[str, object]:
             # Key is derived from filename (e.g. R_100_sniper.json → R_100_sniper)
             key = state_file.stem
 
+            # ── Milestone tracking ─────────────────────────────────
+            # Milestones are thresholds where the model's calibration
+            # quality takes a step-change.  The frontend fires browser
+            # notifications when new milestones are first reached.
+            # Persisted back to the state file so they don't re-fire.
+            milestones = dict(versioning.get("milestones", {}))
+            milestones_reached = []
+            milestones_dirty = False
+            MILESTONE_THRESHOLDS = [30, 100, 500]
+            for threshold in MILESTONE_THRESHOLDS:
+                milestone_key = f"reached_{threshold}"
+                if total >= threshold and not milestones.get(milestone_key):
+                    milestones_reached.append(threshold)
+                    milestones[milestone_key] = time.time()
+                    milestones_dirty = True
+            # Persist newly-reached milestones back to the state file
+            # so they don't re-fire on subsequent API polls.
+            if milestones_dirty:
+                try:
+                    versioning["milestones"] = milestones
+                    state["versioning"] = versioning
+                    state_file.write_text(
+                        json.dumps(state, indent=2), encoding="utf-8"
+                    )
+                except Exception:
+                    pass  # best-effort — don't crash stats read for a write failure
+
             result[key] = {
                 "total_samples": total,
                 "positive_count": positive_count,
@@ -69,6 +96,11 @@ def get_calibration_stats(engine_root: str) -> dict[str, object]:
                 "model_version": model.get("metadata", {}).get("version", "unknown"),
                 "ready": total >= 30,  # IsotonicRegression needs 30+ samples
                 "progress_pct": min(round(total / 30 * 100, 1), 100.0),
+                # Milestone data
+                "milestones_reached": milestones_reached,
+                "milestone_30": milestones.get("reached_30") is not None,
+                "milestone_100": milestones.get("reached_100") is not None,
+                "milestone_500": milestones.get("reached_500") is not None,
                 # Persistence metadata
                 "loaded_from_disk": total > 0 or model.get("updates", 0) > 0,
                 "save_count": versioning.get("save_count", 0),
