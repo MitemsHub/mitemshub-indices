@@ -83,7 +83,13 @@ def test_fetch_prices_for_record_requests_generated_window_and_filters_ticks() -
 
     prices = asyncio.run(fetch_prices_for_record(record=record, client=client))
 
-    assert prices == [480.1, 482.2, 483.4]
+    # (price, epoch) pairs — the scorer needs the timestamps to bucket ticks
+    # into closed execution-timeframe candles for the stop-lock grace.
+    assert prices == [
+        (480.1, 1783850400.0),
+        (482.2, 1783852200.0),
+        (483.4, 1783854000.0),
+    ]
     assert client.requests == [
         {
             "symbol": "R_100",
@@ -381,6 +387,160 @@ def test_score_unresolved_records_from_market_writes_stop_hit_when_stop_is_reach
     assert result.failed_records == 0
     assert result.skipped_records == 0
     assert written[0]["outcome_label"] == "stop_hit"
+
+
+def test_score_call_outcome_stop_wick_in_forming_candle_without_closed_breach_is_neither() -> None:
+    """Stop-lock grace: a wick through the stop inside the STILL-FORMING
+    execution candle (no closed-candle breach) must score 'neither', not
+    'stop_hit' — matching the guardian's plan-hold rule."""
+    prices = [
+        (100.0, 1000.0),  # closed bucket 1: no breach
+        (100.2, 1200.0),
+        (100.1, 1900.0),  # forming bucket 2: wicks to 97.5 then recovers
+        (97.5, 2100.0),
+        (100.3, 2300.0),
+    ]
+    record = {
+        "symbol": "R_75",
+        "generated_at": "2026-07-12T10:00:00+00:00",
+        "hold_horizon_minutes": 60,
+        "entry": 100.0,
+        "execution_stop": 98.0,
+        "primary_target": 103.0,
+        "trade_status": "valid",
+    }
+
+    outcome = score_call_outcome(record=record, prices=prices)
+
+    assert outcome["outcome_label"] == "neither_reached"
+    assert outcome["stop_reached"] is False
+    assert outcome["stop_confirmed_on_closed_candle"] is False
+
+
+def test_score_call_outcome_stop_confirmed_on_closed_candle_is_stop_hit() -> None:
+    """A CLOSED execution candle trading through the stop confirms the
+    stop-out even when price later recovers in the forming candle."""
+    prices = [
+        (100.0, 1000.0),  # closed bucket: low 97.5 breaches stop 98.0
+        (97.5, 1200.0),
+        (99.0, 1500.0),
+        (100.5, 1900.0),  # forming bucket — recovered
+        (100.8, 2200.0),
+    ]
+    record = {
+        "symbol": "R_75",
+        "generated_at": "2026-07-12T10:00:00+00:00",
+        "hold_horizon_minutes": 60,
+        "entry": 100.0,
+        "execution_stop": 98.0,
+        "primary_target": 103.0,
+        "trade_status": "valid",
+    }
+
+    outcome = score_call_outcome(record=record, prices=prices)
+
+    assert outcome["outcome_label"] == "stop_hit"
+    assert outcome["stop_reached"] is True
+    assert outcome["stop_confirmed_on_closed_candle"] is True
+
+
+def test_score_call_outcome_target_wins_over_stop_wick_in_same_closed_candle() -> None:
+    """Within one closed candle a target touch beats a stop breach — the stop
+    breach is a wick, not a confirmed stop-out, under the grace."""
+    prices = [
+        (100.0, 1000.0),  # closed bucket: wicks to 97.5 AND to 103.0
+        (97.5, 1200.0),
+        (103.0, 1500.0),
+        (100.5, 1900.0),  # forming bucket
+    ]
+    record = {
+        "symbol": "R_100",
+        "generated_at": "2026-07-12T10:00:00+00:00",
+        "hold_horizon_minutes": 60,
+        "entry": 100.0,
+        "execution_stop": 98.0,
+        "primary_target": 102.0,
+        "trade_status": "valid",
+    }
+
+    outcome = score_call_outcome(record=record, prices=prices)
+
+    assert outcome["outcome_label"] == "target_hit"
+    assert outcome["stop_confirmed_on_closed_candle"] is False
+
+
+def test_score_call_outcome_sell_stop_confirmed_on_closed_high() -> None:
+    """Sell direction: a closed candle HIGH at/above the stop confirms the
+    stop-out, even with no direction_bias field (inferred from stop > entry)."""
+    prices = [
+        (100.0, 1000.0),  # closed bucket: high 102.5 >= stop 102.0
+        (101.0, 1200.0),
+        (102.5, 1500.0),
+        (99.0, 1900.0),  # forming bucket
+    ]
+    record = {
+        "symbol": "R_100",
+        "generated_at": "2026-07-12T10:00:00+00:00",
+        "hold_horizon_minutes": 60,
+        "entry": 100.0,
+        "execution_stop": 102.0,
+        "primary_target": 97.0,
+        "trade_status": "valid",
+    }
+
+    outcome = score_call_outcome(record=record, prices=prices)
+
+    assert outcome["outcome_label"] == "stop_hit"
+    assert outcome["stop_confirmed_on_closed_candle"] is True
+
+
+def test_score_unresolved_records_from_market_applies_stop_lock_grace_and_tags_rule(
+    tmp_path: Path,
+) -> None:
+    """The live MT5 path scores with the closed-candle grace: a stop wick
+    inside the still-forming execution candle scores 'neither', and the row is
+    tagged so the gate can tell grace-scored from legacy wick-scored rows."""
+    calls_path = tmp_path / "calls.jsonl"
+    outcomes_path = tmp_path / "outcomes.jsonl"
+    calls_path.write_text(
+        '{"symbol":"R_75","generated_at":"2026-07-12T10:00:00+00:00","hold_horizon_minutes":60,"entry":100.0,"execution_stop":98.0,"primary_target":103.0,"trade_status":"valid"}\n',
+        encoding="utf-8",
+    )
+    # Epochs 1783850400/900 = bucket 1982056 (closed, benign) and
+    # 1783851900/900 = bucket 1982057 (the LATEST bucket — the forming candle:
+    # wicks to 97.5 then recovers, all inside it, so no closed candle ever
+    # confirms the stop).
+    client = FakeScoringClient(
+        [
+            [
+                Tick(symbol="R_75", epoch=1783850400.0, price=100.0),
+                Tick(symbol="R_75", epoch=1783850700.0, price=100.4),
+                Tick(symbol="R_75", epoch=1783851900.0, price=100.1),
+                Tick(symbol="R_75", epoch=1783852100.0, price=97.5),
+                Tick(symbol="R_75", epoch=1783852150.0, price=100.3),
+            ]
+        ]
+    )
+
+    result = asyncio.run(
+        score_unresolved_records_from_market(
+            calls_path=calls_path,
+            outcomes_path=outcomes_path,
+            now=datetime(2026, 7, 12, 11, 30, tzinfo=timezone.utc),
+            client_factory=lambda: client,
+        )
+    )
+
+    written = [
+        json.loads(line)
+        for line in outcomes_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert result.scored_records == 1
+    assert written[0]["outcome_label"] == "neither_reached"
+    assert written[0]["stop_reached"] is False
+    assert written[0]["stop_confirmed_on_closed_candle"] is False
+    assert written[0]["scoring_rule"] == "closed_candle_grace"
+    assert written[0]["execution_timeframe_sec"] == 900
 
 
 def test_score_unresolved_records_from_market_raises_without_client_no_deriv_fallback(

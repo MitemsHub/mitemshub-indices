@@ -218,12 +218,20 @@ def reward_risk_from_record(record: dict[str, object]) -> float:
     return abs(target_f - entry_f) / risk
 
 
-def _prices_in_window(ticks: list[Tick], start_epoch: float, end_epoch: float) -> list[float]:
-    """Extract tick prices within [start_epoch, end_epoch) from a sorted tick list."""
+def _prices_in_window(
+    ticks: list[Tick], start_epoch: float, end_epoch: float
+) -> list[tuple[float, float]]:
+    """Extract (price, epoch) pairs within [start_epoch, end_epoch) from a sorted tick list.
+
+    Epochs are included so ``score_call_outcome`` can apply the same
+    stop-lock grace as the live auto-scorer (stop only confirmed by a CLOSED
+    execution-timeframe candle) — the backtest verdict must score with the
+    exact production rules.
+    """
     epochs = [t.epoch for t in ticks]
     left = bisect.bisect_left(epochs, start_epoch)
     right = bisect.bisect_left(epochs, end_epoch)
-    return [ticks[i].price for i in range(left, right)]
+    return [(ticks[i].price, ticks[i].epoch) for i in range(left, right)]
 
 
 def emit_calls_from_ticks(

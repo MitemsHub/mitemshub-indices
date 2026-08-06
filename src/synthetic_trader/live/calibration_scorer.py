@@ -17,6 +17,12 @@ class CalibrationScoringResult:
     skipped_records: int = 0
 
 
+# The execution timeframe (seconds) the guardian uses to confirm a stop
+# trade-through on a CLOSED candle.  The scorer must use the same window so
+# the empirical hit-rate journal tells the same story as the plan-hold rule.
+DEFAULT_EXECUTION_TIMEFRAME_SEC = 900
+
+
 def _resolve_record_window(
     *,
     record: dict[str, object],
@@ -33,7 +39,7 @@ async def fetch_prices_for_record(
     record: dict[str, object],
     client: MarketDataClient,
     window_minutes: int | None = None,
-) -> list[float]:
+) -> list[tuple[float, float]]:
     window_start, window_end, _ = _resolve_record_window(
         record=record,
         window_minutes=window_minutes,
@@ -46,8 +52,10 @@ async def fetch_prices_for_record(
         start=start_epoch,
         end=end_epoch,
     )
+    # (price, epoch) pairs: the scorer needs the timestamps to bucket ticks
+    # into closed execution-timeframe candles for the stop-lock grace.
     prices = [
-        tick.price
+        (tick.price, tick.epoch)
         for tick in sorted(ticks, key=lambda item: item.epoch)
         if start_epoch <= int(tick.epoch) <= end_epoch
     ]
@@ -68,33 +76,163 @@ def _price_hits_stop(*, price: float, entry: float, stop: float) -> bool:
     return price >= stop
 
 
-def score_call_outcome(*, record: dict[str, object], prices: list[float]) -> dict[str, object]:
+def _prices_from_window(
+    prices: list[float] | list[tuple[float, float]],
+) -> list[float]:
+    """Extract plain prices from either a price list or (price, epoch) pairs."""
+    if prices and isinstance(prices[0], (tuple, list)):
+        return [float(price) for price, _ in prices]
+    return [float(price) for price in prices]
+
+
+def _stop_traded_on_closed_candle(
+    *,
+    prices_with_epochs: list[tuple[float, float]],
+    stop: float,
+    entry: float,
+    timeframe_sec: int,
+) -> bool:
+    """True when a CLOSED execution-timeframe candle traded through the stop.
+
+    Mirrors ``market_snapshot._stop_traded_on_closed_candle`` (the guardian's
+    stop-lock grace): ticks are bucketed into ``timeframe_sec`` windows, the
+    currently-forming (latest) bucket is EXCLUDED, and only completed candles'
+    low (buy) / high (sell) against the stop count.  An intraday spread/jitter
+    wick inside the still-forming candle can never confirm a stop-out, so the
+    empirical hit-rate journal stays consistent with the live plan-hold rule.
+    """
+    if stop is None or not prices_with_epochs or timeframe_sec <= 0:
+        return False
+    buckets: dict[int, list[float]] = {}
+    for price, epoch in prices_with_epochs:
+        key = int(float(epoch) // timeframe_sec)
+        buckets.setdefault(key, []).append(float(price))
+    if len(buckets) < 2:
+        return False  # no closed candle yet
+    closed_keys = sorted(buckets.keys())[:-1]  # drop the forming candle
+    if entry is not None and stop > entry:
+        return any(max(buckets[key]) >= stop for key in closed_keys)
+    return any(min(buckets[key]) <= stop for key in closed_keys)
+
+
+def _score_with_closed_candle_grace(
+    *,
+    prices: list[tuple[float, float]],
+    entry: float,
+    stop: float,
+    target: float,
+    timeframe_sec: int,
+) -> tuple[str, bool]:
+    """Score a price window with the stop-lock grace.
+
+    Target touches count on ANY tick — a wick to the target IS the reward and
+    would fill a take-profit order.  Stop touches only count when a CLOSED
+    execution-timeframe candle traded through the stop; an intraday wick in
+    the forming candle is treated as spread/jitter, exactly like the guardian.
+    Within a single closed candle a target touch beats a stop breach (the stop
+    breach in a candle that also reached target is a wick, not a confirmed
+    stop-out).
+
+    Returns ``(outcome_label, stop_confirmed_on_closed_candle)``.
+    """
+    buckets: dict[int, list[float]] = {}
+    for price, epoch in prices:
+        key = int(float(epoch) // timeframe_sec)
+        buckets.setdefault(key, []).append(float(price))
+    keys = sorted(buckets.keys())
+    if len(keys) < 2:
+        # No closed candle yet: only a target touch can decide the outcome —
+        # a stop wick is not confirmable under the grace.
+        if any(
+            _price_hits_target(price=price, entry=entry, target=target)
+            for price in buckets[keys[0]]
+        ):
+            return "target_hit", False
+        return "neither_reached", False
+
+    for key in keys[:-1]:  # closed candles, chronological
+        candle = buckets[key]
+        if any(
+            _price_hits_target(price=price, entry=entry, target=target)
+            for price in candle
+        ):
+            return "target_hit", False
+        if stop > entry:
+            breached = max(candle) >= stop
+        else:
+            breached = min(candle) <= stop
+        if breached:
+            return "stop_hit", True
+
+    # Forming candle: a target touch counts; a stop touch does not.
+    forming = buckets[keys[-1]]
+    if any(
+        _price_hits_target(price=price, entry=entry, target=target)
+        for price in forming
+    ):
+        return "target_hit", False
+    return "neither_reached", False
+
+
+def score_call_outcome(
+    *,
+    record: dict[str, object],
+    prices: list[float] | list[tuple[float, float]],
+    execution_timeframe_sec: int | None = None,
+) -> dict[str, object]:
+    """Score a call's outcome against its post-call price window.
+
+    ``prices`` may be a plain price list (legacy paths — wick-based target AND
+    stop rules) or ``(price, epoch)`` pairs (the live MT5 path and the gate
+    backtest).  With epochs the scorer applies the SAME stop-lock grace as the
+    guardian: a stop is only confirmed by a CLOSED execution-timeframe candle,
+    never by an intraday wick, so the empirical hit-rate journal stays
+    consistent with the plan-hold rule.
+    """
     entry = record.get("entry")
     stop = record.get("execution_stop")
     target = record.get("primary_target")
     current_close = record.get("current_close")
-    max_favorable = max(prices) if prices else None
-    max_adverse = min(prices) if prices else None
+    plain = _prices_from_window(prices)
+    max_favorable = max(plain) if plain else None
+    max_adverse = min(plain) if plain else None
+    timeframe_sec = execution_timeframe_sec or int(
+        record.get("execution_timeframe_sec") or DEFAULT_EXECUTION_TIMEFRAME_SEC
+    )
 
     if entry is not None and stop is not None and target is not None:
         entry_value = float(entry)
         stop_value = float(stop)
         target_value = float(target)
-        label = "neither_reached"
 
-        for price in prices:
-            if _price_hits_target(price=price, entry=entry_value, target=target_value):
-                label = "target_hit"
-                break
-            if _price_hits_stop(price=price, entry=entry_value, stop=stop_value):
-                label = "stop_hit"
-                break
+        if plain and isinstance(prices[0], (tuple, list)):
+            label, stop_confirmed = _score_with_closed_candle_grace(
+                prices=prices,
+                entry=entry_value,
+                stop=stop_value,
+                target=target_value,
+                timeframe_sec=timeframe_sec,
+            )
+        else:
+            # Legacy plain-price path (no epochs): original wick-based rules
+            # for BOTH target and stop.  No closed-candle confirmation is
+            # possible here, so the grace flag is always False.
+            label = "neither_reached"
+            for price in plain:
+                if _price_hits_target(price=price, entry=entry_value, target=target_value):
+                    label = "target_hit"
+                    break
+                if _price_hits_stop(price=price, entry=entry_value, stop=stop_value):
+                    label = "stop_hit"
+                    break
+            stop_confirmed = False
     else:
         moved = False
-        if current_close is not None and prices:
+        if current_close is not None and plain:
             reference_price = float(current_close)
-            moved = any(abs(price - reference_price) > 1.0 for price in prices)
+            moved = any(abs(price - reference_price) > 1.0 for price in plain)
         label = "rejected_but_price_ran" if moved else "forming_remained_correct"
+        stop_confirmed = False
 
     return {
         "symbol": record.get("symbol"),
@@ -111,6 +249,13 @@ def score_call_outcome(*, record: dict[str, object], prices: list[float]) -> dic
         "max_adverse_excursion": max_adverse,
         "target_reached": label == "target_hit",
         "stop_reached": label == "stop_hit",
+        "stop_confirmed_on_closed_candle": stop_confirmed,
+        "scoring_rule": (
+            "closed_candle_grace"
+            if plain and isinstance(prices[0], (tuple, list))
+            else "wick"
+        ),
+        "execution_timeframe_sec": timeframe_sec,
         "outcome_label": label,
     }
 
@@ -254,6 +399,13 @@ def score_unresolved_records(
     symbol: str | None = None,
     window_minutes: int | None = None,
 ) -> int:
+    """Legacy sync scorer over plain price lists (no epochs).
+
+    Rows produced here use the OLD wick-based rules for both target and stop
+    (``scoring_rule == "wick"``) — the closed-candle grace needs timestamps,
+    which only ``score_unresolved_records_from_market`` provides.  Prefer the
+    market path; this helper exists for callers that only have prices.
+    """
     existing_outcomes = load_jsonl_records(outcomes_path)
     resolved_keys = {_record_key(record) for record in existing_outcomes}
     written = 0

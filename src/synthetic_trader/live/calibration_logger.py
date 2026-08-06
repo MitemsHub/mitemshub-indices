@@ -52,6 +52,10 @@ def build_call_record(alert: dict[str, object]) -> dict[str, object]:
         "invalidates_if": alert.get("invalidates_if"),
         "current_close": alert.get("current_close"),
         "model_version": alert.get("model_version"),
+        # Persisted so the scorer can bucket ticks into the SAME execution
+        # timeframe the guardian uses for closed-candle stop confirmation
+        # (falls back to 900s when absent).
+        "execution_timeframe_sec": alert.get("execution_timeframe_sec"),
     }
 
 

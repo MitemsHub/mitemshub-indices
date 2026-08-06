@@ -2300,6 +2300,33 @@ the price stays pinned through the stop), the plan cancels with the reason
 match the plan's own invalidation text (a *close* through the level), not
 tick-level wicks.
 
+### 38c — Auto-scorer uses the same closed-candle grace
+
+Follow-up to §38b: the **outcome scoring** now applies the identical
+stop-lock grace so the empirical hit-rate journal tells the same story as
+the live plan-hold rule.  `score_call_outcome` accepts prices as either
+plain `list[float]` (legacy — wick-based rules for target AND stop) or
+`(price, epoch)` pairs; the live MT5 path (`fetch_prices_for_record`) and
+the gate backtest (`_prices_in_window`) both pass pairs, so in production:
+
+- **Target** touches count on any tick (a wick to the target fills a
+  take-profit).
+- **Stop** only counts when a **CLOSED** execution-timeframe candle (900s
+  default, persisted per-call via `execution_timeframe_sec` in the journal)
+  traded through it — a wick inside the still-forming candle scores
+  `neither_reached`, not `stop_hit`, so a call whose stop was only
+  wick-touched is no longer marked a loss.
+- Within one closed candle a target touch beats a stop breach (the stop
+  breach in a candle that also reached target is a wick, not a confirmed
+  stop-out).
+
+Each outcome row is stamped with `scoring_rule: "closed_candle_grace" |
+"wick"` and `stop_confirmed_on_closed_candle`, so the gate/operator can
+tell grace-scored rows from legacy wick-scored rows in the journal (rows
+resolved before this change keep their original labels — the dedup key
+`(symbol, generated_at)` never re-scores them; a future re-score pass can
+select on `scoring_rule`).
+
 ### Validation
 
 - 13 new tests: sniper transient-wick-does-not-cancel, intraday-wick-through-
