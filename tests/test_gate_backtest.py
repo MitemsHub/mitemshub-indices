@@ -98,6 +98,118 @@ class SimulateGateWalkForwardTests(unittest.TestCase):
         self.assertEqual(calls[-1].gate_state, "annotated")  # shown with honest rate
         self.assertEqual(calls[-1].evidence_status, "suppressed")  # data says below floor
 
+    def test_break_even_floor_stamped_on_calls(self) -> None:
+        """With hit_rate_floor=None the walk-forward computes the per-trigger
+        BREAK-EVEN floor (1/(1+avg RR) + margin) from prior calls' geometry
+        and stamps it on each call (no outcome lookahead — RR is known at
+        emission).
+        """
+        calls = [
+            _call(epoch=float(i * 100), trigger="three_r", outcome="target_hit")
+            for i in range(3)
+        ]  # default levels 100/90/130 -> RR 3.0
+        simulate_gate_walk_forward(
+            calls=calls,
+            min_samples=10,
+            hit_rate_floor=None,
+            suppression_mode="suppress",
+        )
+        # First call: no prior RR -> conservative flat fallback, RR unknown.
+        self.assertEqual(calls[0].avg_rr_at_emission, None)
+        self.assertEqual(calls[0].floor_at_emission, 0.5)
+        # Second call: sees call 0's RR 3.0 -> floor = 1/4 + 0.05 = 0.30.
+        self.assertAlmostEqual(calls[1].avg_rr_at_emission, 3.0)
+        self.assertAlmostEqual(calls[1].floor_at_emission, 0.30)
+        # A fixed floor is never break-even-derived.
+        simulate_gate_walk_forward(
+            calls=calls,
+            min_samples=10,
+            hit_rate_floor=0.5,
+            suppression_mode="suppress",
+        )
+        self.assertEqual(calls[1].avg_rr_at_emission, None)
+        self.assertEqual(calls[1].floor_at_emission, 0.5)
+
+    def test_break_even_floor_flips_mid_rate_3r_trigger(self) -> None:
+        """THE FLIP: a 3R trigger hitting 33% sits above its own break-even
+        floor (~30%) but below the old flat 50% bar.  With the default auto
+        floor it is KEPT (gated); under the legacy flat floor it is
+        suppressed.  This is the R_75 all-or-nothing-switch fix.
+        """
+        outcomes = [
+            "stop_hit", "target_hit", "stop_hit",
+            "stop_hit", "target_hit", "stop_hit", "target_hit",
+        ]
+        calls = [
+            _call(epoch=float(i * 100), trigger="three_r", outcome=outcome)
+            for i, outcome in enumerate(outcomes)
+        ]
+        simulate_gate_walk_forward(
+            calls=calls,
+            min_samples=4,
+            hit_rate_floor=None,  # break-even default
+            suppression_mode="suppress",
+        )
+        # Call 6 (t=600) sees the 6 prior resolutions (60..540): 2/6 = 33%.
+        self.assertEqual(calls[6].samples_at_emission, 6)
+        self.assertAlmostEqual(calls[6].avg_rr_at_emission, 3.0)
+        self.assertAlmostEqual(calls[6].floor_at_emission, 0.30)
+        self.assertEqual(calls[6].gate_state, "gated")  # 33% >= 30%
+        self.assertEqual(calls[6].evidence_status, "proven")
+
+        # Same evidence under the legacy flat 0.5 bar -> suppressed.
+        for call in calls:
+            call.gate_state = None
+            call.evidence_status = None
+        simulate_gate_walk_forward(
+            calls=calls,
+            min_samples=4,
+            hit_rate_floor=0.5,
+            suppression_mode="suppress",
+        )
+        self.assertEqual(calls[6].gate_state, "suppressed")
+        self.assertEqual(calls[6].evidence_status, "suppressed")
+
+    def test_per_trigger_floors_differ(self) -> None:
+        """Each trigger's floor tracks its OWN geometry: a 3R trigger clears
+        at ~30%, a 1R trigger must clear ~55%.
+        """
+        calls: list[CallRecord] = []
+        # 3R trigger: entry 100 stop 90 target 130.
+        for i in range(4):
+            calls.append(
+                _call(
+                    epoch=float(i * 100),
+                    trigger="three_r",
+                    outcome="target_hit",
+                    entry=100.0, stop=90.0, target=130.0,
+                )
+            )
+        # 1R trigger: entry 100 stop 95 target 105.
+        for i in range(4):
+            calls.append(
+                _call(
+                    epoch=float(i * 100 + 50),
+                    trigger="one_r",
+                    outcome="target_hit",
+                    entry=100.0, stop=95.0, target=105.0,
+                )
+            )
+        simulate_gate_walk_forward(
+            calls=calls,
+            min_samples=2,
+            hit_rate_floor=None,
+            suppression_mode="suppress",
+        )
+        three = [c for c in calls if c.trigger_type == "three_r"]
+        one = [c for c in calls if c.trigger_type == "one_r"]
+        # Last call of each trigger sees 3 prior resolutions of its own type.
+        self.assertAlmostEqual(three[-1].floor_at_emission, 0.30)
+        self.assertAlmostEqual(one[-1].floor_at_emission, 0.55)
+        # 100% hit clears both — both kept.
+        self.assertEqual(three[-1].gate_state, "gated")
+        self.assertEqual(one[-1].gate_state, "gated")
+
 
 class RewardRiskTests(unittest.TestCase):
     def test_derives_rr_from_levels(self) -> None:

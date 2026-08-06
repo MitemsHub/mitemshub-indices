@@ -63,6 +63,164 @@ def _scored(
     }
 
 
+def test_break_even_floor_math() -> None:
+    """Break-even floor = 1/(1+reward:risk) + margin, clamped to safe bounds.
+    A 3R setup must clear ~30% (1/4 + 5%), not an unreachable 50%.
+    """
+    from synthetic_trader.live.stage3_gate import (
+        BREAK_EVEN_FLOOR_MAX,
+        BREAK_EVEN_FLOOR_MIN,
+        break_even_floor,
+    )
+
+    assert abs(break_even_floor(3.0) - 0.30) < 1e-9          # 1/(1+3) + 0.05
+    assert abs(break_even_floor(2.0) - (1 / 3 + 0.05)) < 1e-9  # ~38.3%
+    assert abs(break_even_floor(1.0) - 0.55) < 1e-9          # 1/(1+1) + 0.05
+    # Unknown geometry falls back to the conservative flat floor.
+    assert break_even_floor(None) == GATE_HIT_RATE_FLOOR
+    assert break_even_floor(0.0) == GATE_HIT_RATE_FLOOR
+    assert break_even_floor(-3.0) == GATE_HIT_RATE_FLOOR
+    # Degenerate geometry can never produce a meaningless floor.  A tiny RR
+    # demands a near-100% hit rate -> clamps to the MAX; a huge RR can almost
+    # never lose -> clamps to the MIN.
+    assert break_even_floor(0.01) == BREAK_EVEN_FLOOR_MAX
+    assert break_even_floor(1000.0) == BREAK_EVEN_FLOOR_MIN
+
+
+def test_average_reward_risk_from_outcomes(tmp_path: Path) -> None:
+    """The live gate derives the break-even floor from the scored outcomes'
+    REAL geometry (same level filter as summarize_outcomes), not just the
+    current call's reward:risk.
+    """
+    from synthetic_trader.live.stage3_gate import average_reward_risk
+
+    path = tmp_path / "outcomes.jsonl"
+    _write_outcomes(
+        path,
+        [
+            _scored("R_75", "continuation_close", "target_hit"),  # RR 1.5 (100/98/103)
+            _scored("R_75", "continuation_close", "stop_hit"),  # RR 1.5
+            _scored("R_75", "other_trigger", "target_hit"),  # different trigger
+            {"symbol": "R_75", "trigger_type": "continuation_close", "outcome_label": "target_hit"},  # no levels -> ignored
+            {
+                "symbol": "R_75",
+                "trigger_type": "continuation_close",
+                "outcome_label": "target_hit",
+                "entry": 100.0,
+                "execution_stop": 98.0,
+                "primary_target": 103.0,
+                "scoring_source": "deriv_fallback",  # fallback rows are not evidence
+            },
+        ],
+    )
+    rr = average_reward_risk(
+        symbol="R_75", trigger_type="continuation_close", outcomes_path=path
+    )
+    assert rr is not None
+    assert abs(rr - 1.5) < 1e-9
+    # No level-bearing evidence for this trigger -> None (the gate then falls
+    # back to the current call's own reward:risk).
+    assert (
+        average_reward_risk(
+            symbol="R_75", trigger_type="no_such_trigger", outcomes_path=path
+        )
+        is None
+    )
+
+
+def test_build_stage3_block_defaults_to_break_even_floor(tmp_path: Path) -> None:
+    """No explicit floor -> the per-trigger BREAK-EVEN floor is computed from
+    the call's own reward:risk (no outcomes yet) and surfaced transparently.
+    """
+    snapshot = {
+        "symbol": "R_75",
+        "execution_trigger_type": "continuation_close",
+        "confidence": 0.65,
+        "reward_risk": 3.0,
+    }
+    block = build_stage3_block(snapshot, outcomes_path=tmp_path / "missing.jsonl")
+    assert block["floor_basis"] == "break_even"
+    assert block["break_even_rr"] == 3.0
+    assert abs(block["hit_rate_floor"] - 0.30) < 1e-9
+
+
+def test_build_stage3_block_explicit_floor_wins(tmp_path: Path) -> None:
+    """An explicit hit_rate_floor always wins and is marked 'configured'."""
+    snapshot = {
+        "symbol": "R_75",
+        "execution_trigger_type": "continuation_close",
+        "confidence": 0.6,
+        "reward_risk": 3.0,
+    }
+    block = build_stage3_block(
+        snapshot, outcomes_path=tmp_path / "missing.jsonl", hit_rate_floor=0.5
+    )
+    assert block["floor_basis"] == "configured"
+    assert block["hit_rate_floor"] == 0.5
+    assert block["break_even_rr"] is None
+
+
+def test_gate_break_even_floor_flips_40pct_3r_to_gated(tmp_path: Path) -> None:
+    """THE FLIP: a 3R trigger with a 40% market-verified hit rate was
+    suppressed under the old flat 50% floor (unreachable for 3R geometry).
+    Its break-even floor is ~30%, so 40% clears it -> gated (kept).
+    """
+    outcomes = tmp_path / "outcomes.jsonl"
+    rows = []
+    for _ in range(4):
+        rows.append(
+            {
+                "symbol": "R_75",
+                "trigger_type": "continuation_close",
+                "trade_status": "valid",
+                "outcome_label": "target_hit",
+                "entry": 100.0,
+                "execution_stop": 99.0,  # risk 1
+                "primary_target": 103.0,  # reward 3 -> RR 3.0
+            }
+        )
+    for _ in range(6):
+        rows.append(
+            {
+                "symbol": "R_75",
+                "trigger_type": "continuation_close",
+                "trade_status": "valid",
+                "outcome_label": "stop_hit",
+                "entry": 100.0,
+                "execution_stop": 99.0,
+                "primary_target": 103.0,
+            }
+        )
+    _write_outcomes(outcomes, rows)
+    verdicts = _verdicts_file(tmp_path / "forecast_verdicts.jsonl")
+    snapshot = {
+        "symbol": "R_75",
+        "call": "buy_candidate",
+        "execution_trigger_type": "continuation_close",
+        "confidence": 0.6,
+    }
+    block = build_stage3_block(
+        snapshot, outcomes_path=outcomes, verdict_cache_path=verdicts
+    )
+    assert block["empirical_sample_count"] == 10
+    assert block["empirical_target_hit_rate"] == 0.4
+    assert block["floor_basis"] == "break_even"
+    assert block["break_even_rr"] == 3.0
+    assert abs(block["hit_rate_floor"] - 0.30) < 1e-9
+    assert block["state"] == "gated"  # 40% >= 30% + calibrated horizon
+    assert block["below_floor"] is False
+
+    # Same evidence under the legacy flat 0.5 bar -> suppressed.
+    flat = build_stage3_block(
+        snapshot,
+        outcomes_path=outcomes,
+        verdict_cache_path=verdicts,
+        hit_rate_floor=0.5,
+    )
+    assert flat["state"] == "suppressed"
+    assert flat["below_floor"] is True
+
+
 def test_load_empirical_summary_ignores_level_less_and_fallback_evidence(tmp_path: Path) -> None:
     """Regression: stale level-less outcomes (July-12 era) and Deriv-fallback
     outcomes are NOT evidence.  They poisoned (symbol, trigger_type) buckets

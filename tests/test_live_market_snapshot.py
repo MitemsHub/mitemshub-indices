@@ -17,6 +17,13 @@ from unittest.mock import patch
 # artifacts never accumulate in the production journals/ folder.
 _JOURNAL_DIR = Path(tempfile.mkdtemp(prefix="mitems-test-journals-"))
 
+# Redirect guardian memory to a temp dir BEFORE importing the engine:
+# run_live_snapshot tests would otherwise write live-plan state into the
+# real data/guardian_memory directory and leak it into the dashboard.
+os.environ["SYNTH_GUARDIAN_MEMORY_DIR"] = str(
+    Path(tempfile.mkdtemp(prefix="mitems-test-guardian-memory-"))
+)
+
 from synthetic_trader.cli import main
 from synthetic_trader.config import MAX_FEATURE_HISTORY, TraderConfig
 from synthetic_trader.domain import Direction, FeatureSnapshot, Regime, Tick, TradeSignal
@@ -2849,6 +2856,291 @@ class BackfillCorpusMergeTests(unittest.TestCase):
 
         self.assertIsNotNone(ticks)
         self.assertLessEqual(len(ticks), len(live))
+
+
+class GuardianMemoryTests(unittest.TestCase):
+    """Cross-refresh guardian memory (SYNTH_GUARDIAN_MEMORY_DIR).
+
+    Regression coverage for the operator's flip-flop report: a confirmed BUY
+    plan cancelled on a small dip, then re-confirmed on refresh.  The fix has
+    three parts, each locked here:
+      1. confirmed plans carry across refreshes (memory restore),
+      2. cancelled plans stick across refreshes (no resurrection),
+      3. build_watch_alert stands by the original call when a fresh run
+         momentarily produces stand_aside.
+    """
+
+    def _mem_dir(self) -> Path:
+        return Path(tempfile.mkdtemp(prefix="guardian-mem-test-"))
+
+    def _ticks(self, prices: list[float], symbol: str = "R_100") -> list[Tick]:
+        return [Tick(symbol=symbol, epoch=float(i), price=price) for i, price in enumerate(prices)]
+
+    def _plan_snapshot(self, *, current_close: float, symbol: str = "R_100") -> dict[str, object]:
+        return {
+            "symbol": symbol,
+            "call": "buy_candidate",
+            "trade_status": "valid",
+            "direction_bias": "buy",
+            "entry": 459.6,
+            "stop_loss": 458.2,
+            "take_profit": 462.2,
+            "current_close": current_close,
+            "hold_horizon_minutes": 360,
+        }
+
+    def test_confirmed_plan_carries_across_refresh(self) -> None:
+        mem_dir = self._mem_dir()
+        snap = self._plan_snapshot(current_close=459.7)
+        enriched = build_guardian_snapshot(
+            snap,
+            self._ticks([459.4, 459.5, 459.55, 459.6, 459.65, 459.7]),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(enriched["guardian_state"], "confirmed")
+
+        # Refresh with the SAME plan, but price has drifted far above entry.
+        # Without memory the entry gate would drop this to 'actionable'; the
+        # persisted confirmation must keep the plan confirmed across the
+        # subprocess boundary (the actual refresh path).
+        snap2 = self._plan_snapshot(current_close=462.0)
+        enriched2 = build_guardian_snapshot(
+            snap2,
+            self._ticks([459.6, 460.2, 460.8, 461.2, 461.6, 462.0]),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(enriched2["guardian_state"], "confirmed")
+        self.assertIn("stable", str(enriched2["guardian_reason"]).lower())
+
+    def test_cancelled_plan_sticks_across_refresh(self) -> None:
+        mem_dir = self._mem_dir()
+        # Stop trade-through -> cancelled, and the cancellation is persisted.
+        snap = self._plan_snapshot(current_close=458.1)
+        enriched = build_guardian_snapshot(
+            snap,
+            self._ticks([459.6, 459.0, 458.5, 458.3, 458.2, 458.1]),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(enriched["guardian_state"], "cancelled")
+
+        # Refresh with the same plan and a recovered price: the cancelled
+        # memory must prevent the plan from resurrecting.
+        snap2 = self._plan_snapshot(current_close=459.55)
+        enriched2 = build_guardian_snapshot(
+            snap2,
+            self._ticks([459.6, 459.5, 459.4, 459.45, 459.5, 459.55]),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(enriched2["guardian_state"], "cancelled")
+
+    def test_different_plan_resets_stale_guardian_memory(self) -> None:
+        mem_dir = self._mem_dir()
+        snap = self._plan_snapshot(current_close=459.7)
+        build_guardian_snapshot(
+            snap,
+            self._ticks([459.4, 459.5, 459.55, 459.6, 459.65, 459.7]),
+            guardian_memory_dir=mem_dir,
+        )
+        # A materially different plan (different direction) must start fresh.
+        snap2 = dict(snap)
+        snap2["call"] = "sell_candidate"
+        snap2["direction_bias"] = "sell"
+        snap2["entry"] = 460.0
+        snap2["stop_loss"] = 461.2
+        snap2["take_profit"] = 457.0
+        snap2["current_close"] = 459.9
+        enriched2 = build_guardian_snapshot(
+            snap2,
+            self._ticks([459.9, 459.85, 459.8, 459.75, 459.7, 459.9]),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertIn(enriched2["guardian_state"], ("confirmed", "actionable"))
+
+    def _seed_confirmed_memory(self, mem_dir: Path) -> None:
+        from synthetic_trader.live.guardian_memory import save_guardian_memory
+
+        save_guardian_memory(
+            "R_100",
+            {
+                "symbol": "R_100",
+                "direction": "buy",
+                "entry": 459.6,
+                "stop": 458.2,
+                "target": 462.2,
+                "call": "buy_candidate",
+                "state": "confirmed",
+                "issued_at_epoch": time.time() - 300,
+                "hold_horizon_minutes": 360,
+            },
+            mem_dir,
+        )
+
+    def _stand_aside_alert(self, *, current_close: float | None) -> dict[str, object]:
+        alert: dict[str, object] = {
+            "symbol": "R_100",
+            "call": "stand_aside",
+            "trade_status": "not_valid",
+            "direction_bias": "none",
+            "briefing": "current movement is active but not a clean setup yet",
+            "regime": "range",
+        }
+        if current_close is not None:
+            alert["current_close"] = current_close
+        return alert
+
+    def test_build_watch_alert_restores_held_confirmed_plan(self) -> None:
+        mem_dir = self._mem_dir()
+        self._seed_confirmed_memory(mem_dir)
+        alert = build_watch_alert(
+            self._stand_aside_alert(current_close=459.5),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(alert["call"], "buy_candidate")
+        self.assertEqual(alert["trade_status"], "valid")
+        self.assertEqual(alert["entry"], 459.6)
+        self.assertEqual(alert["stop_loss"], 458.2)
+        self.assertEqual(alert["take_profit"], 462.2)
+        self.assertEqual(alert["guardian_state"], "confirmed")
+        self.assertTrue(alert.get("plan_held"))
+        self.assertEqual(alert["alert_type"], "setup_candidate")
+
+    def test_build_watch_alert_does_not_restore_when_stop_traded_through(self) -> None:
+        mem_dir = self._mem_dir()
+        self._seed_confirmed_memory(mem_dir)
+        alert = build_watch_alert(
+            self._stand_aside_alert(current_close=458.0),  # below the stop
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(alert["call"], "stand_aside")
+        self.assertNotIn("entry", alert)
+
+    def test_build_watch_alert_does_not_restore_after_horizon_expiry(self) -> None:
+        mem_dir = self._mem_dir()
+        self._seed_confirmed_memory(mem_dir)
+        # Expire the 360-minute hold horizon: plan issued 30 hours ago.
+        from synthetic_trader.live.guardian_memory import save_guardian_memory
+
+        save_guardian_memory(
+            "R_100",
+            {
+                "symbol": "R_100",
+                "direction": "buy",
+                "entry": 459.6,
+                "stop": 458.2,
+                "target": 462.2,
+                "call": "buy_candidate",
+                "state": "confirmed",
+                "issued_at_epoch": time.time() - 30 * 3600,
+                "hold_horizon_minutes": 360,
+            },
+            mem_dir,
+        )
+        alert = build_watch_alert(
+            self._stand_aside_alert(current_close=459.5),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(alert["call"], "stand_aside")
+
+    def test_build_watch_alert_does_not_restore_without_fresh_price(self) -> None:
+        mem_dir = self._mem_dir()
+        self._seed_confirmed_memory(mem_dir)
+        # No current_close (MT5 down / stale CSV): never resurrect a plan.
+        alert = build_watch_alert(
+            self._stand_aside_alert(current_close=None),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(alert["call"], "stand_aside")
+
+    def test_restored_held_plan_carries_reward_risk(self) -> None:
+        mem_dir = self._mem_dir()
+        self._seed_confirmed_memory(mem_dir)
+        alert = build_watch_alert(
+            self._stand_aside_alert(current_close=459.5),
+            guardian_memory_dir=mem_dir,
+        )
+        # (462.2-459.6) / (459.6-458.2) = 2.6/1.4 = 1.857
+        self.assertAlmostEqual(float(alert["reward_risk"]), 1.857, places=2)
+
+    def test_same_plan_actionable_does_not_erase_guardian_memory(self) -> None:
+        # A same-plan evaluation that lands on 'actionable' (e.g. the lock
+        # expired mid-hold and the entry gate momentarily fails) must NOT
+        # erase the memory — otherwise 'stand by the call' dies for the rest
+        # of the 6h hold.
+        from synthetic_trader.live.guardian_memory import (
+            load_guardian_memory,
+            save_guardian_memory,
+        )
+
+        mem_dir = self._mem_dir()
+        # Confirmed 2h ago with a 3600s lock — expired, so the restore path
+        # won't fire and the fresh evaluation runs from scratch.
+        save_guardian_memory(
+            "R_100",
+            {
+                "symbol": "R_100",
+                "direction": "buy",
+                "entry": 459.6,
+                "stop": 458.2,
+                "target": 462.2,
+                "call": "buy_candidate",
+                "state": "confirmed",
+                "first_confirmed_at_epoch": time.time() - 7200,
+                "lock_seconds": 3600,
+                "issued_at_epoch": time.time() - 7200,
+                "hold_horizon_minutes": 360,
+            },
+            mem_dir,
+        )
+        # Price far above entry -> entry-drift gate fails -> 'actionable'.
+        snap2 = self._plan_snapshot(current_close=462.0)
+        enriched = build_guardian_snapshot(
+            snap2,
+            self._ticks([459.6, 460.2, 460.8, 461.2, 461.6, 462.0]),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(enriched["guardian_state"], "actionable")
+        # The same-plan actionable evaluation must NOT have erased memory.
+        record = load_guardian_memory("R_100", mem_dir)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["state"], "confirmed")
+
+    def test_different_plan_actionable_clears_stale_memory(self) -> None:
+        # When the strategy has moved on to a DIFFERENT plan, an actionable
+        # evaluation should clear the stale confirmed memory (so the next
+        # stand_aside can't restore a superseded plan).
+        from synthetic_trader.live.guardian_memory import (
+            load_guardian_memory,
+            save_guardian_memory,
+        )
+
+        mem_dir = self._mem_dir()
+        save_guardian_memory(
+            "R_100",
+            {
+                "symbol": "R_100",
+                "direction": "buy",
+                "entry": 459.6,
+                "stop": 458.2,
+                "target": 462.2,
+                "call": "buy_candidate",
+                "state": "confirmed",
+                "issued_at_epoch": time.time() - 300,
+                "hold_horizon_minutes": 360,
+            },
+            mem_dir,
+        )
+        # A genuinely different plan (new entry far from the stored one) that
+        # fails the entry-drift gate -> 'actionable'.
+        snap2 = self._plan_snapshot(current_close=472.0)
+        snap2["entry"] = 470.0
+        snap2["stop_loss"] = 468.6
+        snap2["take_profit"] = 473.4
+        build_guardian_snapshot(
+            snap2,
+            self._ticks([470.0, 470.6, 471.2, 471.6, 471.9, 472.0]),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertIsNone(load_guardian_memory("R_100", mem_dir))
 
 
 if __name__ == "__main__":

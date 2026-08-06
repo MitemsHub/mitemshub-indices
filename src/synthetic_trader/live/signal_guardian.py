@@ -120,6 +120,24 @@ def _stop_distance(snapshot: GuardianSnapshot) -> float | None:
     return abs(snapshot.entry - snapshot.stop_loss)
 
 
+def _current_adverse_excursion(snapshot: GuardianSnapshot) -> float:
+    """Adverse excursion measured from the CURRENT price, not the window max.
+
+    The window max (``context.max_adverse_excursion``) is a monotonic
+    accumulator over the whole re-armed window: a single transient wick near
+    the stop marks it permanently, even after price recovers.  For swing
+    plans that metric alone would cancel a plan on noise.  The current price
+    tells us whether the adverse move is *sustained right now*.
+    """
+    if snapshot.current_close is None or snapshot.entry is None:
+        return 0.0
+    if snapshot.direction_bias == "buy":
+        return max(0.0, snapshot.entry - snapshot.current_close)
+    if snapshot.direction_bias == "sell":
+        return max(0.0, snapshot.current_close - snapshot.entry)
+    return 0.0
+
+
 def _effective_confirmed_lock_ticks(
     thresholds: GuardianThresholds,
     confidence: float | None,
@@ -352,11 +370,32 @@ def evaluate_signal_guardian(
         )
 
     adverse_ratio = context.max_adverse_excursion / stop_distance
-    if adverse_ratio >= thresholds.max_adverse_excursion_ratio:
-        return GuardianEvaluation(
-            "cancelled",
-            "The original trade thesis is broken and should not be used.",
-        )
+    if context.trading_mode == "sniper":
+        # Sniper mode is a 4-6 hour swing trade.  A plan is only cancelled
+        # beyond reasonable doubt when:
+        #   1. price has actually TRADED THROUGH the stop (adverse_ratio >= 1.0)
+        #      — the position would have been stopped out; or
+        #   2. the adverse excursion reached the near-stop threshold AND the
+        #      price is STILL sitting at or beyond the weakening line right
+        #      now (sustained, not a transient wick that already recovered).
+        # A window-max wick to 95% of the stop that then recovers is normal
+        # price action on volatile synthetics and must NOT cancel the plan.
+        current_adverse = _current_adverse_excursion(snapshot)
+        current_ratio = current_adverse / stop_distance
+        sustained = current_ratio >= thresholds.weakening_excursion_ratio
+        if adverse_ratio >= 1.0 or (
+            adverse_ratio >= thresholds.max_adverse_excursion_ratio and sustained
+        ):
+            return GuardianEvaluation(
+                "cancelled",
+                "The original trade thesis is broken and should not be used.",
+            )
+    else:
+        if adverse_ratio >= thresholds.max_adverse_excursion_ratio:
+            return GuardianEvaluation(
+                "cancelled",
+                "The original trade thesis is broken and should not be used.",
+            )
 
     micro = _assess_microstructure(snapshot, context, thresholds, stop_distance)
 

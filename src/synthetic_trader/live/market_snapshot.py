@@ -29,9 +29,17 @@ from synthetic_trader.features.assembler import build_snapshot
 from synthetic_trader.live.live_symbol_watcher import PreparedSymbolState
 from synthetic_trader.live.signal_guardian import (
     GuardianContext,
+    GuardianEvaluation,
     GuardianSnapshot,
     GuardianThresholds,
+    _effective_confirmed_lock_ticks,
     evaluate_signal_guardian,
+)
+from synthetic_trader.live.guardian_memory import (
+    clear_guardian_memory as _clear_guardian_memory,
+    load_guardian_memory as _load_guardian_memory,
+    plan_matches as _plan_matches,
+    save_guardian_memory as _save_guardian_memory,
 )
 from synthetic_trader.models.online import OnlineLogisticModel
 from synthetic_trader.risk.engine import RiskEngine
@@ -1182,6 +1190,7 @@ def build_guardian_snapshot(
     ticks: list[Tick],
     guardian_thresholds: GuardianThresholds | None = None,
     trading_mode: str = "sniper",
+    guardian_memory_dir: str | Path | None = None,
 ) -> dict[str, object]:
     current_close = ticks[-1].price if ticks else snapshot.get("current_close")
     enriched = dict(snapshot)
@@ -1216,6 +1225,32 @@ def build_guardian_snapshot(
     previous_guardian_state = str(snapshot.get("guardian_state", "")) or None
     first_confirmed_at_tick = _guardian_confirmed_at_tick.get(symbol_key)
 
+    # ── Guardian memory: carry confirmed plans across refreshes ──────────
+    # Every /api/calls/run spawns a fresh subprocess, so the in-process
+    # tracker above starts empty each refresh.  Restore the persisted
+    # wall-clock state when the freshly regenerated plan is the SAME plan
+    # (same direction + levels within tolerance): a confirmed swing plan
+    # stays confirmed until its lock expires — it must not flip to a fresh
+    # "actionable" evaluation (or worse, cancel on a transient dip) just
+    # because the user hit refresh.
+    memory = _load_guardian_memory(symbol_key, guardian_memory_dir)
+    if previous_guardian_state in (None, "") and memory is not None:
+        if memory.get("state") == "confirmed" and _plan_matches(
+            memory,
+            direction=signal_snapshot.direction_bias,
+            entry=signal_snapshot.entry,
+            stop=signal_snapshot.stop_loss,
+            target=signal_snapshot.take_profit,
+        ):
+            confirmed_at = float(memory.get("first_confirmed_at_epoch") or 0.0)
+            lock_seconds = float(memory.get("lock_seconds") or 0.0)
+            if confirmed_at and (time.time() - confirmed_at) < lock_seconds:
+                # Sentinels: the sniper-stable path only needs the previous
+                # state to read 'confirmed' with a non-None confirmation tick.
+                previous_guardian_state = "confirmed"
+                _guardian_confirmed_at_tick[symbol_key] = 1
+                first_confirmed_at_tick = 1
+
     # Reset the confirmed tick tracker when the symbol or trade changes
     if previous_guardian_state is None or previous_guardian_state == "forming":
         _guardian_confirmed_at_tick.pop(symbol_key, None)
@@ -1244,6 +1279,29 @@ def build_guardian_snapshot(
         ),
         thresholds,
     )
+
+    # ── Cancelled-stick: a stopped-out plan must not resurrect on refresh ─
+    # If the SAME plan was cancelled earlier (stop trade-through), a refresh
+    # must not re-issue it just because the evaluation loop would re-confirm
+    # a recovered window.  The stick holds until the strategy produces a
+    # materially different plan (signature mismatch → fresh state).
+    if (
+        guardian.state == "confirmed"
+        and memory is not None
+        and memory.get("state") == "cancelled"
+        and _plan_matches(
+            memory,
+            direction=signal_snapshot.direction_bias,
+            entry=signal_snapshot.entry,
+            stop=signal_snapshot.stop_loss,
+            target=signal_snapshot.take_profit,
+        )
+    ):
+        guardian = GuardianEvaluation(
+            "cancelled",
+            "Previous cancellation stands — a stopped-out plan is not re-issued; wait for a fresh setup.",
+        )
+
     enriched["guardian_state"] = guardian.state
     enriched["guardian_reason"] = guardian.reason
     # Wire trailing stop recommendation into the snapshot so the
@@ -1284,6 +1342,92 @@ def build_guardian_snapshot(
     else:
         enriched["position_sizing"] = "full"
 
+    # ── Persist guardian memory (wall-clock) ────────────────────────────
+    # Only real live plans (snapshot carries a candidate call + levels) are
+    # persisted, so test fixtures and stand_aside reads never write memory.
+    # Confirmed plans survive refreshes; cancelled plans stick; anything else
+    # (forming/unavailable/actionable with a different plan) clears the file
+    # so a new plan starts fresh.
+    if snapshot.get("call") in ("buy_candidate", "sell_candidate") and signal_snapshot.entry is not None:
+        try:
+            effective_lock_ticks = _effective_confirmed_lock_ticks(
+                thresholds, current_confidence or confidence_at_confirmation
+            )
+            hold_horizon = float(snapshot.get("hold_horizon_minutes") or 360)
+            now = time.time()
+            trigger_type = str(
+                snapshot.get("execution_trigger_type") or snapshot.get("alert_type") or ""
+            )
+            if guardian.state == "confirmed":
+                existing = _load_guardian_memory(symbol_key, guardian_memory_dir)
+                first_confirmed = now
+                if existing and existing.get("state") == "confirmed":
+                    try:
+                        first_confirmed = float(existing.get("first_confirmed_at_epoch") or now)
+                    except (TypeError, ValueError):
+                        first_confirmed = now
+                _save_guardian_memory(
+                    symbol_key,
+                    {
+                        "symbol": symbol_key,
+                        "direction": signal_snapshot.direction_bias,
+                        "entry": signal_snapshot.entry,
+                        "stop": signal_snapshot.stop_loss,
+                        "target": signal_snapshot.take_profit,
+                        "call": str(snapshot.get("call")),
+                        "trigger_type": trigger_type,
+                        "state": "confirmed",
+                        "first_confirmed_at_epoch": first_confirmed,
+                        "lock_seconds": effective_lock_ticks * 5,  # 5s ticks, matching the documented lock design
+                        "confidence_at_confirmation": (
+                            existing.get("confidence_at_confirmation")
+                            if existing and existing.get("state") == "confirmed"
+                            else current_confidence
+                        ),
+                        "issued_at_epoch": (
+                            float(existing["issued_at_epoch"])
+                            if existing and existing.get("issued_at_epoch")
+                            else now
+                        ),
+                        "hold_horizon_minutes": hold_horizon,
+                    },
+                    guardian_memory_dir,
+                )
+            elif guardian.state == "cancelled":
+                _save_guardian_memory(
+                    symbol_key,
+                    {
+                        "symbol": symbol_key,
+                        "direction": signal_snapshot.direction_bias,
+                        "entry": signal_snapshot.entry,
+                        "stop": signal_snapshot.stop_loss,
+                        "target": signal_snapshot.take_profit,
+                        "call": str(snapshot.get("call")),
+                        "trigger_type": trigger_type,
+                        "state": "cancelled",
+                        "cancelled_at_epoch": now,
+                        "hold_horizon_minutes": hold_horizon,
+                    },
+                    guardian_memory_dir,
+                )
+            else:
+                # Only clear the previous plan when the strategy has actually
+                # moved on to a DIFFERENT plan.  A same-plan evaluation that
+                # is momentarily 'actionable' (not yet re-confirmed) must NOT
+                # erase the memory — otherwise the 'stand by the call'
+                # guarantee silently dies mid-hold for the next stand_aside.
+                existing = _load_guardian_memory(symbol_key, guardian_memory_dir)
+                if not _plan_matches(
+                    existing,
+                    direction=signal_snapshot.direction_bias,
+                    entry=signal_snapshot.entry,
+                    stop=signal_snapshot.stop_loss,
+                    target=signal_snapshot.take_profit,
+                ):
+                    _clear_guardian_memory(symbol_key, guardian_memory_dir)
+        except Exception as exc:
+            logging.debug("[market_snapshot] guardian memory persist failed: %s", exc)
+
     return enriched
 
 
@@ -1317,6 +1461,7 @@ def build_watch_alert(
     snapshot: dict[str, object],
     *,
     proven_only: bool | None = None,
+    guardian_memory_dir: str | Path | None = None,
 ) -> dict[str, object]:
     """Convert a raw snapshot dict into a JSON-serializable alert dict.
 
@@ -1350,7 +1495,115 @@ def build_watch_alert(
         summary = build_decision_summary(alert)
         if summary:
             alert["decision_summary"] = summary
+    # ── Stand by the call: restore a held confirmed plan ────────────────
+    # When the fresh run produced no valid plan (stand_aside / context
+    # update) but a confirmed plan is still alive in guardian memory — the
+    # stop hasn't been traded through and the hold horizon hasn't expired —
+    # keep showing the ORIGINAL call instead of dropping the plan.  The user
+    # entered on this call and expects it to stand until invalidation.
+    _restore_held_plan(alert, guardian_memory_dir)
     return alert
+
+
+def _restore_held_plan(alert: dict[str, object], memory_dir: str | Path | None = None) -> None:
+    """Restore a persisted confirmed plan when the fresh alert has none.
+
+    Only fires when ALL of the following hold:
+      * the fresh alert carries a current price (fresh market data — a stale
+        or MT5-down read can never resurrect a plan);
+      * guardian memory holds a ``confirmed`` plan for the symbol;
+      * the call type isn't suppressed by the Stage-3 gate;
+      * the hold horizon hasn't expired;
+      * price has NOT traded through the stop (the plan's own invalidation).
+    """
+    symbol = str(alert.get("symbol", "") or "")
+    if not symbol:
+        return
+    call = str(alert.get("call", "stand_aside"))
+    if str(alert.get("trade_status", "not_valid")) == "valid" and call in ("buy_candidate", "sell_candidate"):
+        return  # fresh valid plan — nothing to restore
+    current_close = alert.get("current_close")
+    if current_close is None:
+        return  # no fresh market data
+    memory = _load_guardian_memory(symbol, memory_dir)
+    if memory is None or memory.get("state") != "confirmed":
+        return
+    # Never resurrect a call type the Stage-3 gate currently suppresses.
+    # The fresh stand_aside alert has no candidate block of its own, so
+    # re-run the gate on the HELD plan's (symbol, trigger_type).
+    try:
+        _candidate = {
+            "symbol": symbol,
+            "call": "buy_candidate" if memory.get("direction") == "buy" else "sell_candidate",
+            "alert_type": "setup_candidate",
+            "trigger_type": memory.get("trigger_type"),
+            "execution_trigger_type": memory.get("trigger_type"),
+        }
+        _block = (apply_stage3_gate(_candidate).get("stage3") or {})
+        if isinstance(_block, dict) and (
+            _block.get("state") == "suppressed"
+            or _block.get("evidence_status") == "suppressed"
+        ):
+            return
+    except Exception:
+        pass  # best-effort — a gate failure must not crash the restore path
+    stage3 = alert.get("stage3") or {}
+    if isinstance(stage3, dict) and (
+        stage3.get("state") == "suppressed"
+        or stage3.get("evidence_status") == "suppressed"
+    ):
+        return  # never resurrect a suppressed call type
+    direction = memory.get("direction")
+    entry = memory.get("entry")
+    stop = memory.get("stop")
+    target = memory.get("target")
+    if direction not in ("buy", "sell") or entry is None or stop is None or target is None:
+        return
+    try:
+        entry = float(entry)
+        stop = float(stop)
+        target = float(target)
+        price = float(current_close)
+    except (TypeError, ValueError):
+        return
+    now = time.time()
+    issued_at = float(memory.get("issued_at_epoch") or 0.0)
+    horizon_min = float(memory.get("hold_horizon_minutes") or 360)
+    if issued_at and (now - issued_at) > horizon_min * 60:
+        return  # hold horizon expired — the plan is over
+    if direction == "buy" and price < stop:
+        return  # stop traded through — genuinely invalidated
+    if direction == "sell" and price > stop:
+        return
+    # Restore the held plan.
+    alert["call"] = "buy_candidate" if direction == "buy" else "sell_candidate"
+    alert["trade_status"] = "valid"
+    alert["direction_bias"] = direction
+    alert["entry"] = entry
+    alert["stop_loss"] = stop
+    alert["take_profit"] = target
+    alert["guardian_state"] = "confirmed"
+    alert["guardian_reason"] = (
+        "Standing by the original call — plan held; invalidates only on stop trade-through or horizon expiry."
+    )
+    alert["alert_type"] = "setup_candidate"
+    alert["plan_held"] = True
+    alert["plan_issued_at"] = issued_at
+    if stop != entry:
+        alert["reward_risk"] = round(abs(target - entry) / abs(entry - stop), 3)
+    alert.update(
+        _format_trade_areas(
+            entry,
+            stop,
+            target,
+        )
+    )
+    if not alert.get("why") and alert.get("briefing"):
+        alert["why"] = alert["briefing"]
+    if not alert.get("decision_summary"):
+        summary = build_decision_summary(alert)
+        if summary:
+            alert["decision_summary"] = summary
 
 
 def build_watch_state(

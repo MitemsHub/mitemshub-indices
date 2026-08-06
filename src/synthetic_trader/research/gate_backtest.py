@@ -48,6 +48,7 @@ from synthetic_trader.live.market_snapshot import build_mode_config, classify_al
 from synthetic_trader.live.stage3_gate import (
     GATE_HIT_RATE_FLOOR,
     MIN_STAGE3_SAMPLES,
+    break_even_floor,
     gate_decision,
     resolve_trigger_type,
 )
@@ -66,7 +67,12 @@ class GateBacktestConfig:
     timeframe_sec: int = 60
     higher_timeframe_sec: int = 300
     min_samples: int = MIN_STAGE3_SAMPLES
-    hit_rate_floor: float = GATE_HIT_RATE_FLOOR
+    # ``None`` (the default) means the per-trigger-type BREAK-EVEN floor:
+    # each trigger's floor is 1/(1+its running avg reward:risk) + margin,
+    # computed walk-forward from the calls emitted so far (no lookahead — the
+    # reward:risk is known at emission, the outcome is not).  A flat number
+    # forces the legacy fixed bar for every trigger.
+    hit_rate_floor: float | None = None
     suppression_mode: str = "suppress"
     proven_only: bool = False
 
@@ -84,6 +90,11 @@ class CallRecord:
     evidence_status: str | None = None
     hit_rate_at_emission: float | None = None
     samples_at_emission: int = 0
+    # Break-even floor bookkeeping (only set when the auto floor is used):
+    # the floor that was actually applied to this call and the running avg
+    # reward:risk it was derived from.
+    floor_at_emission: float | None = None
+    avg_rr_at_emission: float | None = None
 
 
 @dataclass
@@ -101,6 +112,10 @@ class TriggerStats:
     suppressed_hit_rate: float | None = None
     kept_expectancy_r: float | None = None
     suppressed_expectancy_r: float | None = None
+    # Mean break-even floor applied to this trigger's calls (only meaningful
+    # when the auto floor is used; the floor a 3R trigger must clear is ~30%,
+    # a 2R trigger ~38%).
+    avg_floor_at_emission: float | None = None
 
 
 @dataclass
@@ -378,7 +393,7 @@ def simulate_gate_walk_forward(
     *,
     calls: list[CallRecord],
     min_samples: int,
-    hit_rate_floor: float,
+    hit_rate_floor: float | None = None,
     suppression_mode: str,
     proven_only: bool = False,
     horizon_verdict: str | None = "calibrated",
@@ -388,6 +403,12 @@ def simulate_gate_walk_forward(
     A call's outcome becomes visible at ``generated_at + hold``.  At each
     emission the gate rolls up only outcomes resolved strictly before it and
     decides via the shared ``gate_decision`` - the exact production rules.
+
+    ``hit_rate_floor``: when ``None`` the floor is the per-trigger-type
+    BREAK-EVEN rate - 1/(1+running avg reward:risk) + margin, where the
+    running average is over calls of that trigger emitted so far.  The
+    reward:risk is a property of the call's levels, which exist at emission
+    (no outcome lookahead).  A flat number forces the legacy fixed bar.
 
     ``horizon_verdict`` defaults to ``calibrated`` so the backtest isolates
     the *empirical-hit-rate* axis of the gate (the suppression decision does
@@ -400,6 +421,10 @@ def simulate_gate_walk_forward(
     market-proven call types can trade.
     """
     outcomes_by_key: dict[tuple[str, str], list[dict[str, object]]] = {}
+    # Running reward:risk per (symbol, trigger) for break-even floors.  RR is
+    # known at emission (it is derived from the call's own levels), so
+    # accumulating it as we walk is NOT outcome lookahead.
+    rr_by_key: dict[tuple[str, str], list[float]] = {}
     resolved: list[tuple[float, CallRecord]] = []
 
     for call in calls:
@@ -435,12 +460,32 @@ def simulate_gate_walk_forward(
         else:
             hit_rate = None
 
+        # ── Per-trigger-type break-even floor (default) ─────────────
+        # Floor = 1/(1+running avg RR of this trigger's calls so far) +
+        # margin.  The running average only ever includes calls emitted
+        # strictly BEFORE this one (same strictness as the outcomes), so a
+        # trigger's own geometry is never used to judge itself.
+        if hit_rate_floor is None:
+            prior_rrs = rr_by_key.get(key, [])
+            if prior_rrs:
+                avg_rr = sum(prior_rrs) / len(prior_rrs)
+            else:
+                avg_rr = None
+            floor = break_even_floor(avg_rr)
+            call.floor_at_emission = floor
+            call.avg_rr_at_emission = avg_rr
+        else:
+            floor = hit_rate_floor
+            call.floor_at_emission = floor
+            call.avg_rr_at_emission = None
+        rr_by_key.setdefault(key, []).append(reward_risk_from_record(call.record))
+
         state, evidence_status = gate_decision(
             count=count,
             hit_rate=hit_rate,
             verdict_label=horizon_verdict,
             min_samples=min_samples,
-            hit_rate_floor=hit_rate_floor,
+            hit_rate_floor=floor,
             suppression_mode=suppression_mode,
         )
         call.gate_state = state
@@ -480,6 +525,14 @@ def _aggregate(result: GateBacktestResult) -> None:
             stats.kept_hit_rate = stats.target_hits_kept / stats.kept
         if stats.suppressed:
             stats.suppressed_hit_rate = stats.target_hits_suppressed / stats.suppressed
+        # Mean break-even floor actually applied across this trigger's calls.
+        floors = [
+            c.floor_at_emission
+            for c in result.calls
+            if c.trigger_type == stats.trigger_type and c.floor_at_emission is not None
+        ]
+        if floors:
+            stats.avg_floor_at_emission = sum(floors) / len(floors)
         # Expectancy uses the same outcome weighting as the overall report
         # (target=+RR, stop=-1, neither=0) so the table never contradicts the
         # verdict numbers.
@@ -522,12 +575,16 @@ def run_gate_backtest(
     timeframe_sec: int = 60,
     higher_timeframe_sec: int = 300,
     min_samples: int = MIN_STAGE3_SAMPLES,
-    hit_rate_floor: float = GATE_HIT_RATE_FLOOR,
+    hit_rate_floor: float | None = None,
     suppression_mode: str = "suppress",
     proven_only: bool = False,
     model: OnlineLogisticModel | None = None,
 ) -> GateBacktestResult:
-    """Full pipeline: emit → score → walk-forward gate → aggregate."""
+    """Full pipeline: emit → score → walk-forward gate → aggregate.
+
+    ``hit_rate_floor`` ``None`` (default) uses the per-trigger-type
+    BREAK-EVEN floor; a flat number forces the legacy fixed bar.
+    """
     config = GateBacktestConfig(
         symbol=symbol,
         timeframe_sec=timeframe_sec,
@@ -573,14 +630,19 @@ def print_gate_backtest_report(result: GateBacktestResult) -> None:
     kept_exp = result._expectancy_r(kept)
     all_exp = result._expectancy_r(scored)
     suppressed_exp = result._expectancy_r(suppressed)
-    floor = result.config.hit_rate_floor if result.config else GATE_HIT_RATE_FLOOR
+    config_floor = result.config.hit_rate_floor if result.config else None
     min_samples = result.config.min_samples if result.config else MIN_STAGE3_SAMPLES
     proven_only = bool(result.config.proven_only) if result.config else False
 
     print(f"=== Stage-3 Gate Backtest: {result.symbol} @ {result.timeframe_sec}s ===")
     print(f"emitted calls: {len(result.calls)}  scored: {len(scored)}  "
           f"unscored (no future data): {sum(1 for c in result.calls if c.outcome_label is None)}")
-    print(f"gate: min_samples={min_samples} floor={floor:.0%} mode={result.config.suppression_mode if result.config else 'suppress'} "
+    if config_floor is None:
+        floor_desc = "auto (per-trigger break-even: 1/(1+RR) + margin)"
+    else:
+        floor_desc = f"{config_floor:.0%} (fixed)"
+    print(f"gate: min_samples={min_samples} floor={floor_desc} "
+          f"mode={result.config.suppression_mode if result.config else 'suppress'} "
           f"proven_only={'on' if proven_only else 'off'}")
     if proven_only:
         print("proven-only: only evidence_status == 'proven' calls may execute; "
@@ -588,7 +650,7 @@ def print_gate_backtest_report(result: GateBacktestResult) -> None:
     print()
 
     header = (f"{'trigger':<28} {'emit':>4} {'score':>5} {'kept':>4} {'suppr':>5} "
-              f"{'kept_hit':>8} {'suppr_hit':>9} {'kept_R':>7} {'suppr_R':>8}")
+              f"{'floor':>5} {'kept_hit':>8} {'suppr_hit':>9} {'kept_R':>7} {'suppr_R':>8}")
     print(header)
     print("-" * len(header))
     for stats in sorted(result.per_trigger.values(), key=lambda s: -s.emitted):
@@ -596,9 +658,11 @@ def print_gate_backtest_report(result: GateBacktestResult) -> None:
         suppr_hit = f"{stats.suppressed_hit_rate:.0%}" if stats.suppressed_hit_rate is not None else "-"
         kept_r = f"{stats.kept_expectancy_r:+.2f}" if stats.kept_expectancy_r is not None else "-"
         suppr_r = f"{stats.suppressed_expectancy_r:+.2f}" if stats.suppressed_expectancy_r is not None else "-"
+        floor = stats.avg_floor_at_emission
+        floor_txt = f"{floor:.0%}" if floor is not None else "-"
         print(f"{stats.trigger_type:<28} {stats.emitted:>4} {stats.scored:>5} "
               f"{stats.kept:>4} {stats.suppressed:>5} "
-              f"{kept_hit:>8} {suppr_hit:>9} {kept_r:>7} {suppr_r:>8}")
+              f"{floor_txt:>5} {kept_hit:>8} {suppr_hit:>9} {kept_r:>7} {suppr_r:>8}")
 
     def _fmt(rate: float | None) -> str:
         return f"{rate:.0%}" if rate is not None else "n/a"
@@ -639,8 +703,9 @@ def print_gate_backtest_report(result: GateBacktestResult) -> None:
         return
     if len(suppressed) == 0:
         # Suppressed nothing because EVERYTHING cleared the floor.
-        print(f"VERDICT: the gate suppressed NOTHING because every trigger type cleared the "
-              f"floor ({floor:.0%}) once {min_samples} samples accumulated. Nothing was held "
+        print(f"VERDICT: the gate suppressed NOTHING because every trigger type cleared its "
+              "floor (break-even + margin, or the fixed floor if configured) once "
+              f"{min_samples} samples accumulated. Nothing was held "
               "back, so the empirical filter changed nothing: call quality is what it is.")
         return
     if kept_rate is None or suppressed_rate is None:
@@ -651,18 +716,39 @@ def print_gate_backtest_report(result: GateBacktestResult) -> None:
         # was ever kept because it cleared the floor.  The kept set is purely
         # early no-verdict-yet calls, so kept-vs-suppressed hit rates are a
         # time-ordering artifact, not evidence of filtering.
+        if config_floor is None:
+            floor_why = (
+                "the BREAK-EVEN floor (1/(1+avg reward:risk) + margin) is reachable by "
+                "construction, so zero clears mean these setups are not even beating their "
+                "own geometry's break-even + margin. The gate is a risk-control switch, "
+                "correctly refusing to endorse a call type that loses money."
+            )
+        else:
+            floor_why = (
+                f"a FIXED floor of {config_floor:.0%} is the unreachable-floor trap for "
+                "2R+ setups: the break-even rate for 3R geometry is ~25%, so a fixed bar "
+                "above ~30% turns the gate into an all-or-nothing switch regardless of "
+                "call quality. Re-run without --hit-rate-floor to use the per-trigger "
+                "break-even floor and measure the real call quality."
+            )
         print("VERDICT: ALL-OR-NOTHING SWITCH. Every kept call was kept only because no verdict "
               "existed yet (insufficient_data) - zero calls cleared the floor, yet "
-              f"{len(suppressed)} were suppressed. The floor ({floor:.0%}) is unreachable for "
-              "these setups (their reward:risk makes the break-even hit rate far lower), so the "
-              "gate does not discriminate call quality - it simply stops trading once a trigger "
-              "type accumulates enough samples. The empirical filter, as configured, is a "
-              "risk-control switch, not a quality filter.")
+              f"{len(suppressed)} were suppressed. {floor_why}")
         return
     if lift_kept_suppr is not None and lift_kept_suppr > 0.02:
+        # Honest framing: "improves" is a RELATIVE claim (kept beats
+        # suppressed).  If kept expectancy is still negative, say so explicitly
+        # so the operator never misreads it as profitability.
+        exp_note = (
+            f" Note: kept expectancy is still {_fmt_r(kept_exp)} R — the filter "
+            "removes the worst call types, but the survivors are not yet "
+            "profitable."
+            if kept_exp is not None and kept_exp < 0
+            else ""
+        )
         print(f"VERDICT: the empirical filter IMPROVES call quality - kept calls hit the target "
               f"{_fmt(kept_rate)} vs {_fmt(suppressed_rate)} for suppressed ({lift_kept_suppr:+.0%} lift). "
-              f"Suppression is removing genuinely worse call types.")
+              f"Suppression is removing genuinely worse call types.{exp_note}")
     elif lift_kept_suppr is not None and lift_kept_suppr < -0.02:
         print(f"VERDICT: the empirical filter HURTS call quality - suppressed calls actually hit "
               f"{_fmt(suppressed_rate)} vs {_fmt(kept_rate)} for kept ({lift_kept_suppr:+.0%}). "
@@ -674,9 +760,10 @@ def print_gate_backtest_report(result: GateBacktestResult) -> None:
               "suppression is a risk-control switch, not an edge.")
     print()
     print("context: a trigger's break-even target-hit rate is 1/(1+avg reward:risk). "
-          f"With the floor at {floor:.0%}, any call type whose reward:risk is above ~1.0 "
-          "cannot clear the floor even if perfectly random - a floor that high turns the "
-          "gate into an all-or-nothing switch rather than a quality filter.")
+          "The default floor is break-even + margin per trigger type, so any call type "
+          "that beats its own geometry's break-even clears the gate - the floor is "
+          "reachable by construction. A fixed floor (SYNTH_GATE_HIT_RATE_FLOOR or "
+          "--hit-rate-floor) still forces one bar for every trigger.")
 
 
 def backtest_gate_from_csv(
@@ -686,7 +773,7 @@ def backtest_gate_from_csv(
     timeframe_sec: int = 60,
     higher_timeframe_sec: int = 300,
     min_samples: int = MIN_STAGE3_SAMPLES,
-    hit_rate_floor: float = GATE_HIT_RATE_FLOOR,
+    hit_rate_floor: float | None = None,
     suppression_mode: str = "suppress",
     proven_only: bool = False,
 ) -> GateBacktestResult:

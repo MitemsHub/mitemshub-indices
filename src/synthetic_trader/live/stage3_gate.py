@@ -97,9 +97,23 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 MIN_STAGE3_SAMPLES = _env_int("SYNTH_GATE_MIN_SAMPLES", 10)
-# Empirical target-hit rate that must clear for the gate to pass.  Override
-# with SYNTH_GATE_HIT_RATE_FLOOR.
+# Empirical target-hit rate that must clear for the gate to pass.  This is the
+# FALLBACK floor used when no setup geometry is known (see break_even_floor):
+# the default gate floor is the per-trigger-type BREAK-EVEN rate, not a flat
+# number.  Override with SYNTH_GATE_HIT_RATE_FLOOR to force a flat bar.
 GATE_HIT_RATE_FLOOR = _env_float("SYNTH_GATE_HIT_RATE_FLOOR", 0.5)
+
+# ── Break-even floor ────────────────────────────────────────────────
+# The default gate floor is the per-trigger-type BREAK-EVEN target-hit rate:
+# floor = 1/(1 + avg reward:risk) + margin.  A 3R setup breaks even at 25%,
+# so the old flat 50% was mathematically unreachable for it and turned the
+# gate into an all-or-nothing switch (the R_75 backtest verdict).  The floor
+# is now reachable by construction: any trigger that beats its own break-even
+# by the margin clears the gate.  Override the margin with
+# SYNTH_GATE_BREAK_EVEN_MARGIN; clamp bounds with SYNTH_GATE_FLOOR_MIN/MAX.
+BREAK_EVEN_MARGIN = _env_float("SYNTH_GATE_BREAK_EVEN_MARGIN", 0.05)
+BREAK_EVEN_FLOOR_MIN = _env_float("SYNTH_GATE_FLOOR_MIN", 0.10)
+BREAK_EVEN_FLOOR_MAX = _env_float("SYNTH_GATE_FLOOR_MAX", 0.60)
 
 # Empirical-confidence position sizing.  The gate turns its evidence into a
 # position-size multiplier (risk scales with empirical confidence):
@@ -152,6 +166,71 @@ FORECAST_DETAIL_KEYS = (
     "confidence",
     "vol_trend",
 )
+
+
+def break_even_floor(reward_risk: float | None, margin: float | None = None) -> float:
+    """Empirical floor for a setup geometry: break-even target-hit rate + margin.
+
+    Break-even hit rate for a reward:risk of ``rr`` is ``1/(1+rr)`` — the
+    rate at which wins and losses cancel.  A 3R setup breaks even at 25%, so
+    a flat 50% floor is unreachable for it and turns the gate into an
+    all-or-nothing switch.  This floor is reachable by construction.
+
+    Falls back to ``GATE_HIT_RATE_FLOOR`` (the conservative flat default)
+    when the reward:risk is unknown, and clamps to ``[BREAK_EVEN_FLOOR_MIN,
+    BREAK_EVEN_FLOOR_MAX]`` so degenerate geometry can never produce a
+    meaningless floor.
+    """
+    if reward_risk is None or reward_risk <= 0.0:
+        return GATE_HIT_RATE_FLOOR
+    margin = BREAK_EVEN_MARGIN if margin is None else margin
+    raw = 1.0 / (1.0 + reward_risk) + margin
+    return max(BREAK_EVEN_FLOOR_MIN, min(raw, BREAK_EVEN_FLOOR_MAX))
+
+
+def average_reward_risk(
+    *,
+    symbol: str,
+    trigger_type: str,
+    outcomes_path: str | Path | None = None,
+) -> float | None:
+    """Mean reward:risk of scored outcomes for ``(symbol, trigger_type)``.
+
+    Uses the same level filter as ``summarize_outcomes`` (level-less and
+    Deriv-fallback rows are not evidence) and the same RR math as
+    ``reward_risk_from_record`` in the gate backtest, so the live gate and the
+    backtest can never disagree about what a trigger's geometry is worth.
+    Returns ``None`` when there is no level-bearing evidence for this trigger.
+    """
+    path = Path(outcomes_path) if outcomes_path else DEFAULT_OUTCOMES_PATH
+    try:
+        records = load_jsonl_records(path)
+    except (OSError, ValueError):
+        return None
+    rrs: list[float] = []
+    for rec in records:
+        if str(rec.get("symbol")) != symbol:
+            continue
+        if str(rec.get("trigger_type")) != trigger_type:
+            continue
+        if rec.get("scoring_source") == "deriv_fallback":
+            continue
+        entry = rec.get("entry")
+        stop = rec.get("execution_stop")
+        target = rec.get("primary_target")
+        if entry is None or stop is None or target is None:
+            continue
+        try:
+            e, s, t = float(entry), float(stop), float(target)
+        except (TypeError, ValueError):
+            continue
+        risk = abs(e - s)
+        if risk <= 0.0:
+            continue
+        rrs.append(abs(t - e) / risk)
+    if not rrs:
+        return None
+    return sum(rrs) / len(rrs)
 
 
 def load_empirical_summary(
@@ -515,7 +594,9 @@ def build_stage3_block(
     trigger_type = resolve_trigger_type(snapshot)
     model_confidence = snapshot.get("confidence")
     min_samples = min_samples if min_samples is not None else MIN_STAGE3_SAMPLES
-    hit_rate_floor = hit_rate_floor if hit_rate_floor is not None else GATE_HIT_RATE_FLOOR
+    # The caller's explicit floor (if any) always wins; when omitted the floor
+    # is the per-trigger-type BREAK-EVEN rate computed below.
+    explicit_floor = hit_rate_floor
     mode = (
         suppression_mode
         if suppression_mode in ("suppress", "annotate")
@@ -524,6 +605,11 @@ def build_stage3_block(
     proven = proven_only if proven_only is not None else PROVEN_ONLY_MODE
 
     if not symbol:
+        # No geometry can be known without a symbol — fall back to the explicit
+        # override or the conservative flat floor.  The basis is labelled
+        # honestly: without a symbol there is no geometry to derive a
+        # break-even from, so "break_even" would be a lie.
+        resolved_floor = explicit_floor if explicit_floor is not None else GATE_HIT_RATE_FLOOR
         return {
             "state": "insufficient_data",
             "evidence_status": "no_data",
@@ -540,7 +626,9 @@ def build_stage3_block(
             "model_confidence": model_confidence,
             "display_confidence": model_confidence,
             "min_samples": min_samples,
-            "hit_rate_floor": hit_rate_floor,
+            "hit_rate_floor": resolved_floor,
+            "floor_basis": "configured" if explicit_floor is not None else "fallback",
+            "break_even_rr": None,
             "suppression_mode": mode,
             "proven_only": proven,
             "execution_allowed": False,
@@ -549,7 +637,7 @@ def build_stage3_block(
                 state="insufficient_data",
                 evidence_status="no_data",
                 hit_rate=None,
-                hit_rate_floor=hit_rate_floor,
+                hit_rate_floor=resolved_floor,
                 proven_only=proven,
             ),
             "suppressed_call": None,
@@ -565,6 +653,37 @@ def build_stage3_block(
         symbol=symbol,
         verdict_cache_path=verdict_cache_path,
     )
+
+    # ── Floor resolution: per-trigger-type break-even by default ──
+    # The floor is 1/(1+avg reward:risk) + margin, computed from the scored
+    # outcomes' real geometry for this (symbol, trigger_type).  When no
+    # outcomes exist yet, fall back to the CURRENT call's own reward:risk
+    # (its levels are known even before it is scored); when that is unknown
+    # too, fall back to the conservative flat GATE_HIT_RATE_FLOOR.
+    if explicit_floor is not None:
+        hit_rate_floor = explicit_floor
+        floor_basis = "configured"
+        break_even_rr = None
+    else:
+        avg_rr = average_reward_risk(
+            symbol=symbol,
+            trigger_type=trigger_type,
+            outcomes_path=outcomes_path,
+        )
+        if avg_rr is None:
+            rr = snapshot.get("reward_risk")
+            if isinstance(rr, (int, float)) and rr > 0:
+                avg_rr = float(rr)
+        if avg_rr is not None:
+            hit_rate_floor = break_even_floor(avg_rr)
+            floor_basis = "break_even"
+        else:
+            # No geometry known at all (no scored outcomes with levels AND no
+            # reward:risk on the call) -> conservative flat fallback, labelled
+            # honestly so the dashboard never claims it is break-even-derived.
+            hit_rate_floor = GATE_HIT_RATE_FLOOR
+            floor_basis = "fallback"
+        break_even_rr = avg_rr
 
     count = empirical["count"]
     hit_rate = empirical["target_hit_rate"]
@@ -668,6 +787,11 @@ def build_stage3_block(
         "display_confidence": display_confidence,
         "min_samples": min_samples,
         "hit_rate_floor": hit_rate_floor,
+        # Floor transparency: how the floor was derived and (for break-even
+        # floors) the reward:risk it came from, so the dashboard can show
+        # "floor 30% (break-even @ 3R)" instead of an opaque number.
+        "floor_basis": floor_basis,
+        "break_even_rr": break_even_rr,
         "suppression_mode": mode,
         # Proven-only execution mode + the resulting go/no-go for live orders.
         "proven_only": proven,

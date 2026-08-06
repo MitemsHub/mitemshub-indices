@@ -14,7 +14,7 @@ from synthetic_trader.config import LiveMode, Mt5Config, PaperExecutionConfig, T
 from synthetic_trader.data.collector import collect_history
 from synthetic_trader.data.tick_store import TickDatasetReport, inspect_ticks
 from synthetic_trader.data.migrate_csv import migrate_legacy_csv
-from synthetic_trader.live.stage3_gate import GATE_HIT_RATE_FLOOR, MIN_STAGE3_SAMPLES
+from synthetic_trader.live.stage3_gate import MIN_STAGE3_SAMPLES
 from synthetic_trader.execution.mt5 import (
     Mt5OrderRequest,
     evaluate_mt5_runtime,
@@ -234,7 +234,10 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
         "--hit-rate-floor",
         type=float,
         default=None,
-        help="empirical target-hit rate floor for the gate (default: SYNTH_GATE_HIT_RATE_FLOOR or 0.5)",
+        help="empirical target-hit rate floor for the gate. When omitted the floor is the "
+        "per-trigger-type BREAK-EVEN rate (1/(1+avg reward:risk) + margin), so a 3R setup "
+        "must clear ~30%% instead of an unreachable flat bar. Pass a number to force one "
+        "fixed bar for every trigger (e.g. 0.5 for the legacy behavior)",
     )
     backtest_gate.add_argument(
         "--suppression-mode",
@@ -1014,7 +1017,9 @@ def main(argv: list[str] | None = None) -> int:
             timeframe_sec=args.timeframe,
             higher_timeframe_sec=args.higher_timeframe,
             min_samples=args.min_samples if args.min_samples is not None else MIN_STAGE3_SAMPLES,
-            hit_rate_floor=args.hit_rate_floor if args.hit_rate_floor is not None else GATE_HIT_RATE_FLOOR,
+            # None (the default) means the per-trigger-type break-even floor;
+            # an explicit --hit-rate-floor forces the legacy flat bar.
+            hit_rate_floor=args.hit_rate_floor,
             suppression_mode=args.suppression_mode,
             proven_only=args.proven_only,
         )

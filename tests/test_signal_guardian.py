@@ -333,6 +333,100 @@ class SignalGuardianTests(unittest.TestCase):
 
         self.assertEqual(result.state, "failing")
 
+    # ── Sniper-mode cancel hardening ─────────────────────────────────────
+    # The operator reported: a confirmed BUY plan cancelled on a small dip,
+    # then re-confirmed on refresh.  Root cause: the top-of-function cancel
+    # fired on a *window-max* adverse excursion (a transient wick near the
+    # stop) even when price had already recovered.  For sniper (4-6h swing)
+    # plans, cancellation must require the adverse move to be SUSTAINED or
+    # the stop actually traded through.
+
+    def _sniper_snapshot(self, current_close: float) -> GuardianSnapshot:
+        return GuardianSnapshot(
+            symbol="R_100",
+            direction_bias="buy",
+            trade_status="valid",
+            entry=459.6,
+            stop_loss=458.2,  # stop distance 1.4
+            take_profit=462.2,
+            current_close=current_close,
+        )
+
+    def test_sniper_transient_wick_does_not_cancel_confirmed_plan(self) -> None:
+        # Window max excursion = 1.15 (ratio 0.82 >= max_adverse 0.8 — the
+        # OLD code cancelled here) but price has RECOVERED to 459.55
+        # (current adverse ratio 0.036 << weakening 0.35).  A confirmed
+        # sniper plan must stand by the call.
+        snapshot = self._sniper_snapshot(current_close=459.55)
+        context = GuardianContext(
+            tick_prices=[459.7, 459.4, 459.1, 458.9, 459.3, 459.55],
+            ticks_since_armed=30,
+            max_favorable_excursion=0.2,
+            max_adverse_excursion=1.15,
+            previous_guardian_state="confirmed",
+            first_confirmed_at_tick=1,
+            trading_mode="sniper",
+        )
+
+        result = evaluate_signal_guardian(snapshot, context, DEFAULT_THRESHOLDS)
+
+        self.assertEqual(result.state, "confirmed")
+
+    def test_sniper_stop_trade_through_cancels_plan(self) -> None:
+        # Price traded through the stop (459.6 -> 458.1 < stop 458.2): the
+        # thesis is genuinely broken — the position would be stopped out.
+        snapshot = self._sniper_snapshot(current_close=458.1)
+        context = GuardianContext(
+            tick_prices=[459.6, 459.2, 458.8, 458.5, 458.3, 458.1],
+            ticks_since_armed=30,
+            max_favorable_excursion=0.1,
+            max_adverse_excursion=1.5,
+            previous_guardian_state="confirmed",
+            first_confirmed_at_tick=1,
+            trading_mode="sniper",
+        )
+
+        result = evaluate_signal_guardian(snapshot, context, DEFAULT_THRESHOLDS)
+
+        self.assertEqual(result.state, "cancelled")
+        self.assertIn("broken", result.reason.lower())
+
+    def test_sniper_sustained_near_stop_position_cancels_plan(self) -> None:
+        # Window max 1.15 (0.82 >= 0.8) AND price is STILL sitting 0.857 of
+        # the stop away right now (current_close 458.4): sustained near-stop
+        # — beyond reasonable doubt.
+        snapshot = self._sniper_snapshot(current_close=458.4)
+        context = GuardianContext(
+            tick_prices=[459.6, 459.2, 458.8, 458.6, 458.5, 458.4],
+            ticks_since_armed=30,
+            max_favorable_excursion=0.1,
+            max_adverse_excursion=1.15,
+            previous_guardian_state="confirmed",
+            first_confirmed_at_tick=1,
+            trading_mode="sniper",
+        )
+
+        result = evaluate_signal_guardian(snapshot, context, DEFAULT_THRESHOLDS)
+
+        self.assertEqual(result.state, "cancelled")
+
+    def test_generic_mode_still_cancels_on_window_max_excursion(self) -> None:
+        # Non-sniper modes keep the strict rule: a window-max excursion past
+        # max_adverse_excursion_ratio cancels even if price recovered.
+        snapshot = self._sniper_snapshot(current_close=459.55)
+        context = GuardianContext(
+            tick_prices=[459.7, 459.4, 459.1, 458.9, 459.3, 459.55],
+            ticks_since_armed=30,
+            max_favorable_excursion=0.2,
+            max_adverse_excursion=1.15,
+        )
+
+        result = evaluate_signal_guardian(snapshot, context, DEFAULT_THRESHOLDS)
+
+        self.assertEqual(result.state, "cancelled")
+        self.assertIn("broken", result.reason.lower())
+
+
 
 if __name__ == "__main__":
     unittest.main()

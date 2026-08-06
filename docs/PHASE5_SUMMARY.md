@@ -2139,6 +2139,155 @@ shows a clear stand-aside ("MT5 unavailable — no fallback") instead of a
 Deriv-scale trade plan — and the DERIV feed is still usable explicitly via
 `--app-id` (venue badge shows "Deriv scale") for monitoring only.
 
+## 37. Per-Trigger-Type Break-Even Gate Floor (replaces the flat 50%)
+
+**Why.** The gate's floor was a flat `GATE_HIT_RATE_FLOOR = 0.5`.  For a 3R
+setup the break-even target-hit rate is `1/(1+3) = 25%` — so a 50% bar is
+mathematically unreachable for exactly the geometry the sniper uses, and the
+gate degenerated into an all-or-nothing switch on R_75 (every
+`setup_candidate` suppressed once samples accumulated, regardless of actual
+call quality).  The §30 backtest measured the failure: R_75 kept-calls had
+−0.34R while suppressed calls were +0.07R — the gate was holding back the
+better calls because the bar itself was wrong.
+
+### The fix — `break_even_floor()` in `stage3_gate.py`
+
+The default floor is now **per-trigger-type break-even + margin**:
+`floor = 1/(1+avg reward:risk) + margin`, with `SYNTH_GATE_BREAK_EVEN_MARGIN`
+(default 0.05), clamped to `[SYNTH_GATE_FLOOR_MIN=0.10, SYNTH_GATE_FLOOR_MAX=0.60]`.
+So a 3R trigger must clear ~30%, a 2R trigger ~38% — reachable by
+construction.  When no outcomes exist yet, the floor falls back to the
+current call's own `reward_risk`, then to the conservative flat
+`GATE_HIT_RATE_FLOOR`.
+
+- **Live gate** (`build_stage3_block`): computes the floor from the scored
+  outcomes' real geometry for the exact `(symbol, trigger_type)` via
+  `average_reward_risk()` (same level filter as `summarize_outcomes`, so the
+  gate and the backtest can never disagree about what a trigger's geometry
+  is worth).  The block now surfaces `floor_basis` (`break_even` |
+  `configured`) and `break_even_rr` so the dashboard can show "floor 30%
+  (break-even @ 3R)" instead of an opaque number.
+- **Walk-forward backtest** (`gate_backtest.simulate_gate_walk_forward`):
+  `hit_rate_floor=None` (the new default) computes each trigger's floor from
+  the running average reward:risk of that trigger's calls emitted strictly
+  *before* the current one (RR is known at emission — no outcome
+  lookahead).  Each call records `floor_at_emission` / `avg_rr_at_emission`,
+  and the report shows the mean floor per trigger.
+- **CLI**: `backtest-gate` with no `--hit-rate-floor` now uses the
+  break-even default (it previously forced the flat 0.5).  `--hit-rate-floor
+  0.5` still reproduces the legacy behavior for comparison.
+
+### Re-run on the clean 7-day corpus (@300s, ~510 scored calls per symbol)
+
+| Symbol | Floor basis | Kept hit | Suppr hit | Kept exp (R) | Suppr exp (R) | Verdict |
+|---|---|---|---|---|---|---|
+| R_100 | break-even (~27–32% per trigger) | 19% | 12% | −0.02 | −0.35 | **filter IMPROVES call quality** (+7% lift, 90 calls cleared) |
+| R_75 | break-even (~26–32%) | 5% | 20% | −0.34 | +0.05 | all-or-nothing: zero calls clear even their own break-even |
+
+**Reading — the two symbols tell opposite, honest stories:**
+
+- **R_100 flips to a genuine quality signal.**  With the reachable
+  break-even floor, 90 calls clear it and the kept set beats the suppressed
+  set by +7% hit rate and +0.33R expectancy.  The empirical filter is now
+  measurably removing worse call types — the flat-50% verdict on the same
+  corpus was an artifact of the unreachable bar.
+- **R_75 is the honest truth.**  The rolling market-verified hit rate
+  (~20%) never clears even the reachable 27% break-even floor for
+  `setup_candidate`, so the gate correctly stops trading it.  The flat-0.5
+  run produces the identical kept/suppressed split (34 kept / 447
+  suppressed) — the difference is the message: "these setups do not beat
+  their own break-even + margin" instead of "the floor was unreachable".
+  On R_75 the gate is a risk-control switch, not a quality filter — which
+  is exactly what it should be when the underlying calls lose money.
+
+**Tests:** `tests/test_stage3_gate.py` +5 (break-even math incl. clamping,
+`average_reward_risk` from scored outcomes, default floor in
+`build_stage3_block`, explicit floor wins, and the 40%-hit/3R flip from
+suppressed→gated), `tests/test_gate_backtest.py` +3 (floor stamped per call
+walk-forward, the 33%-hit/3R flip from suppressed→gated, per-trigger floors
+differ).  51 gate tests pass.
+
+## 38. Guardian Stands By the Call — cross-refresh plan memory + hardened cancel
+
+### The flip-flop the operator reported
+
+> “Whenever the market just drops a bit in the other direction, the setup will
+> cancel, even if the original plan (BUY) is still on going; when I refresh it
+> then comes back to the original call.”
+
+Root cause was architectural, not a threshold tweak:
+
+1. **Every `/api/calls/run` spawns a fresh Python subprocess.**  The guardian's
+   in-process state (`_guardian_confirmed_at_tick`, the confirmed lock, and
+   the sniper “confirmed & stable — only stop-hit invalidates” path) lived in
+   process memory, so a refresh **forgot the confirmation entirely** and
+   re-evaluated the plan from scratch.
+2. **The top-of-function cancel used a monotonic window-max excursion.**
+   `max_adverse_excursion` accumulates over the whole re-armed window (up to
+   30 min): a single transient wick to 95% of the stop distance marked the
+   plan cancelled **forever within that window**, even after price recovered.
+   On the next refresh the window was recomputed from fresh ticks, price had
+   re-armed → the plan re-confirmed → the flicker the user saw.
+
+### The fix — three parts
+
+**Part 1 — sniper cancellation now requires “beyond reasonable doubt”.**
+`evaluate_signal_guardian` (sniper mode) only cancels when:
+
+- price has actually **traded through the stop** (`adverse_ratio >= 1.0` — the
+  position would have been stopped out), **or**
+- the adverse excursion reached the near-stop threshold **and price is still
+  sitting beyond the weakening line right now** (sustained, not a transient
+  wick that already recovered).
+
+A 95%-of-stop wick that recovers no longer cancels a 4–6h swing plan.
+Non-sniper modes keep the strict legacy rule (unit tests lock both).
+
+**Part 2 — persistent guardian memory (`data/guardian_memory/{symbol}.json`).**
+New `synthetic_trader.live.guardian_memory` module stores wall-clock state:
+`direction` / `entry` / `stop` / `target` (the plan signature), `state`,
+`first_confirmed_at_epoch`, `lock_seconds`, `issued_at_epoch`,
+`hold_horizon_minutes`.  `build_guardian_snapshot` now:
+
+- **restores** `previous_guardian_state = confirmed` when the freshly
+  regenerated plan is *the same plan* (direction + levels within 1.5% of the
+  stored entry) and the lock hasn't expired → the confirmed state survives
+  process restarts between refreshes;
+- **sticks cancellations**: once cancelled, the same plan cannot resurrect on
+  a refresh (the cancelled record blocks re-confirmation until the strategy
+  produces a materially different plan);
+- **persists** the confirmed/cancelled record after each live evaluation
+  (only for real candidate calls — test fixtures and stand_aside reads never
+  write).
+
+Directory overridable via `SYNTH_GUARDIAN_MEMORY_DIR` (the test suite
+redirects it to a temp dir so tests can never pollute the operator's live
+plan state).
+
+**Part 3 — `build_watch_alert` stands by the call.**  When a fresh run
+momentarily produces stand_aside/context-update but guardian memory holds a
+*confirmed* plan that is still alive — fresh price data present, hold horizon
+not expired, stop not traded through, call type not suppressed by the Stage-3
+gate — the original call is restored with
+`guardian_reason: “Standing by the original call — plan held; invalidates only
+on stop trade-through or horizon expiry.”` and `plan_held: true` (surfaced in
+the dashboard payload).  MT5-down / stale-CSV reads (`current_close is None`)
+never resurrect a plan.
+
+### Validation
+
+- 11 new tests: sniper transient-wick-does-not-cancel, stop-trade-through
+  cancels, sustained near-stop cancels, generic mode keeps the strict rule,
+  confirmed plan carries across refresh, cancelled plan sticks across refresh,
+  different plan resets stale memory, plan-hold restore + the three
+  no-restore guards (stop trade-through, horizon expiry, no fresh price).
+  147 tests pass across the guardian / market-snapshot / calibration-logger /
+  stage3-gate suites.
+- Live smoke test against the real running dashboard's memory files: a
+  stand_aside read now returns the held `buy_candidate` plan for both R_75
+  and R_100 with `plan_held: true` — the exact behavior the operator asked
+  for.
+
 ## Next Steps
 
 1. **✅ DONE — collector wired into Windows Task Scheduler (§25).**  The
@@ -2167,12 +2316,16 @@ Deriv-scale trade plan — and the DERIV feed is still usable explicitly via
    without a manual ``score-live-calibration`` step.  Recommended command::
 
        python -m synthetic_trader.cli live-watch --symbol R_75 --auto-score 300
-4. **✅ DONE — Stage-3 empirical gate (§20, §22).** Calls carry the
+4. **✅ DONE — Stage-3 empirical gate (§20, §22, §37).** Calls carry the
    market-verified target-hit rate for their exact `(symbol, trigger_type)`
    plus the horizon verdict; the gate now *suppresses* call types whose
    empirical rate clears nothing, distinguishes `proven` vs `still_learning`
    vs `suppressed` in the dashboard with live sample sizes, auto-logs every
    live call, and scores them in a background loop (`score-live-loop`).
+   **§37 replaced the flat 50% floor with the per-trigger-type break-even
+   floor** (1/(1+avg RR) + margin) so the bar is reachable by construction;
+   the backtest shows R_100's gate now measurably improves call quality,
+   while R_75 honestly reports its calls don't beat their own break-even.
    Remaining: point `score-live-loop` at the same schedules as the M1
    capture loop so the journal compounds continuously in production.
 5. **Continuous WFO in CI** — run `run_wfo.py --quick` on each new tick CSV dump
