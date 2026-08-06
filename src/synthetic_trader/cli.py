@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from synthetic_trader.config import LiveMode, Mt5Config, PaperExecutionConfig, T
 from synthetic_trader.data.collector import collect_history
 from synthetic_trader.data.tick_store import TickDatasetReport, inspect_ticks
 from synthetic_trader.data.migrate_csv import migrate_legacy_csv
+from synthetic_trader.live.stage3_gate import GATE_HIT_RATE_FLOOR, MIN_STAGE3_SAMPLES
 from synthetic_trader.execution.mt5 import (
     Mt5OrderRequest,
     evaluate_mt5_runtime,
@@ -74,6 +76,18 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--app-id", help="Deriv app id; defaults to 116450 or DERIV_APP_ID")
     collect.add_argument("--replace", action="store_true", help="replace output instead of appending")
 
+    backfill_candles = subparsers.add_parser(
+        "backfill-candles",
+        help="backfill multi-day history from Deriv 1-minute candles into a tick CSV "
+        "(tick-style history cannot page back in time; candle-style can)",
+    )
+    backfill_candles.add_argument("--symbol", default="R_75", choices=["R_75", "R_100"])
+    backfill_candles.add_argument("--days", type=float, default=5.0, help="days of history to backfill")
+    backfill_candles.add_argument("--granularity", type=int, default=60, help="candle granularity in seconds (base tick spacing)")
+    backfill_candles.add_argument("--batch-size", type=int, default=5000)
+    backfill_candles.add_argument("--output", default="data/backfill/ticks.csv")
+    backfill_candles.add_argument("--app-id", help="Deriv app id; defaults to 116450 or DERIV_APP_ID")
+
     prepare_live_model = subparsers.add_parser(
         "prepare-live-model",
         help="collect history and build a seeded model artifact for live dry-run",
@@ -118,6 +132,200 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--artifact-output", help="optional path to save the backtest report as JSON")
     backtest.add_argument("--exit-slippage-ticks", type=float, default=0.0)
     backtest.add_argument("--execution-penalty", type=float, default=0.0)
+
+    backtest_vol = subparsers.add_parser(
+        "backtest-vol",
+        help="run vol-targeting fade backtest (EGARCH forecast + ADWIN drift gate) from tick CSV",
+    )
+    backtest_vol.add_argument("--csv", required=True, help="CSV path with epoch,price columns")
+    backtest_vol.add_argument("--symbol", default="R_75", choices=["R_75", "R_100"])
+    backtest_vol.add_argument("--timeframe", type=int, default=60, help="primary candle timeframe in seconds")
+    backtest_vol.add_argument(
+        "--mode",
+        choices=["fade", "momentum"],
+        default="fade",
+        help="which vol-regime strategy to run as primary: fade (mean-reversion"
+        " on extended vol) or momentum (follow the move in a high-vol regime)",
+    )
+    backtest_vol.add_argument(
+        "--compare",
+        action="store_true",
+        help="also run the other vol-regime strategy AND the sniper strategy on"
+        " the same data and print all three (fade vs momentum vs sniper)",
+    )
+    backtest_vol.add_argument(
+        "--artifact-output",
+        help="optional path to save the primary (--mode) backtest report as JSON",
+    )
+    backtest_vol.add_argument("--entry-slippage-ticks", type=float, default=1.0)
+    backtest_vol.add_argument("--exit-slippage-ticks", type=float, default=1.0)
+    backtest_vol.add_argument("--execution-penalty", type=float, default=0.5)
+    backtest_vol.add_argument("--z-entry", type=float, default=1.5, help="price extension threshold in forecast sigmas")
+    backtest_vol.add_argument("--vol-extended-ratio", type=float, default=1.5)
+    backtest_vol.add_argument(
+        "--min-revert-signal",
+        type=float,
+        default=0.02,
+        help="require the EGARCH mean-reversion signal to be at least this"
+        " (selects sharp-spike fades; 0 disables). Tuned on the clean 7-day corpus",
+    )
+    backtest_vol.add_argument("--stop-sigma-mult", type=float, default=2.5)
+    backtest_vol.add_argument("--target-sigma-mult", type=float, default=1.5)
+    backtest_vol.add_argument("--mom-z-entry", type=float, default=0.8, help="momentum price-extension threshold in forecast sigmas")
+    backtest_vol.add_argument("--mom-vol-min-ratio", type=float, default=1.15, help="momentum high-vol regime gate (ratio only): sigma vs its slow baseline")
+    backtest_vol.add_argument(
+        "--mom-gate",
+        choices=["ratio", "absolute", "trend"],
+        default="ratio",
+        help="momentum high-vol gate: 'ratio' (sigma freshly above its slow EMA),"
+        " 'absolute' (sigma above abs_sigma_mult x calibrated long-run vol — stays on"
+        " through sustained regimes), or 'trend' (sigma EMA itself still rising)",
+    )
+    backtest_vol.add_argument(
+        "--mom-abs-mult",
+        type=float,
+        default=2.0,
+        help="momentum absolute gate: sigma must exceed this multiple of the"
+        " calibrated long-run vol (only used with --mom-gate absolute)",
+    )
+    backtest_vol.add_argument(
+        "--mom-trend-eps",
+        type=float,
+        default=1e-4,
+        help="momentum trend gate: minimum relative rise of the sigma EMA to count"
+        " as a building vol regime (only used with --mom-gate trend)",
+    )
+    backtest_vol.add_argument("--mom-stop-sigma-mult", type=float, default=1.5)
+    backtest_vol.add_argument("--mom-target-sigma-mult", type=float, default=3.0)
+    backtest_vol.add_argument("--max-hold-bars", type=int, default=30)
+    backtest_vol.add_argument(
+        "--breakeven-trail-frac",
+        type=float,
+        default=0.0,
+help="breakeven trail for both vol-regime strategies: move the stop to entry "
+        "once MFE reaches this fraction of the target distance (0 disables). "
+        "Fixes the fade's realized-RR drag (see PHASE5_SUMMARY 31)",
+    )
+    backtest_vol.add_argument("--distribution", choices=["normal", "studentt"], default="normal")
+    backtest_vol.add_argument("--dof", type=float, default=5.0)
+    backtest_vol.add_argument(
+        "--no-calibration",
+        action="store_true",
+        help="skip loading calibrated EGARCH parameters from data/garch_calibration",
+    )
+
+    backtest_gate = subparsers.add_parser(
+        "backtest-gate",
+        help="walk-forward backtest of the Stage-3 empirical gate: emit calls from a tick CSV,"
+        " score them by trigger type, and show what the gate would suppress vs keep",
+    )
+    backtest_gate.add_argument("--csv", required=True, help="CSV path with epoch,price columns")
+    backtest_gate.add_argument("--symbol", default="R_100", choices=["R_75", "R_100"])
+    backtest_gate.add_argument("--timeframe", type=int, default=60, help="primary candle timeframe in seconds")
+    backtest_gate.add_argument("--higher-timeframe", type=int, default=300, help="higher timeframe in seconds")
+    backtest_gate.add_argument(
+        "--min-samples",
+        type=int,
+        default=None,
+        help="minimum scored outcomes before the gate trusts the empirical rate"
+        " (default: SYNTH_GATE_MIN_SAMPLES or 10)",
+    )
+    backtest_gate.add_argument(
+        "--hit-rate-floor",
+        type=float,
+        default=None,
+        help="empirical target-hit rate floor for the gate (default: SYNTH_GATE_HIT_RATE_FLOOR or 0.5)",
+    )
+    backtest_gate.add_argument(
+        "--suppression-mode",
+        choices=["suppress", "annotate"],
+        default="suppress",
+        help="'suppress' holds below-floor call types back; 'annotate' keeps emitting them with the honest rate",
+    )
+    backtest_gate.add_argument(
+        "--proven-only",
+        action="store_true",
+        help="only evidence_status == 'proven' calls may execute; everything else is forced paper-only",
+    )
+
+    sweep_vol = subparsers.add_parser(
+        "sweep-vol",
+        help="systematic parameter sweep over fade + momentum vol-targeting configs",
+    )
+    sweep_vol.add_argument("--csv", required=True, help="CSV path with epoch,price columns")
+    sweep_vol.add_argument("--symbol", default="R_75", choices=["R_75", "R_100"])
+    sweep_vol.add_argument("--timeframe", type=int, default=60, help="primary candle timeframe in seconds")
+    sweep_vol.add_argument(
+        "--min-trades",
+        type=int,
+        default=5,
+        help="only report configs with at least this many trades",
+    )
+    sweep_vol.add_argument("--top-n", type=int, default=10, help="how many top configs to print")
+    sweep_vol.add_argument(
+        "--gates",
+        default="ratio,absolute",
+        help="comma-separated momentum gates to sweep (ratio, absolute)",
+    )
+    sweep_vol.add_argument(
+        "--strategies",
+        default="fade,momentum",
+        help="comma-separated strategy families to sweep (fade, momentum); "
+        "pass 'momentum' alone for a focused momentum-only re-tune",
+    )
+    sweep_vol.add_argument(
+        "--mom-json",
+        help="optional JSON file with focused momentum grid overrides, e.g. "
+        "{\"z_entries\":[0.5,1.0,0.25],\"stops\":[1.0,2.0,0.5],"
+        "\"targets\":[2.0,5.0,1.0],\"holds\":[10,120,10],"
+        "\"ref_periods\":[300,1200,150],\"gate\":{\"abs_sigma_mult\":[1.2,3.0,0.2]}}",
+    )
+    sweep_vol.add_argument(
+        "--artifact-output",
+        help="optional path to save the full sweep report as JSON",
+    )
+
+    tune_bands = subparsers.add_parser(
+        "tune-bands",
+        help="band-tuning pass: re-fit p50/p90 range multipliers for R_75 and R_100 "
+        "on recent walk-forward coverage and persist them",
+    )
+    tune_bands.add_argument(
+        "--engine-root",
+        default=".",
+        help="engine root whose data/backfill CSVs and calibration are used (default .)",
+    )
+
+    forecast_horizon = subparsers.add_parser(
+        "forecast-horizon",
+        help="forecast the volatility regime over the next N hours (EGARCH + ADWIN)",
+    )
+    forecast_horizon.add_argument("--csv", required=True, help="tick CSV path")
+    forecast_horizon.add_argument("--symbol", default="R_75", choices=["R_75", "R_100"])
+    forecast_horizon.add_argument("--timeframe", type=int, default=300, help="primary candle timeframe in seconds")
+    forecast_horizon.add_argument("--horizon-hours", type=float, default=5.0, help="forecast horizon in hours (default 5)")
+    forecast_horizon.add_argument(
+        "--validate",
+        action="store_true",
+        help="walk-forward validate range-band coverage over the full tick history",
+    )
+    forecast_horizon.add_argument(
+        "--no-calibration",
+        action="store_true",
+        help="skip loading calibrated EGARCH parameters from data/garch_calibration",
+    )
+    forecast_horizon.add_argument(
+        "--fit-multipliers",
+        action="store_true",
+        help="fit empirical range multipliers on a train split, validate coverage "
+        "on the holdout, and persist them to data/forecast_multipliers",
+    )
+    forecast_horizon.add_argument(
+        "--apply-multipliers",
+        action="store_true",
+        help="validate using previously fitted multipliers from data/forecast_multipliers "
+        "(requires a prior --fit-multipliers run)",
+    )
 
     walk_forward = subparsers.add_parser("walk-forward", help="run chronological train/test validation")
     walk_forward.add_argument("--csv", required=True, help="CSV path with epoch,price columns")
@@ -181,6 +389,12 @@ def build_parser() -> argparse.ArgumentParser:
     live_snapshot.add_argument("--higher-timeframe", type=int, default=300)
     live_snapshot.add_argument("--max-live-ticks", type=int, default=90)
     live_snapshot.add_argument("--app-id", help="Deriv app id; defaults to 116450 or DERIV_APP_ID")
+    live_snapshot.add_argument(
+        "--proven-only",
+        action="store_true",
+        help="only evidence_status == 'proven' calls may carry a live order; "
+        "everything else is forced paper-only (SYNTH_GATE_PROVEN_ONLY)",
+    )
 
     live_watch = subparsers.add_parser(
         "live-watch",
@@ -192,6 +406,11 @@ def build_parser() -> argparse.ArgumentParser:
     live_watch.add_argument("--higher-timeframe", type=int, default=300)
     live_watch.add_argument("--journal", default="journals/live_watch_alerts.jsonl")
     live_watch.add_argument(
+        "--calls-journal",
+        default="journals/live_calibration_calls.jsonl",
+        help="auto-log every emitted call here for the scoring loop (set to empty to disable)",
+    )
+    live_watch.add_argument(
         "--emit-initial",
         action="store_true",
         help="emit the current baseline market state immediately before waiting for change",
@@ -201,6 +420,23 @@ def build_parser() -> argparse.ArgumentParser:
     live_watch.add_argument("--max-reconnects", type=int, default=5)
     live_watch.add_argument("--reconnect-backoff-sec", type=int, default=1)
     live_watch.add_argument("--app-id", help="Deriv app id; defaults to 116450 or DERIV_APP_ID")
+    live_watch.add_argument(
+        "--proven-only",
+        action="store_true",
+        help="only evidence_status == 'proven' calls may carry a live order; "
+        "everything else is forced paper-only (SYNTH_GATE_PROVEN_ONLY)",
+    )
+    live_watch.add_argument(
+        "--auto-score",
+        type=float,
+        nargs="?",
+        const=300.0,
+        metavar="INTERVAL",
+        help="auto-score the calls journal on a timer during the watch and once at exit "
+        "(interval seconds; default 300). Keeps the outcomes journal fresh without "
+        "a separate score-live-loop process.",
+    )
+    live_watch.add_argument("--auto-score-status-path", default="data/auto_scorer.json")
 
     live_watch_review = subparsers.add_parser(
         "live-watch-review",
@@ -229,6 +465,18 @@ def build_parser() -> argparse.ArgumentParser:
     score_live_calibration.add_argument("--symbol", choices=["R_75", "R_100"])
     score_live_calibration.add_argument("--window-minutes", type=int)
     score_live_calibration.add_argument("--now", help="optional ISO timestamp for deterministic scoring")
+
+    score_live_loop = subparsers.add_parser(
+        "score-live-loop",
+        help="auto-score every live call (target/stop/neither) on a loop",
+    )
+    score_live_loop.add_argument("--calls-journal", default="journals/live_calibration_calls.jsonl")
+    score_live_loop.add_argument("--output", default="journals/live_calibration_outcomes.jsonl")
+    score_live_loop.add_argument("--symbol", choices=["R_75", "R_100"])
+    score_live_loop.add_argument("--window-minutes", type=int)
+    score_live_loop.add_argument("--interval", type=float, default=300.0, help="sweep interval in seconds")
+    score_live_loop.add_argument("--status-path", default="data/auto_scorer.json")
+    score_live_loop.add_argument("--once", action="store_true", help="single sweep then exit (cron-friendly)")
 
     mt5_live_order = subparsers.add_parser(
         "mt5-live-order",
@@ -388,6 +636,76 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backtest_synth.add_argument("--artifact-output", help="optional path to save the report as JSON")
 
+    collect_live = subparsers.add_parser(
+        "collect-live-ticks",
+        help="run the continuous live tick collection service (Blueberry MT5 terminal)",
+    )
+    collect_live.add_argument("--symbols", default="R_75,R_100", help="comma-separated symbols (default R_75,R_100)")
+    collect_live.add_argument("--venue-symbol", help="MT5 venue symbol override (auto-detected: SYN75/SYN100)")
+    collect_live.add_argument("--output-dir", default="data/backfill", help="directory to append tick CSVs into")
+    collect_live.add_argument("--duration-sec", type=float, help="stop after this many seconds (default: run until interrupted)")
+    collect_live.add_argument("--status-path", default="data/live_tick_collector.json", help="status JSON output path")
+    collect_live.add_argument("--poll-interval-sec", type=float, default=0.5)
+    collect_live.add_argument("--flush-interval-sec", type=float, default=30.0)
+    collect_live.add_argument("--flush-batch-size", type=int, default=500)
+    collect_live.add_argument("--stall-warn-sec", type=float, default=120.0)
+    collect_live.add_argument("--stall-reconnect-sec", type=float, default=600.0)
+    collect_live.add_argument("--rollover-hour-utc", type=int, default=0, help="daily rollover hour (UTC) — stall tolerance window")
+    collect_live.add_argument("--rollover-grace-sec", type=float, default=120.0)
+    collect_live.add_argument("--mt5-server")
+    collect_live.add_argument("--mt5-login", type=int)
+    collect_live.add_argument("--mt5-password")
+    collect_live.add_argument("--mt5-terminal-path")
+
+    capture_m1 = subparsers.add_parser(
+        "capture-m1",
+        help="continuously capture M1 rates into the tick corpus (compounds data/backfill over time)",
+    )
+    capture_m1.add_argument("--symbols", default="R_75,R_100", help="comma-separated symbols (default R_75,R_100)")
+    capture_m1.add_argument("--output-dir", default="data/backfill", help="directory holding {symbol}_ticks.csv")
+    capture_m1.add_argument("--interval", type=float, default=3600.0, help="seconds between sweeps (default 3600 = hourly)")
+    capture_m1.add_argument("--initial-days", type=float, default=7.0, help="days of history seeded on a symbol's first capture")
+    capture_m1.add_argument("--overlap-sec", type=float, default=300.0, help="refetch overlap before the newest captured candle")
+    capture_m1.add_argument("--once", action="store_true", help="run a single sweep and exit (cron / Task Scheduler friendly)")
+    capture_m1.add_argument("--status-path", default="data/m1_capture.json", help="status JSON output path")
+    capture_m1.add_argument("--mt5-terminal-path", help="path to terminal64.exe (auto-detected if omitted)")
+
+    tick_coverage = subparsers.add_parser(
+        "tick-coverage",
+        help="report per-symbol tick coverage and WFO readiness (how much data is enough)",
+    )
+    tick_coverage.add_argument("--symbols", default="R_75,R_100", help="comma-separated symbols (default R_75,R_100)")
+    tick_coverage.add_argument("--engine-root", default=".", help="repo root containing data/ (default: current dir)")
+    tick_coverage.add_argument("--timeframes", default="60,300", help="comma-separated candle timeframes for window estimates")
+    tick_coverage.add_argument("--horizon-hours", default="4,6", help="comma-separated horizons for window estimates")
+    tick_coverage.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
+    tick_task_health = subparsers.add_parser(
+        "tick-task-health",
+        help="health check for the daily tick-collector task: warn when the "
+        "corpus stopped growing (ticks flat for 48h) or the task went stale "
+        "(exit code 0 = healthy, 1 = warnings, for alert gating)",
+    )
+    tick_task_health.add_argument(
+        "--engine-root", default=".",
+        help="repo root containing .data/ and data/backfill (default: current dir)",
+    )
+    tick_task_health.add_argument(
+        "--flat-hours", type=float, default=48.0,
+        help="warn when a symbol's tick count is flat for this many hours (default 48)",
+    )
+    tick_task_health.add_argument(
+        "--task-stale-hours", type=float, default=26.0,
+        help="warn when the last task action is older than this (default 26)",
+    )
+    tick_task_health.add_argument(
+        "--verify-stale-hours", type=float, default=26.0,
+        help="warn when the verify snapshot is older than this (default 26)",
+    )
+    tick_task_health.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON"
+    )
+
     collect_ticks = subparsers.add_parser(
         "collect-ticks",
         help="collect real tick data from MT5 for EGARCH calibration",
@@ -402,6 +720,17 @@ def build_parser() -> argparse.ArgumentParser:
     collect_ticks.add_argument("--mt5-password")
     collect_ticks.add_argument("--mt5-terminal-path")
 
+    backfill_mt5 = subparsers.add_parser(
+        "backfill-mt5",
+        help="backfill multi-day history from the Blueberry MT5 terminal (M1 rates -> tick CSV). "
+        "Uses the CORRECT broker symbols (SYN75/SYN100) and price scale, unlike the Deriv API fallback.",
+    )
+    backfill_mt5.add_argument("--symbol", default="R_75", choices=["R_75", "R_100"])
+    backfill_mt5.add_argument("--venue-symbol", help="MT5 venue symbol (auto-detected: SYN75/SYN100)")
+    backfill_mt5.add_argument("--days", type=float, default=5.0, help="days of history to backfill")
+    backfill_mt5.add_argument("--output", default="data/backfill/ticks.csv")
+    backfill_mt5.add_argument("--mt5-terminal-path", help="path to terminal64.exe (auto-detected if omitted)")
+
     calibrate_egarch = subparsers.add_parser(
         "calibrate-egarch",
         help="fit EGARCH(1,1) parameters to collected tick data",
@@ -415,6 +744,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Load .env.local (root + the Next.js app) so direct runs — scheduled
+    # tasks, collect-live-ticks, manual CLI — see the same credentials the
+    # dashboard's subprocesses see.  Idempotent; exported env always wins.
+    try:
+        from synthetic_trader.envloader import load_env_files
+
+        load_env_files()
+    except Exception:  # pragma: no cover - never block the CLI on env load
+        pass
+
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
@@ -435,6 +774,23 @@ def main(argv: list[str] | None = None) -> int:
                 app_id=args.app_id,
                 batch_size=args.batch_size,
                 append=not args.replace,
+            )
+        )
+        _print_dataset_report(report)
+        print(f"output={Path(args.output)}")
+        return 0
+
+    if args.command == "backfill-candles":
+        from synthetic_trader.data.collector import collect_candle_history
+
+        report = asyncio.run(
+            collect_candle_history(
+                symbol=args.symbol,
+                days=args.days,
+                output_path=args.output,
+                app_id=args.app_id,
+                granularity=args.granularity,
+                batch_size=args.batch_size,
             )
         )
         _print_dataset_report(report)
@@ -513,6 +869,356 @@ def main(argv: list[str] | None = None) -> int:
         print(f"model_version={result.model_version}")
         if args.model_save:
             print(f"model_saved={Path(args.model_save)}")
+        return 0
+
+    if args.command == "backtest-vol":
+        from synthetic_trader.backtest.vol_momentum import (
+            VolMomentumConfig,
+            run_vol_momentum_backtest,
+        )
+        from synthetic_trader.backtest.vol_reversion import (
+            VolReversionConfig,
+            dedupe_ticks,
+            run_vol_reversion_backtest,
+        )
+        from synthetic_trader.models.garch_calibration import load_calibrated_garch_state
+
+        ticks = dedupe_ticks(load_ticks_csv(args.csv, default_symbol=args.symbol))
+        paper = PaperExecutionConfig(
+            entry_slippage_ticks=args.entry_slippage_ticks,
+            exit_slippage_ticks=args.exit_slippage_ticks,
+            execution_penalty_per_trade=args.execution_penalty,
+        )
+        config = replace(TraderConfig.default(), paper=paper)
+        fade_config = VolReversionConfig(
+            z_entry=args.z_entry,
+            vol_extended_ratio=args.vol_extended_ratio,
+            min_revert_signal=args.min_revert_signal,
+            stop_sigma_mult=args.stop_sigma_mult,
+            target_sigma_mult=args.target_sigma_mult,
+            max_hold_bars=args.max_hold_bars,
+            distribution=args.distribution,
+            dof=args.dof,
+            breakeven_trail_frac=args.breakeven_trail_frac,
+        )
+        moment_config = VolMomentumConfig(
+            z_entry=args.mom_z_entry,
+            vol_min_ratio=args.mom_vol_min_ratio,
+            mom_gate=args.mom_gate,
+            abs_sigma_mult=args.mom_abs_mult,
+            trend_eps=args.mom_trend_eps,
+            stop_sigma_mult=args.mom_stop_sigma_mult,
+            target_sigma_mult=args.mom_target_sigma_mult,
+            max_hold_bars=args.max_hold_bars,
+            distribution=args.distribution,
+            dof=args.dof,
+            breakeven_trail_frac=args.breakeven_trail_frac,
+        )
+        garch_state = None if args.no_calibration else load_calibrated_garch_state(args.symbol)
+        if not args.no_calibration and garch_state is None:
+            print(f"calibrated_garch=not_found (using default priors)")
+
+        def _print_result(label: str, result) -> None:
+            print(f"strategy={label}")
+            print(f"symbol={args.symbol}")
+            print(f"timeframe_sec={args.timeframe}")
+            print(f"trades={result.metrics.trades}")
+            print(f"signals={result.signals}")
+            print(f"rejected_signals={result.rejected_signals}")
+            print(f"win_rate={result.metrics.win_rate:.2%}")
+            print(f"profit_factor={_format_float(result.metrics.profit_factor)}")
+            print(f"expectancy_r={result.metrics.expectancy_r:.3f}")
+            print(f"net_pnl={result.metrics.net_pnl:.2f}")
+            print(f"final_equity={result.final_equity:.2f}")
+            print(f"model_version={result.model_version}")
+            if garch_state is not None and label != "sniper":
+                print(f"calibrated_garch=loaded")
+
+        # Primary: the strategy selected by --mode (artifact goes to it).
+        if args.mode == "momentum":
+            primary = run_vol_momentum_backtest(
+                ticks,
+                symbol=args.symbol,
+                timeframe_sec=args.timeframe,
+                config=config,
+                strategy_config=moment_config,
+                garch_state=garch_state,
+                paper=paper,
+                artifact_output_path=args.artifact_output,
+            )
+            primary_label = "vol-momentum"
+        else:
+            primary = run_vol_reversion_backtest(
+                ticks,
+                symbol=args.symbol,
+                timeframe_sec=args.timeframe,
+                config=config,
+                strategy_config=fade_config,
+                garch_state=garch_state,
+                paper=paper,
+                artifact_output_path=args.artifact_output,
+            )
+            primary_label = "vol-reversion"
+        print(f"=== {primary_label} (primary) ===")
+        _print_result(primary_label, primary)
+
+        if args.compare:
+            # Run the OTHER vol-regime strategy too, then the sniper reference,
+            # so the operator can see fade vs momentum vs sniper on the same
+            # ticks and decide whether following or fading vol is profitable.
+            if args.mode == "momentum":
+                other = run_vol_reversion_backtest(
+                    ticks,
+                    symbol=args.symbol,
+                    timeframe_sec=args.timeframe,
+                    config=config,
+                    strategy_config=fade_config,
+                    garch_state=garch_state,
+                    paper=paper,
+                )
+                other_label = "vol-reversion"
+            else:
+                other = run_vol_momentum_backtest(
+                    ticks,
+                    symbol=args.symbol,
+                    timeframe_sec=args.timeframe,
+                    config=config,
+                    strategy_config=moment_config,
+                    garch_state=garch_state,
+                    paper=paper,
+                )
+                other_label = "vol-momentum"
+            print(f"\n=== {other_label} ===")
+            _print_result(other_label, other)
+
+            sniper = BacktestEngine(config=config)
+            sniper_result = sniper.run_ticks(
+                ticks,
+                symbol=args.symbol,
+                timeframe_sec=args.timeframe,
+                higher_timeframe_sec=args.timeframe * 3,
+            )
+            print(f"\n=== sniper (reference) ===")
+            _print_result("sniper", sniper_result)
+        return 0
+
+    if args.command == "backtest-gate":
+        from synthetic_trader.research.gate_backtest import (
+            backtest_gate_from_csv,
+            print_gate_backtest_report,
+        )
+
+        result = backtest_gate_from_csv(
+            csv_path=args.csv,
+            symbol=args.symbol,
+            timeframe_sec=args.timeframe,
+            higher_timeframe_sec=args.higher_timeframe,
+            min_samples=args.min_samples if args.min_samples is not None else MIN_STAGE3_SAMPLES,
+            hit_rate_floor=args.hit_rate_floor if args.hit_rate_floor is not None else GATE_HIT_RATE_FLOOR,
+            suppression_mode=args.suppression_mode,
+            proven_only=args.proven_only,
+        )
+        print_gate_backtest_report(result)
+        return 0
+
+    if args.command == "sweep-vol":
+        from synthetic_trader.research.vol_param_sweep import (
+            print_sweep_report,
+            run_sweep_for_csv,
+        )
+
+        gates = tuple(g.strip() for g in args.gates.split(",") if g.strip())
+        strategies = tuple(
+            g.strip() for g in args.strategies.split(",") if g.strip()
+        )
+        momentum_ranges = None
+        if args.mom_json:
+            import json as _json
+
+            mom_json_path = Path(args.mom_json)
+            if not mom_json_path.exists():
+                print(f"error=mom_json_not_found:{mom_json_path}")
+                return 1
+            raw = _json.loads(mom_json_path.read_text(encoding="utf-8"))
+            # CLI uses plain (start, stop, step) triples; map keys to the
+            # momentum_grid override names.  Unknown keys are ignored with a
+            # warning (a typo like "z_entry" must not silently run defaults).
+            momentum_ranges = {}
+            grid_keys = ("z_entries", "stops", "targets", "holds", "ref_periods")
+            for k, v in raw.items():
+                if k == "gate":
+                    continue
+                if k in grid_keys and isinstance(v, (list, tuple)) and len(v) == 3:
+                    momentum_ranges[k] = tuple(v)
+                else:
+                    print(f"sweep-vol: ignoring unknown mom-json key {k!r} "
+                          f"(expected one of {grid_keys} or 'gate')")
+            if isinstance(raw.get("gate"), dict):
+                for gk, gv in raw["gate"].items():
+                    if isinstance(gv, (list, tuple)) and len(gv) == 3:
+                        momentum_ranges.setdefault("gate_ranges", {})[gk] = tuple(gv)
+                    else:
+                        print(f"sweep-vol: ignoring invalid gate override {gk!r}")
+            elif "gate" in raw:
+                print("sweep-vol: ignoring 'gate' override (expected an object)")
+        report = run_sweep_for_csv(
+            args.csv,
+            symbol=args.symbol,
+            timeframe_sec=args.timeframe,
+            min_trades=args.min_trades,
+            top_n=args.top_n,
+            gates=gates,
+            strategies=strategies,
+            momentum_ranges=momentum_ranges,
+            artifact_output_path=args.artifact_output,
+        )
+        print_sweep_report(report, args.symbol, args.timeframe)
+        return 0
+
+    if args.command == "tune-bands":
+        from synthetic_trader.scripts.horizon_forecast_stats import tune_all_multipliers
+
+        report = tune_all_multipliers(args.engine_root)
+        for symbol, symbol_report in report.items():
+            if isinstance(symbol_report, dict) and "error" in symbol_report:
+                print(f"symbol={symbol} error={symbol_report['error']}")
+                continue
+            print(f"== {symbol} ==")
+            if not isinstance(symbol_report, dict):
+                continue
+            for horizon_key, tuned in symbol_report.items():
+                if not isinstance(tuned, dict):
+                    continue
+                p50 = tuned.get("p50_mult")
+                p90 = tuned.get("p90_mult")
+                print(
+                    f"horizon={horizon_key} verdict={tuned.get('verdict')} "
+                    f"windows={tuned.get('windows')} "
+                    f"coverage_p50={tuned.get('coverage_p50', 0.0):.3f} "
+                    f"coverage_p90={tuned.get('coverage_p90', 0.0):.3f} "
+                    f"p50_mult={p50 if p50 is None else p50:.3f} "
+                    f"p90_mult={p90 if p90 is None else p90:.3f} "
+                    f"iters={tuned.get('iterations')} persisted={tuned.get('persisted')}"
+                )
+        return 0
+
+    if args.command == "forecast-horizon":
+        from synthetic_trader.models.garch_calibration import load_calibrated_garch_state
+        from synthetic_trader.models.horizon_forecast import (
+            HorizonVolForecaster,
+            horizon_verdict,
+            load_forecast_multipliers,
+            save_forecast_multipliers,
+            score_horizon_forecast,
+        )
+
+        ticks = load_ticks_csv(args.csv, default_symbol=args.symbol)
+        garch_state = None if args.no_calibration else load_calibrated_garch_state(args.symbol)
+        if garch_state is not None:
+            print(f"calibrated_garch=loaded")
+
+        if args.validate or args.fit_multipliers:
+            if args.fit_multipliers:
+                # Fit multipliers on a train split, score coverage on the
+                # holdout (honest out-of-sample calibration), and persist.
+                validation = score_horizon_forecast(
+                    ticks,
+                    symbol=args.symbol,
+                    horizon_sec=int(args.horizon_hours * 3600),
+                    timeframe_sec=args.timeframe,
+                    garch_state=garch_state,
+                )
+                horizon_key = f"{int(args.horizon_hours)}h"
+                path = save_forecast_multipliers(
+                    args.symbol,
+                    args.timeframe,
+                    {
+                        horizon_key: {
+                            "p50_mult": validation.fitted_p50_mult,
+                            "p90_mult": validation.fitted_p90_mult,
+                            "windows": validation.windows,
+                            "coverage_p50": validation.coverage_p50,
+                            "coverage_p90": validation.coverage_p90,
+                        }
+                    },
+                )
+                print(f"multipliers_saved={path}")
+                print(f"multipliers_p50={validation.fitted_p50_mult:.3f}")
+                print(f"multipliers_p90={validation.fitted_p90_mult:.3f}")
+            else:
+                p50 = p90 = None
+                if args.apply_multipliers:
+                    mults = load_forecast_multipliers(args.symbol, args.timeframe)
+                    entry = (mults or {}).get(f"{int(args.horizon_hours)}h")
+                    if entry:
+                        p50, p90 = entry.get("p50_mult"), entry.get("p90_mult")
+                        print(f"multipliers=loaded p50={p50:.3f} p90={p90:.3f}")
+                    else:
+                        print(f"multipliers=not_found (run --fit-multipliers first)")
+                validation = score_horizon_forecast(
+                    ticks,
+                    symbol=args.symbol,
+                    horizon_sec=int(args.horizon_hours * 3600),
+                    timeframe_sec=args.timeframe,
+                    garch_state=garch_state,
+                    p50_mult=p50,
+                    p90_mult=p90,
+                )
+            print(f"validation=walk_forward_coverage")
+            print(f"symbol={validation.symbol}")
+            print(f"horizon_sec={validation.horizon_sec}")
+            print(f"timeframe_sec={validation.timeframe_sec}")
+            print(f"windows={validation.windows}")
+            print(f"coverage_p50={validation.coverage_p50:.3f}")
+            print(f"coverage_p90={validation.coverage_p90:.3f}")
+            print(f"median_realized_ratio={validation.median_realized_ratio:.3f}")
+            print(f"mean_realized_ratio={validation.mean_realized_ratio:.3f}")
+            print(f"over_forecast_pct={validation.over_forecast_pct:.3f}")
+            print(f"drift_events={validation.drift_events}")
+            print(f"fitted_p50_mult={validation.fitted_p50_mult:.3f}")
+            print(f"fitted_p90_mult={validation.fitted_p90_mult:.3f}")
+            verdict = horizon_verdict(validation)
+            print(f"verdict={verdict}")
+            return 0
+
+        forecaster = HorizonVolForecaster(
+            args.symbol,
+            timeframe_sec=args.timeframe,
+            garch_state=garch_state,
+        )
+        from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
+
+        builder = MultiTimeframeCandleBuilder(args.symbol, [args.timeframe])
+        for tick in sorted(ticks, key=lambda item: item.epoch):
+            closed = builder.update(tick)
+            for tf, candle in closed.items():
+                if tf == args.timeframe:
+                    forecaster.on_candle(candle)
+
+        # flush() is destructive — call it exactly once for the final close.
+        final_candle = builder.flush().get(args.timeframe)
+        forecast = forecaster.forecast(
+            int(args.horizon_hours * 3600),
+            current_close=final_candle.close if final_candle else None,
+        )
+        print(f"symbol={forecast.symbol}")
+        print(f"horizon_sec={forecast.horizon_sec}")
+        print(f"bars={forecast.bars}")
+        print(f"current_close={forecast.current_close:.2f}")
+        print(f"current_sigma={forecast.current_sigma:.6f}")
+        print(f"projected_sigma_avg={forecast.projected_sigma_avg:.6f}")
+        print(f"projected_sigma_end={forecast.projected_sigma_end:.6f}")
+        print(f"long_run_sigma={forecast.long_run_sigma:.6f}")
+        print(f"vol_trend={forecast.vol_trend}")
+        print(f"range_p50_price={forecast.range_p50_price:.2f}")
+        print(f"range_p90_price={forecast.range_p90_price:.2f}")
+        print(f"expected_low_p50={forecast.expected_low_p50:.2f}")
+        print(f"expected_high_p50={forecast.expected_high_p50:.2f}")
+        print(f"expected_low_p90={forecast.expected_low_p90:.2f}")
+        print(f"expected_high_p90={forecast.expected_high_p90:.2f}")
+        print(f"regime_stable={forecast.regime_stable}")
+        print(f"drift_events={forecast.drift_events}")
+        print(f"confidence={forecast.confidence:.2f}")
         return 0
 
     if args.command == "walk-forward":
@@ -938,9 +1644,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "score-live-calibration":
+        from synthetic_trader.live.auto_scorer import _resolve_scoring_client_factory
+
         journal_path = Path(args.calls_journal)
         if not journal_path.exists():
             print(f"error=journal_not_found:{journal_path}")
+            return 1
+        # Scoring has NO Deriv fallback: resolve the Blueberry MT5 client or
+        # fail loudly (the call levels are SYN-scale; Deriv 1HZ is wrong-scale).
+        try:
+            client_factory = _resolve_scoring_client_factory()
+        except Exception as exc:
+            print(f"error=scoring_unavailable:{exc}")
             return 1
         now = datetime.fromisoformat(args.now) if args.now else datetime.now(timezone.utc)
         result = run_score_unresolved_records_from_market(
@@ -949,12 +1664,54 @@ def main(argv: list[str] | None = None) -> int:
             now=now,
             symbol=args.symbol,
             window_minutes=args.window_minutes,
+            client_factory=client_factory,
         )
         print(f"calls_journal={journal_path}")
         print(f"output={Path(args.output)}")
         print(f"scored_records={result.scored_records}")
         print(f"failed_records={result.failed_records}")
         print(f"skipped_records={result.skipped_records}")
+        return 0
+
+    if args.command == "score-live-loop":
+        from synthetic_trader.live.auto_scorer import run_auto_score_loop
+
+        mode = "single sweep" if args.once else f"loop every {args.interval:g}s"
+        print(f"score-live-loop: {mode}")
+        print(f"calls_journal={args.calls_journal}")
+        print(f"output={args.output}")
+        stats = asyncio.run(
+            run_auto_score_loop(
+                calls_path=args.calls_journal,
+                outcomes_path=args.output,
+                interval_sec=args.interval,
+                symbol=args.symbol,
+                window_minutes=args.window_minutes,
+                status_path=args.status_path,
+                run_once=args.once,
+            )
+        )
+        for symbol_stats in stats.values():
+            print(
+                f"symbol={symbol_stats.symbol} "
+                f"scored={symbol_stats.calls_scored} "
+                f"failed={symbol_stats.calls_failed} "
+                f"skipped={symbol_stats.calls_skipped} "
+                f"pending={symbol_stats.calls_pending} "
+                f"error={symbol_stats.error}"
+            )
+            if symbol_stats.warning:
+                print(f"warning={symbol_stats.warning}")
+        print(f"status_output={Path(args.status_path)}")
+        # A scheduled sweep must be able to signal failure: exit non-zero when
+        # the sweep recorded an error (MT5/Deriv unreachable, credentials
+        # missing) so Task Scheduler / cron sees it instead of a false "ok".
+        if args.once and any(s.error is not None for s in stats.values()):
+            # Note: print to stdout (not stderr) — ``sys`` is a local name in
+            # this module's main() (imported later inside a subcommand handler),
+            # so referencing sys.stderr here would raise UnboundLocalError.
+            print("error=sweep_failed (see status file for details)")
+            return 1
         return 0
 
     if args.command == "live-snapshot":
@@ -966,6 +1723,7 @@ def main(argv: list[str] | None = None) -> int:
                 higher_timeframe_sec=args.higher_timeframe,
                 max_live_ticks=args.max_live_ticks,
                 app_id=args.app_id,
+                proven_only=args.proven_only,
             )
         )
         print(render_live_snapshot_text(snapshot))
@@ -979,12 +1737,16 @@ def main(argv: list[str] | None = None) -> int:
                 timeframe_sec=args.timeframe,
                 higher_timeframe_sec=args.higher_timeframe,
                 journal_path=args.journal,
+                calls_journal_path=args.calls_journal or None,
                 emit_initial=args.emit_initial,
                 max_alerts=args.max_alerts,
                 max_minutes=args.max_minutes,
                 max_reconnects=args.max_reconnects,
                 reconnect_backoff_sec=args.reconnect_backoff_sec,
                 app_id=args.app_id,
+                auto_score_interval_sec=args.auto_score,
+                auto_score_status_path=args.auto_score_status_path,
+                proven_only=args.proven_only,
             )
         )
         for alert in alerts:
@@ -1164,6 +1926,110 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nartifact_output={Path(args.artifact_output)}")
         return 0
 
+    if args.command == "collect-live-ticks":
+        from synthetic_trader.data.continuous_collector import collect_live_ticks
+
+        symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        for key, value in (
+            ("SYNTHETIC_MT5_SERVER", args.mt5_server),
+            ("SYNTHETIC_MT5_LOGIN", str(args.mt5_login) if args.mt5_login else None),
+            ("SYNTHETIC_MT5_PASSWORD", args.mt5_password),
+            ("SYNTHETIC_MT5_TERMINAL_PATH", args.mt5_terminal_path),
+        ):
+            if value:
+                os.environ[key] = value
+
+        results = asyncio.run(
+            collect_live_ticks(
+                symbols,
+                output_dir=args.output_dir,
+                duration_sec=args.duration_sec,
+                status_path=args.status_path,
+            )
+        )
+        for symbol, stats in results.items():
+            print(f"=== {symbol} ===")
+            print(stats.summary().strip())
+        print(f"status_output={Path(args.status_path)}")
+        return 0
+
+    if args.command == "capture-m1":
+        from synthetic_trader.data.m1_capture import run_m1_capture_loop
+
+        symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        if args.mt5_terminal_path:
+            os.environ["SYNTHETIC_MT5_TERMINAL_PATH"] = args.mt5_terminal_path
+
+        mode = "single sweep" if args.once else f"loop every {args.interval:g}s"
+        print(f"capture-m1: {mode} for {', '.join(symbols)}")
+        results = asyncio.run(
+            run_m1_capture_loop(
+                symbols,
+                output_dir=args.output_dir,
+                interval_sec=args.interval,
+                initial_days=args.initial_days,
+                overlap_sec=args.overlap_sec,
+                terminal_path=args.mt5_terminal_path,
+                status_path=args.status_path,
+                run_once=args.once,
+            )
+        )
+        for symbol, stats in results.items():
+            print(f"=== {symbol} ===")
+            print(stats.summary().strip())
+        print(f"status_output={Path(args.status_path)}")
+        return 0
+
+    if args.command == "tick-coverage":
+        import sys
+
+        # The coverage report uses arrow glyphs (→) that crash cp1252 consoles;
+        # same reconfigure fix as run_wfo.py.
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+        from synthetic_trader.scripts.tick_coverage_stats import (
+            build_coverage_report,
+            render_coverage_report,
+        )
+
+        symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        timeframes = [int(x) for x in args.timeframes.split(",") if x.strip()]
+        horizons = [float(x) for x in args.horizon_hours.split(",") if x.strip()]
+        report = build_coverage_report(
+            symbols,
+            engine_root=args.engine_root,
+            timeframes=timeframes,
+            horizon_hours=horizons,
+        )
+        if args.json:
+            print(report.to_json())
+        else:
+            print(render_coverage_report(report))
+        return 0
+
+    if args.command == "tick-task-health":
+        import json as _json
+
+        from synthetic_trader.scripts.tick_task_health import (
+            check_task_health,
+            render_report,
+        )
+
+        report = check_task_health(
+            args.engine_root,
+            flat_hours=args.flat_hours,
+            task_stale_hours=args.task_stale_hours,
+            verify_stale_hours=args.verify_stale_hours,
+        )
+        if args.json:
+            print(_json.dumps(report.to_dict(), indent=2))
+        else:
+            print(render_report(report))
+        # Exit code is the alert gate: 0 = healthy, 1 = warnings fired.
+        return 0 if report.healthy else 1
+
     if args.command == "collect-ticks":
         from synthetic_trader.calibration.mt5_collector import (
             collect_ticks_from_mt5,
@@ -1194,6 +2060,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: {exc}")
             print("Make sure MT5 terminal is running and the symbol is available.")
             return 1
+
+    if args.command == "backfill-mt5":
+        from synthetic_trader.calibration.mt5_collector import collect_mt5_candle_history
+
+        print(f"Backfilling {args.symbol} ({args.days:g} days) from Blueberry MT5 terminal...")
+        result = collect_mt5_candle_history(
+            symbol=args.symbol,
+            days=args.days,
+            output_path=args.output,
+            venue_symbol=args.venue_symbol,
+            terminal_path=args.mt5_terminal_path,
+        )
+        print(result.summary())
+        return 0
 
     if args.command == "calibrate-egarch":
         from synthetic_trader.models.garch_calibration import (

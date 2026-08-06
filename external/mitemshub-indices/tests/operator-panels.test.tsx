@@ -9,6 +9,7 @@ import { PropCompliancePanel } from "../src/components/operator/prop-compliance-
 import { TradeInstructionPanel } from "../src/components/operator/trade-instruction-panel";
 import { ConnectionStatus } from "../src/components/operator/connection-status";
 import { HealthDashboard } from "../src/components/operator/health-dashboard";
+import { HorizonForecastPanel } from "../src/components/operator/horizon-forecast-panel";
 
 afterEach(() => {
   cleanup();
@@ -300,6 +301,495 @@ describe("PrimaryCallPanel", () => {
     expect(screen.getByText(/next hour/i)).toBeInTheDocument();
     expect(screen.getByText(/5m close/i)).toBeInTheDocument();
   });
+
+  it("shows an analyzing state instead of the retry placeholder while a read is in flight", () => {
+    render(
+      <PrimaryCallPanel
+        call={null}
+        guardianStatus={null}
+        loading={true}
+        onRetry={() => {}}
+        retryLabel="Retry live read"
+      />,
+    );
+
+    // The user must never be stranded on the retry placeholder while the
+    // Python engine is still computing — an honest analyzing state shows
+    // that a read IS happening.
+    expect(screen.getByText(/analyzing the market/i)).toBeInTheDocument();
+    expect(screen.queryByText(/retry live read/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/run a live read/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /analyzing the market/i })).toBeInTheDocument();
+  });
+
+  it("labels the refresh button 'Refresh plan' for a forming setup and 'Reconnect' only when unavailable", () => {
+    const formingCall = {
+      symbol: "R_100" as const,
+      call: "stand_aside" as const,
+      alert_type: "context_update" as const,
+      trade_status: "not_valid" as const,
+      confidence: 0.54,
+      regime: "range",
+      direction_bias: "none" as const,
+      why: "current movement is active but not a clean setup yet",
+      wait_for: "wait for more candle history",
+      decision_summary: null,
+      entry_area: null,
+      stop_area: null,
+      target_area: null,
+      entry: null,
+      stop_loss: null,
+      take_profit: null,
+      reward_risk: null,
+      current_close: 361.3,
+      guardian_state: "forming" as const,
+      guardian_reason: "No directional thesis — waiting for market data.",
+      generated_at: "2026-07-12T12:00:00.000Z",
+      account_mode: "own_account" as const,
+      prop_compliance: null,
+      prop_adjusted_risk: null,
+      prop_block_reason: null,
+      prop_remaining_daily_buffer: null,
+      prop_remaining_overall_buffer: null,
+    };
+
+    // Forming setup = normal market state (engine connected and working) —
+    // the button refreshes the plan rather than implying a failure.
+    const { rerender } = render(
+      <PrimaryCallPanel
+        call={formingCall}
+        guardianStatus={null}
+        loading={false}
+        onRetry={() => {}}
+        retryLabel="Retry live read"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /refresh plan/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /retry live read/i })).not.toBeInTheDocument();
+
+    // Unavailable = something actually failed — the honest retry label stays.
+    rerender(
+      <PrimaryCallPanel
+        call={{ ...formingCall, guardian_state: "unavailable" }}
+        guardianStatus={null}
+        loading={false}
+        onRetry={() => {}}
+        retryLabel="Retry live read"
+      />,
+    );
+    expect(screen.getByRole("button", { name: /retry live read/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /refresh plan/i })).not.toBeInTheDocument();
+  });
+
+  it("shows the retry placeholder only when no call exists and nothing is loading", () => {
+    render(
+      <PrimaryCallPanel call={null} guardianStatus={null} loading={false} onRetry={() => {}} />,
+    );
+
+    expect(screen.getByText(/run a live read/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+    expect(screen.queryByText(/analyzing the market/i)).not.toBeInTheDocument();
+  });
+
+  it("shows the data-venue badge (mt5 vs deriv vs csv) in the meta bar", () => {
+    const base = {
+      symbol: "R_75" as const,
+      call: "sell_candidate" as const,
+      alert_type: "setup_candidate" as const,
+      trade_status: "valid" as const,
+      confidence: 0.62,
+      regime: "trend_down",
+      direction_bias: "sell" as const,
+      why: "structure aligned lower",
+      wait_for: "wait for confirmation",
+      decision_summary: "sell setup ready",
+      entry: 1783.2,
+      stop_loss: 1785.4,
+      take_profit: 1778.0,
+      reward_risk: 2.1,
+      current_close: 1783.0,
+      guardian_state: "actionable" as const,
+      guardian_reason: "The setup is actionable.",
+      generated_at: "2026-07-12T12:00:00.000Z",
+      account_mode: "own_account" as const,
+      prop_compliance: null,
+      prop_adjusted_risk: null,
+      prop_block_reason: null,
+      prop_remaining_daily_buffer: null,
+      prop_remaining_overall_buffer: null,
+    };
+
+    const { rerender } = render(
+      <PrimaryCallPanel call={{ ...base, venue: "mt5" }} guardianStatus={null} loading={false} />,
+    );
+    expect(screen.getByText("MT5 venue")).toBeInTheDocument();
+
+    rerender(
+      <PrimaryCallPanel call={{ ...base, venue: "deriv" }} guardianStatus={null} loading={false} />,
+    );
+    expect(screen.getByText("Deriv scale")).toBeInTheDocument();
+
+    rerender(
+      <PrimaryCallPanel call={{ ...base, venue: "csv" }} guardianStatus={null} loading={false} />,
+    );
+    expect(screen.getByText("CSV venue")).toBeInTheDocument();
+
+    rerender(<PrimaryCallPanel call={{ ...base, venue: null }} guardianStatus={null} loading={false} />);
+    expect(screen.queryByText("MT5 venue")).not.toBeInTheDocument();
+    expect(screen.queryByText("Deriv scale")).not.toBeInTheDocument();
+  });
+
+  it("shows the stage3 market-verified hit rate instead of raw confidence when gated", () => {
+    render(
+      <PrimaryCallPanel
+        call={{
+          symbol: "R_100",
+          call: "buy_candidate",
+          alert_type: "setup_candidate",
+          trade_status: "valid",
+          confidence: 0.62,
+          regime: "range",
+          direction_bias: "buy",
+          why: "structure aligned",
+          wait_for: "wait for confirmation",
+          decision_summary: "buy setup ready",
+          entry_area: null,
+          stop_area: null,
+          target_area: null,
+          entry: 51234.6,
+          stop_loss: 51188.2,
+          take_profit: 51326.4,
+          reward_risk: 2,
+          current_close: 51240.1,
+          guardian_state: "actionable",
+          guardian_reason: "The setup is actionable.",
+          generated_at: "2026-07-12T12:00:00.000Z",
+          account_mode: "own_account",
+          prop_compliance: null,
+          prop_adjusted_risk: null,
+          prop_block_reason: null,
+          prop_remaining_daily_buffer: null,
+          prop_remaining_overall_buffer: null,
+          stage3: {
+            state: "gated",
+            evidence_status: "proven",
+            trigger_type: "continuation_close",
+            empirical_target_hit_rate: 0.62,
+            empirical_sample_count: 24,
+            empirical_stop_hit_rate: 0.29,
+            horizon_verdict: "calibrated",
+            horizon_verdict_4h: "calibrated",
+            horizon_verdict_6h: "calibrated",
+            model_confidence: 0.71,
+            display_confidence: 0.62,
+            min_samples: 10,
+            hit_rate_floor: 0.5,
+            suppression_mode: "suppress",
+            proven_only: false,
+            execution_allowed: true,
+            below_floor: false,
+            suppressed_call: null,
+            sizing: {
+              level: "full",
+              multiplier: 1,
+              basis: "gated",
+              reason: "calibrated horizon + 62% hit rate clears the floor",
+            },
+            note: "24 scored outcomes; target-hit rate 62% clears 50% and the horizon verdict is calibrated.",
+          },
+        }}
+        guardianStatus={null}
+        loading={false}
+      />,
+    );
+
+    expect(screen.getByText("Proven")).toBeInTheDocument();
+    expect(screen.getByText("Full size")).toBeInTheDocument();
+    // The rate appears in the hit-rate chip and the sizing reason.
+    expect(screen.getAllByText(/62% hit rate/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/\(24 scored\)/)).toBeInTheDocument();
+    expect(screen.getByText(/continuation_close/)).toBeInTheDocument();
+    expect(screen.getByText(/horizon: calibrated/)).toBeInTheDocument();
+    expect(screen.getByText(/Verified/)).toBeInTheDocument();
+    // The proven badge distinguishes a market-verified call from a still-learning one.
+    expect(screen.getAllByText("Proven").length).toBeGreaterThanOrEqual(1);
+    // The verified rate shows twice: the confidence chip and the stage-3 strip.
+    expect(screen.getAllByText(/62%/).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("annotates the call when stage3 evidence exists but does not clear every bar", () => {
+    render(
+      <PrimaryCallPanel
+        call={{
+          symbol: "R_100",
+          call: "sell_candidate",
+          alert_type: "setup_candidate",
+          trade_status: "valid",
+          confidence: 0.71,
+          regime: "range",
+          direction_bias: "sell",
+          why: "structure aligned",
+          wait_for: "wait for confirmation",
+          decision_summary: "sell setup ready",
+          entry_area: null,
+          stop_area: null,
+          target_area: null,
+          entry: 51234.6,
+          stop_loss: 51188.2,
+          take_profit: 51326.4,
+          reward_risk: 2,
+          current_close: 51240.1,
+          guardian_state: "actionable",
+          guardian_reason: "The setup is actionable.",
+          generated_at: "2026-07-12T12:00:00.000Z",
+          account_mode: "own_account",
+          prop_compliance: null,
+          prop_adjusted_risk: null,
+          prop_block_reason: null,
+          prop_remaining_daily_buffer: null,
+          prop_remaining_overall_buffer: null,
+          stage3: {
+            state: "annotated",
+            evidence_status: "still_learning",
+            trigger_type: "reclaim_pullback",
+            empirical_target_hit_rate: 0.42,
+            empirical_sample_count: 8,
+            empirical_stop_hit_rate: 0.5,
+            horizon_verdict: "calibrated",
+            horizon_verdict_4h: "calibrated",
+            horizon_verdict_6h: "calibrated",
+            model_confidence: 0.71,
+            display_confidence: 0.71,
+            min_samples: 10,
+            hit_rate_floor: 0.5,
+            suppression_mode: "suppress",
+            proven_only: false,
+            execution_allowed: true,
+            below_floor: false,
+            suppressed_call: null,
+            sizing: {
+              level: "paper_only",
+              multiplier: 0,
+              basis: "still_learning",
+              reason: "42% hit rate on fewer than the minimum samples — paper only until verified",
+            },
+            note: "8 scored outcomes; target-hit rate 42% (hit rate below floor).",
+          },
+        }}
+        guardianStatus={null}
+        loading={false}
+      />,
+    );
+
+    // Still-learning calls show the live sample size toward the minimum.
+    expect(screen.getByText("Still learning")).toBeInTheDocument();
+    expect(screen.getByText("Paper only")).toBeInTheDocument();
+    expect(screen.getByText(/8\/10 scored/)).toBeInTheDocument();
+    expect(screen.getAllByText(/42% hit rate/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/hit rate below floor/)).toBeInTheDocument();
+  });
+
+  it("shows a below-floor call type as 'Below verified floor' in annotate mode", () => {
+    render(
+      <PrimaryCallPanel
+        call={{
+          symbol: "R_100",
+          call: "sell_candidate",
+          alert_type: "setup_candidate",
+          trade_status: "valid",
+          confidence: 0.3,
+          regime: "range",
+          direction_bias: "sell",
+          why: "below floor but annotate mode keeps it visible",
+          wait_for: "wait for confirmation",
+          decision_summary: null,
+          entry_area: null,
+          stop_area: null,
+          target_area: null,
+          entry: null,
+          stop_loss: null,
+          take_profit: null,
+          reward_risk: null,
+          current_close: 51240.1,
+          guardian_state: "actionable",
+          guardian_reason: "The setup is actionable.",
+          generated_at: "2026-07-12T12:00:00.000Z",
+          account_mode: "own_account",
+          prop_compliance: null,
+          prop_adjusted_risk: null,
+          prop_block_reason: null,
+          prop_remaining_daily_buffer: null,
+          prop_remaining_overall_buffer: null,
+          stage3: {
+            state: "annotated",
+            evidence_status: "suppressed",
+            trigger_type: "breakout_fade",
+            empirical_target_hit_rate: 0.3,
+            empirical_sample_count: 45,
+            empirical_stop_hit_rate: 0.6,
+            horizon_verdict: "calibrated",
+            horizon_verdict_4h: "calibrated",
+            horizon_verdict_6h: "calibrated",
+            model_confidence: 0.71,
+            display_confidence: 0.3,
+            min_samples: 10,
+            hit_rate_floor: 0.5,
+            suppression_mode: "annotate",
+            proven_only: false,
+            execution_allowed: true,
+            below_floor: true,
+            suppressed_call: null,
+            note: "45 scored outcomes; target-hit rate 30% is BELOW the 50% floor — suppression mode is 'annotate'.",
+          },
+        }}
+        guardianStatus={null}
+        loading={false}
+      />,
+    );
+
+    // Annotate mode: the failing type is still shown, honestly labeled.
+    expect(screen.getByText("Below verified floor")).toBeInTheDocument();
+    expect(screen.getByText(/mode: annotate/i)).toBeInTheDocument();
+    expect(screen.getByText(/still shown/i)).toBeInTheDocument();
+    expect(screen.queryByText(/held back/i)).not.toBeInTheDocument();
+  });
+
+  it("suppresses calls whose call type is below the verified floor and explains why", () => {
+    render(
+      <PrimaryCallPanel
+        call={{
+          symbol: "R_75",
+          call: "stand_aside",
+          alert_type: "context_update",
+          trade_status: "not_valid",
+          confidence: 0.44,
+          regime: "range",
+          direction_bias: "none",
+          why: "trigger type has not cleared the verified floor",
+          wait_for: "wait for a proven setup type",
+          decision_summary: "setup held back",
+          entry_area: null,
+          stop_area: null,
+          target_area: null,
+          entry: null,
+          stop_loss: null,
+          take_profit: null,
+          reward_risk: null,
+          current_close: 51240.1,
+          guardian_state: "forming",
+          guardian_reason: "Setup type below verified floor.",
+          generated_at: "2026-07-12T12:00:00.000Z",
+          account_mode: "own_account",
+          prop_compliance: null,
+          prop_adjusted_risk: null,
+          prop_block_reason: null,
+          prop_remaining_daily_buffer: null,
+          prop_remaining_overall_buffer: null,
+          stage3: {
+            state: "suppressed",
+            evidence_status: "suppressed",
+            trigger_type: "momentum_breakout",
+            empirical_target_hit_rate: 0.31,
+            empirical_sample_count: 45,
+            empirical_stop_hit_rate: 0.6,
+            horizon_verdict: "calibrated",
+            horizon_verdict_4h: "calibrated",
+            horizon_verdict_6h: "calibrated",
+            model_confidence: 0.72,
+            display_confidence: 0.72,
+            min_samples: 10,
+            hit_rate_floor: 0.5,
+            suppression_mode: "suppress",
+            proven_only: false,
+            execution_allowed: false,
+            below_floor: false,
+            suppressed_call: "sell_candidate",
+            sizing: {
+              level: "stand_aside",
+              multiplier: 0,
+              basis: "suppressed",
+              reason: "below the 50% verified floor (31%) — held back",
+            },
+            note: "45 scored outcomes; target-hit rate 31% below the 50% floor.",
+          },
+        }}
+        guardianStatus={null}
+        loading={false}
+      />,
+    );
+
+    expect(screen.getByText("Suppressed")).toBeInTheDocument();
+    // "held back" appears in the explanatory paragraph and the sizing badge.
+    expect(screen.getAllByText(/held back/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/31% hit rate/i)).toBeInTheDocument();
+    expect(screen.getByText(/\(45 scored\)/)).toBeInTheDocument();
+    expect(screen.getByText(/momentum_breakout/)).toBeInTheDocument();
+    expect(screen.getByText(/below the verified floor/)).toBeInTheDocument();
+  });
+
+  it("shows the sample count once when the empirical hit rate is exactly zero", () => {
+    render(
+      <PrimaryCallPanel
+        call={{
+          symbol: "R_75",
+          call: "stand_aside",
+          alert_type: "context_update",
+          trade_status: "not_valid",
+          confidence: 0.4,
+          regime: "range",
+          direction_bias: "none",
+          why: "call type has never hit target",
+          wait_for: "wait for a proven setup type",
+          decision_summary: "setup held back",
+          entry_area: null,
+          stop_area: null,
+          target_area: null,
+          entry: null,
+          stop_loss: null,
+          take_profit: null,
+          reward_risk: null,
+          current_close: 51240.1,
+          guardian_state: "forming",
+          guardian_reason: "Setup type below verified floor.",
+          generated_at: "2026-07-12T12:00:00.000Z",
+          account_mode: "own_account",
+          prop_compliance: null,
+          prop_adjusted_risk: null,
+          prop_block_reason: null,
+          prop_remaining_daily_buffer: null,
+          prop_remaining_overall_buffer: null,
+          stage3: {
+            state: "suppressed",
+            evidence_status: "suppressed",
+            trigger_type: "breakout_fade",
+            empirical_target_hit_rate: 0,
+            empirical_sample_count: 45,
+            empirical_stop_hit_rate: 0.8,
+            horizon_verdict: "calibrated",
+            horizon_verdict_4h: "calibrated",
+            horizon_verdict_6h: "calibrated",
+            model_confidence: 0.71,
+            display_confidence: 0.71,
+            min_samples: 10,
+            hit_rate_floor: 0.5,
+            suppression_mode: "suppress",
+            proven_only: false,
+            execution_allowed: false,
+            below_floor: false,
+            suppressed_call: "buy_candidate",
+            note: "45 scored outcomes; target-hit rate 0% below the 50% floor.",
+          },
+        }}
+        guardianStatus={null}
+        loading={false}
+      />,
+    );
+
+    // Exactly one "(45 scored)" — the zero-rate fallback must not duplicate it.
+    expect(screen.getAllByText(/\(45 scored\)/).length).toBe(1);
+    expect(screen.getByText(/0% hit rate/i)).toBeInTheDocument();
+  });
 });
 
 describe("PropCompliancePanel", () => {
@@ -519,6 +1009,165 @@ describe("ConnectionStatus", () => {
     // After clicking, the button should show "Testing…" and be disabled
     expect(await screen.findByText(/testing/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /test mt5 connection/i })).toBeDisabled();
+  });
+});
+
+describe("HorizonForecastPanel", () => {
+  const baseForecast = {
+    symbol: "R_75",
+    horizon_sec: 14400,
+    timeframe_sec: 60,
+    bars: 240,
+    current_close: 1762.0,
+    current_sigma: 0.0008,
+    projected_sigma_avg: 0.00075,
+    projected_sigma_end: 0.0007,
+    long_run_sigma: 0.00072,
+    range_p50_price: 42.5,
+    range_p90_price: 96.3,
+    expected_low_p50: 1740.75,
+    expected_high_p50: 1783.25,
+    expected_low_p90: 1713.85,
+    expected_high_p90: 1810.15,
+    vol_trend: "falling",
+    persistence: 0.9,
+    drift_events: 2,
+    steps_since_drift: 300,
+    regime_stable: true,
+    confidence: 0.65,
+    notes: [],
+  };
+
+  const baseValidation = {
+    symbol: "R_75",
+    horizon_sec: 14400,
+    timeframe_sec: 60,
+    windows: 255,
+    coverage_p50: 0.463,
+    coverage_p90: 0.769,
+    median_realized_ratio: 1.055,
+    mean_realized_ratio: 1.1,
+    over_forecast_pct: 0.23,
+    drift_events: 2,
+    fitted_p50_mult: 1.69,
+    fitted_p90_mult: 4.29,
+  };
+
+  const mockData = {
+    R_75: {
+      symbol: "R_75",
+      timeframe_sec: 60,
+      tick_csv: "data/backfill/R_75_ticks.csv",
+      ticks: 40080,
+      garch_calibrated: true,
+      error: null,
+      horizons: {
+        "4h": {
+          horizon_sec: 14400,
+          verdict: "calibrated",
+          validation: baseValidation,
+          forecast: baseForecast,
+        },
+        "6h": {
+          horizon_sec: 21600,
+          verdict: "needs_more_data_or_tuning",
+          validation: {
+            ...baseValidation,
+            windows: 135,
+            coverage_p50: 0.237,
+            fitted_p50_mult: 1.82,
+            fitted_p90_mult: 4.71,
+          },
+          forecast: {
+            ...baseForecast,
+            horizon_sec: 21600,
+            bars: 360,
+            // Wider bands at the longer horizon so the two cards differ.
+            expected_low_p50: 1705.5,
+            expected_high_p50: 1818.5,
+            expected_low_p90: 1664.25,
+            expected_high_p90: 1859.75,
+          },
+        },
+      },
+    },
+  };
+
+  it("shows a pulsing loading state while the fetcher is in flight", () => {
+    const neverResolve = () => new Promise<never>(() => {});
+    render(<HorizonForecastPanel fetcher={neverResolve} />);
+
+    expect(screen.getAllByText(/horizon volatility forecast/i).length).toBeGreaterThan(0);
+    // Expanded content should not be visible yet
+    expect(screen.queryByText(/loading horizon forecast/i)).not.toBeInTheDocument();
+  });
+
+  it("shows an error state when the fetcher rejects", async () => {
+    const rejectingFetcher = () => Promise.reject(new Error("Network error"));
+    render(<HorizonForecastPanel fetcher={rejectingFetcher} />);
+
+    const toggle = screen.getByRole("button", { name: /toggle horizon forecast/i });
+    fireEvent.click(toggle);
+    expect(await screen.findByText(/horizon forecast unavailable/i)).toBeInTheDocument();
+  });
+
+  it("renders p50/p90 bands, drift state, and fitted multipliers via the fetcher", async () => {
+    render(<HorizonForecastPanel fetcher={() => Promise.resolve(mockData)} />);
+
+    const toggle = screen.getByRole("button", { name: /toggle horizon forecast/i });
+    fireEvent.click(toggle);
+
+    // Calibration badge (distinct from the intro copy which also says "calibrated")
+    expect(await screen.findAllByText(/calibrated/i).then((els) => els.length)).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/needs data/i)).toBeInTheDocument();
+
+    // p50/p90 range labels
+    expect(screen.getAllByText(/p50 range/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/p90 range/i).length).toBeGreaterThan(0);
+
+    // Price levels from the forecast — each band is unique per horizon
+    expect(screen.getByText("1,740.75 – 1,783.25")).toBeInTheDocument();
+    expect(screen.getByText("1,713.85 – 1,810.15")).toBeInTheDocument();
+    expect(screen.getByText("1,705.5 – 1,818.5")).toBeInTheDocument();
+    expect(screen.getByText("1,664.25 – 1,859.75")).toBeInTheDocument();
+
+    // Vol trend and regime state (both horizon cards show "falling")
+    expect(screen.getAllByText(/falling/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/stable/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/2 drift events/i).length).toBeGreaterThan(0);
+
+    // Walk-forward calibration line: windows, fitted multipliers (per horizon)
+    expect(screen.getByText(/255 windows/i)).toBeInTheDocument();
+    expect(screen.getByText(/135 windows/i)).toBeInTheDocument();
+    expect(screen.getByText(/×1\.69/i)).toBeInTheDocument();
+    expect(screen.getByText(/×4\.29/i)).toBeInTheDocument();
+    expect(screen.getByText(/×1\.82/i)).toBeInTheDocument();
+    expect(screen.getByText(/×4\.71/i)).toBeInTheDocument();
+
+    // Symbol header (V75) and tick count
+    expect(screen.getByText(/v75/i)).toBeInTheDocument();
+    expect(screen.getByText(/40,080 ticks/i)).toBeInTheDocument();
+  });
+
+  it("shows the per-symbol error state when a symbol has no data", async () => {
+    const errorData = {
+      R_100: {
+        symbol: "R_100",
+        timeframe_sec: 60,
+        tick_csv: null,
+        ticks: null,
+        garch_calibrated: null,
+        error: "no_tick_csv",
+        horizons: {},
+      },
+    };
+    render(<HorizonForecastPanel fetcher={() => Promise.resolve(errorData)} />);
+
+    const toggle = screen.getByRole("button", { name: /toggle horizon forecast/i });
+    fireEvent.click(toggle);
+
+    expect(await screen.findByText(/no tick data on disk/i)).toBeInTheDocument();
+    expect(screen.getByText(/v100/i)).toBeInTheDocument();
   });
 });
 

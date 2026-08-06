@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from synthetic_trader.config import LiveMode, TraderConfig, Venue
+from synthetic_trader.config import LiveMode, MAX_FEATURE_HISTORY, TraderConfig, Venue
 from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
 from synthetic_trader.data.collector import deriv_credentials_from_env
 from synthetic_trader.data.tick_store import append_ticks_csv
@@ -141,10 +141,14 @@ async def run_live_paper(
                     journal.record_outcome(outcome)
                     journal.teach(live_model, outcome)
 
+                # Same bounded-window fix as the backtest engine: every
+                # indicator is a rolling window (<= 50 bars), so scanning the
+                # full growing history per candle is O(n²) waste.  Only the
+                # recent tail is ever needed.
                 report = decision_engine.evaluate(
                     symbol=symbol,
-                    candles=histories[timeframe_sec],
-                    higher_timeframe_candles=histories[higher_timeframe_sec],
+                    candles=histories[timeframe_sec][-MAX_FEATURE_HISTORY:],
+                    higher_timeframe_candles=histories[higher_timeframe_sec][-MAX_FEATURE_HISTORY:],
                 )
                 if report.signal is None:
                     journal.record_event(

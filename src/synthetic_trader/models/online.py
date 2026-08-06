@@ -8,6 +8,7 @@ from pathlib import Path
 
 from synthetic_trader.config import ModelConfig
 from synthetic_trader.features.indicators import clamp
+from synthetic_trader.models.drift import DriftDetector
 from synthetic_trader.models.replay_buffer import ExperienceReplayBuffer
 
 
@@ -19,6 +20,8 @@ class OnlineLogisticModel:
     updates: int = 0
     metadata: dict[str, str] = field(default_factory=dict)
     replay_buffer: ExperienceReplayBuffer = field(default_factory=ExperienceReplayBuffer)
+    drift_detector: DriftDetector = field(default_factory=DriftDetector)
+    drift_resets: int = 0
 
     @property
     def version(self) -> str:
@@ -31,8 +34,22 @@ class OnlineLogisticModel:
         raw = 1.0 / (1.0 + math.exp(-clamp(score, -30.0, 30.0)))
         return clamp(raw, 0.08, 0.92)
 
-    def update(self, features: dict[str, float], label: int, sample_weight: float = 1.0) -> float:
+    def update(
+        self,
+        features: dict[str, float],
+        label: int,
+        sample_weight: float = 1.0,
+        *,
+        observe_drift: bool = True,
+    ) -> float:
         """Update model weights with a single sample and store in replay buffer.
+
+        Parameters
+        ----------
+        observe_drift : bool
+            Whether to feed the prediction error to the ADWIN drift
+            detector.  Replayed (stale) samples must pass False — feeding
+            old-regime errors would corrupt drift detection.
 
         Returns the predicted probability before the update.
         """
@@ -51,6 +68,16 @@ class OnlineLogisticModel:
             self.weights[key] = regularized + lr * error * value
 
         self.updates += 1
+
+        # Regime-drift monitoring: synthetic indices shift volatility
+        # regimes on a schedule.  When ADWIN detects the prediction-error
+        # distribution has shifted, reset the weights so the model
+        # re-learns the new regime instead of fighting stale patterns.
+        if observe_drift and self.drift_detector.observe(abs(error)):
+            self.weights = {}
+            self.bias = 0.0
+            self.drift_resets += 1
+
         return probability
 
     def update_with_replay(self, features: dict[str, float], label: int, sample_weight: float = 1.0) -> float:
@@ -59,16 +86,24 @@ class OnlineLogisticModel:
         This prevents catastrophic forgetting by blending replayed past
         samples with the new incoming data during each update step.
 
+        Replay is skipped for the call in which a drift is detected: the
+        buffer holds old-regime samples that would immediately fight the
+        freshly-reset weights.
+
         Returns the predicted probability for the new sample.
         """
+        resets_before = self.drift_resets
+
         # 1. Perform the normal online update on the new sample
         probability = self.update(features, label, sample_weight)
 
         # 2. Store the experience in the replay buffer
         self.replay_buffer.add(features, label, sample_weight)
 
-        # 3. Replay past experiences to reinforce old patterns
-        self.replay_buffer.replay_updates(self)
+        # 3. Replay past experiences to reinforce old patterns (unless a
+        #    drift reset just occurred — those samples belong to the old regime)
+        if self.drift_resets == resets_before:
+            self.replay_buffer.replay_updates(self)
 
         return probability
 
@@ -81,6 +116,8 @@ class OnlineLogisticModel:
             "updates": self.updates,
             "metadata": merged_metadata,
             "replay_buffer": self.replay_buffer.to_dict(),
+            "drift_resets": self.drift_resets,
+            "drift": self.drift_detector.to_dict(),
         }
         Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         self.metadata = merged_metadata
@@ -99,16 +136,24 @@ class OnlineLogisticModel:
         buf_payload = payload.get("replay_buffer")
         if buf_payload is not None:
             model.replay_buffer = ExperienceReplayBuffer.from_dict(buf_payload)
+        # Restore drift telemetry if persisted (missing in older state files)
+        drift_payload = payload.get("drift")
+        if drift_payload is not None:
+            model.drift_detector = DriftDetector.from_dict(drift_payload)
+        model.drift_resets = int(payload.get("drift_resets", 0))
         return model
 
     def clone(self) -> "OnlineLogisticModel":
-        return type(self)(
+        cloned = type(self)(
             config=self.config,
             weights=dict(self.weights),
             bias=self.bias,
             updates=self.updates,
             metadata=dict(self.metadata),
         )
+        cloned.drift_detector = DriftDetector.from_dict(self.drift_detector.to_dict())
+        cloned.drift_resets = self.drift_resets
+        return cloned
 
     def _normalized(self, features: dict[str, float]) -> dict[str, float]:
         clean: dict[str, float] = {}

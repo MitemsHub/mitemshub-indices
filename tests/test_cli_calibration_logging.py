@@ -31,6 +31,106 @@ def test_build_parser_exposes_score_live_calibration_command() -> None:
     assert args.command == "score-live-calibration"
 
 
+def test_build_parser_exposes_score_live_loop_command() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["score-live-loop", "--once"])
+
+    assert args.command == "score-live-loop"
+    assert args.once is True
+
+
+def _score_stats(error: str | None) -> dict:
+    from synthetic_trader.live.auto_scorer import AutoScoreStats
+
+    return {
+        "ALL": AutoScoreStats(
+            symbol="ALL",
+            calls_pending=0,
+            calls_scored=0,
+            calls_failed=0,
+            calls_skipped=0,
+            error=error,
+        )
+    }
+
+
+def test_score_live_loop_once_exits_nonzero_on_sweep_error(monkeypatch) -> None:
+    """A scheduled --once sweep must exit non-zero on failure so Task Scheduler
+    sees it instead of logging a false 'ok' every day."""
+
+    async def fake_loop(**kwargs):
+        return _score_stats(error="RuntimeError: deriv_unavailable")
+
+    monkeypatch.setattr(
+        "synthetic_trader.live.auto_scorer.run_auto_score_loop",
+        fake_loop,
+    )
+    code = main(
+        [
+            "score-live-loop",
+            "--once",
+            "--calls-journal", str(_JOURNAL_DIR / "calls.jsonl"),
+            "--output", str(_JOURNAL_DIR / "outcomes.jsonl"),
+            "--status-path", str(_JOURNAL_DIR / "auto_scorer.json"),
+        ]
+    )
+    assert code == 1
+
+
+def test_score_live_loop_once_exits_zero_on_success(monkeypatch) -> None:
+    async def fake_loop(**kwargs):
+        return _score_stats(error=None)
+
+    monkeypatch.setattr(
+        "synthetic_trader.live.auto_scorer.run_auto_score_loop",
+        fake_loop,
+    )
+    code = main(
+        [
+            "score-live-loop",
+            "--once",
+            "--calls-journal", str(_JOURNAL_DIR / "calls.jsonl"),
+            "--output", str(_JOURNAL_DIR / "outcomes.jsonl"),
+            "--status-path", str(_JOURNAL_DIR / "auto_scorer.json"),
+        ]
+    )
+    assert code == 0
+
+
+def test_build_parser_live_watch_exposes_calls_journal() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["live-watch", "--symbol", "R_75"])
+
+    assert args.calls_journal == "journals/live_calibration_calls.jsonl"
+
+
+def test_build_parser_live_watch_auto_score_flag_defaults_to_300() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["live-watch", "--symbol", "R_75", "--auto-score"])
+
+    assert args.auto_score == 300.0
+    assert args.auto_score_status_path == "data/auto_scorer.json"
+
+
+def test_build_parser_live_watch_auto_score_accepts_interval() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["live-watch", "--symbol", "R_75", "--auto-score", "60"])
+
+    assert args.auto_score == 60.0
+
+
+def test_build_parser_live_watch_auto_score_disabled_by_default() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["live-watch", "--symbol", "R_75"])
+
+    assert args.auto_score is None
+
+
 def test_main_log_live_call_appends_a_record(tmp_path: Path) -> None:
     payload_path = tmp_path / "payload.json"
     output_path = tmp_path / "calls.jsonl"
@@ -181,6 +281,7 @@ def test_log_live_call_and_score_live_calibration_commands_work_together_with_re
         now: datetime,
         symbol: str | None = None,
         window_minutes: int | None = None,
+        client_factory: object = None,
     ) -> CalibrationScoringResult:
         wrapper_calls.append(
             {
@@ -212,6 +313,12 @@ def test_log_live_call_and_score_live_calibration_commands_work_together_with_re
     monkeypatch.setattr(
         "synthetic_trader.cli.run_score_unresolved_records_from_market",
         fake_run_score_unresolved_records_from_market,
+    )
+    # The CLI resolves the Blueberry MT5 client before scoring (no Deriv
+    # fallback); pretend it resolved so the mocked scorer is reached.
+    monkeypatch.setattr(
+        "synthetic_trader.live.auto_scorer._resolve_scoring_client_factory",
+        lambda: object,
     )
 
     with contextlib.redirect_stdout(score_output):

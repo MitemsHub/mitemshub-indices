@@ -48,6 +48,61 @@ class RiskEngineTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertIn("consecutive-loss circuit breaker active", decision.reasons)
 
+    def test_size_multiplier_default_matches_no_scaling(self) -> None:
+        config = TraderConfig.default()
+        signal = DecisionEngine(config).evaluate("R_75", trending_candles()).signal
+        assert signal is not None
+
+        base = RiskEngine(config.risk).evaluate(signal)
+        explicit_full = RiskEngine(config.risk).evaluate(signal, size_multiplier=1.0)
+
+        self.assertTrue(base.approved and base.intent is not None)
+        self.assertTrue(explicit_full.approved and explicit_full.intent is not None)
+        self.assertEqual(base.intent.stake, explicit_full.intent.stake)
+
+    def test_size_multiplier_half_scales_stake(self) -> None:
+        config = TraderConfig.default()
+        signal = DecisionEngine(config).evaluate("R_75", trending_candles()).signal
+        assert signal is not None
+
+        base = RiskEngine(config.risk).evaluate(signal)
+        half = RiskEngine(config.risk).evaluate(signal, size_multiplier=0.5)
+
+        self.assertTrue(half.approved and half.intent is not None)
+        self.assertAlmostEqual(half.intent.stake, base.intent.stake * 0.5, places=1)
+        self.assertEqual(half.intent.metadata["size_multiplier"], 0.5)
+        self.assertFalse(half.intent.metadata["paper_only"])
+
+    def test_size_multiplier_paper_only_zero_stake(self) -> None:
+        """Multiplier 0.0: the decision stays approved (call is emitted and
+        logged) but carries a zero stake — risk scales with empirical
+        confidence.
+        """
+        config = TraderConfig.default()
+        signal = DecisionEngine(config).evaluate("R_75", trending_candles()).signal
+        assert signal is not None
+
+        decision = RiskEngine(config.risk).evaluate(signal, size_multiplier=0.0)
+
+        self.assertTrue(decision.approved)
+        self.assertIsNotNone(decision.intent)
+        assert decision.intent is not None
+        self.assertEqual(decision.intent.stake, 0.0)
+        self.assertTrue(decision.intent.metadata["paper_only"])
+        self.assertEqual(decision.intent.metadata["size_multiplier"], 0.0)
+        self.assertIn("paper-only", decision.reasons[0])
+
+    def test_size_multiplier_clamps_above_one(self) -> None:
+        config = TraderConfig.default()
+        signal = DecisionEngine(config).evaluate("R_75", trending_candles()).signal
+        assert signal is not None
+
+        base = RiskEngine(config.risk).evaluate(signal)
+        over = RiskEngine(config.risk).evaluate(signal, size_multiplier=2.0)
+
+        self.assertEqual(over.intent.stake, base.intent.stake)  # clamped to 1.0
+        self.assertEqual(over.intent.metadata["size_multiplier"], 1.0)
+
     def test_reset_daily_limits_rolls_day_start_to_current_equity(self) -> None:
         engine = RiskEngine(RiskConfig(starting_equity=1000.0))
         engine.state.equity = 960.0

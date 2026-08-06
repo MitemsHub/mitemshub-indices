@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import csv
 import sys
 import time
+from datetime import datetime, timezone
 from collections.abc import Callable
 import json
 import logging
@@ -11,7 +13,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from synthetic_trader.config import ModelConfig, RiskConfig, SymbolProfile, TraderConfig
+from synthetic_trader.config import (
+    MAX_FEATURE_HISTORY,
+    ModelConfig,
+    RiskConfig,
+    SymbolProfile,
+    TraderConfig,
+)
 from synthetic_trader.data.collector import deriv_credentials_from_env
 from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
 from synthetic_trader.domain import Tick, FeatureSnapshot
@@ -33,6 +41,15 @@ from synthetic_trader.data.tick_store import append_ticks_csv
 from synthetic_trader.execution.mt5_data import Mt5TickClient, is_mt5_configured
 from synthetic_trader.config import TraderConfig as _TraderConfig
 from synthetic_trader.live.missed_trade_tracker import MissedTradeTracker
+from synthetic_trader.live.calibration_logger import append_call_record, build_call_record
+from synthetic_trader.live.stage3_gate import apply_stage3_gate
+from synthetic_trader.live.auto_scorer import (
+    DEFAULT_OUTCOMES_PATH,
+    DEFAULT_STATUS_PATH,
+    MAX_CONSECUTIVE_ERRORS,
+    SWEEP_BACKOFF_SEC,
+    sweep_once,
+)
 
 
 @dataclass(frozen=True)
@@ -865,6 +882,17 @@ def _merge_ticks_by_epoch(existing: list[Tick], page: list[Tick]) -> list[Tick]:
     return sorted(by_epoch.values(), key=lambda item: item.epoch)
 
 
+def _resolve_venue() -> str:
+    """Report the data venue the collectors will actually use.
+
+    Mirrors the collectors' single-decision rule: MT5 when configured,
+    Deriv otherwise.  The value is stamped onto every snapshot so the
+    operator always knows which price scale the levels are on — there is
+    deliberately no silent venue swap.
+    """
+    return "mt5" if is_mt5_configured() else "deriv"
+
+
 async def collect_live_snapshot_ticks(
     *,
     symbol: str,
@@ -876,15 +904,16 @@ async def collect_live_snapshot_ticks(
     credentials = deriv_credentials_from_env(app_id=app_id)
 
     # ── Data source selection ────────────────────────────────────────
-    # Priority:
-    # 1. MT5 — when credentials are configured (terminal likely running).
-    #    Fast, local connection for live ticks.
-    # 2. Deriv WebSocket — when app_id is provided or as fallback.
-    #    No local terminal needed; connects to Deriv's servers directly.
-    #
-    # Both paths are tried when configured — if MT5 fails cleanly (via the
-    # `timeout=8000` parameter), the system falls back to Deriv WebSocket.
-    collected: list[Tick] = []
+    # The venue is chosen ONCE by configuration and is NEVER silently
+    # swapped mid-flight:
+    #   * MT5 configured  → MT5 ONLY.  A failure here is a hard error — the
+    #     system refuses to hand back Deriv 1HZ-scale prices (~7,000 for
+    #     R_75) as a "fallback" when the Blueberry terminal is down.  The
+    #     caller (run_live_snapshot) turns the exception into an honest
+    #     stand-aside so the operator knows the broker link is down.
+    #   * MT5 not configured → Deriv WebSocket is the explicit venue.
+    # The caller stamps the resulting snapshot with the venue so the
+    # operator always knows which price scale the levels are on.
     config = TraderConfig.default()
     required_history_ticks = _required_snapshot_history_ticks(
         symbol=symbol,
@@ -893,17 +922,13 @@ async def collect_live_snapshot_ticks(
     )
 
     if is_mt5_configured() and client_factory is None:
-        try:
-            async with Mt5TickClient() as client:
-                collected = await _collect_from_client(
-                    client, symbol, required_history_ticks, max_live_ticks
-                )
-            return sorted(collected, key=lambda item: item.epoch)
-        except Exception as e:
-            print(f"[market_snapshot] MT5 failed ({e}), falling back to Deriv WebSocket", file=sys.stderr, flush=True)
-            collected = []
+        async with Mt5TickClient() as client:
+            collected = await _collect_from_client(
+                client, symbol, required_history_ticks, max_live_ticks
+            )
+        return sorted(collected, key=lambda item: item.epoch)
 
-    # Deriv WebSocket (direct or fallback)
+    # Deriv WebSocket — the explicitly configured venue when MT5 is not.
     factory = client_factory or (lambda: DerivWebSocketClient(credentials))
     async with factory() as client:
         collected = await _collect_from_client(
@@ -1288,7 +1313,11 @@ def classify_alert_type(alert: dict[str, object]) -> str:
     return "context_update"
 
 
-def build_watch_alert(snapshot: dict[str, object]) -> dict[str, object]:
+def build_watch_alert(
+    snapshot: dict[str, object],
+    *,
+    proven_only: bool | None = None,
+) -> dict[str, object]:
     """Convert a raw snapshot dict into a JSON-serializable alert dict.
 
     This is the bridge between the Python engine and the Next.js frontend.
@@ -1297,8 +1326,19 @@ def build_watch_alert(snapshot: dict[str, object]) -> dict[str, object]:
 
     Called by the engine bridge's ``executePythonSnapshot`` after
     ``run_live_snapshot`` returns.
+
+    ``proven_only`` (SYNTH_GATE_PROVEN_ONLY) is forwarded to the Stage-3
+    gate: when on, only evidence_status == "proven" calls may carry a live
+    order; everything else is forced paper-only.
     """
     alert = dict(snapshot)
+    # Stage-3 gate FIRST: replace raw model confidence with the market-verified
+    # target-hit rate + horizon verdict, and downgrade suppressed call types
+    # to stand_aside (or annotate in ``annotate`` mode).  Best-effort; never
+    # raises.  Runs before alert_type/decision_summary so those derived fields
+    # reflect the gated call (e.g. a suppressed candidate renders as
+    # stand_aside, not setup_candidate).
+    alert = apply_stage3_gate(alert, proven_only=proven_only)
     # Ensure 'why' is populated from 'briefing' for CLI renderers
     if not alert.get("why") and alert.get("briefing"):
         alert["why"] = alert["briefing"]
@@ -1417,17 +1457,15 @@ async def watch_live_ticks(
 ) -> list[Tick]:
     credentials = deriv_credentials_from_env(app_id=app_id)
 
-    # Same priority as collect_live_snapshot_ticks:
-    # Try MT5 first when configured, fall back to Deriv WebSocket.
+    # Same venue rule as collect_live_snapshot_ticks: MT5-only when
+    # configured (a failure propagates to run_live_watch's reconnect
+    # handler — never a silent Deriv swap onto the wrong price scale),
+    # otherwise Deriv WebSocket is the explicit venue.
     if is_mt5_configured() and client_factory is None:
-        try:
-            async with Mt5TickClient() as client:
-                collected = await _watch_collect_from_client(
-                    client, symbol, max_live_ticks, max_minutes
-                )
-            return collected
-        except Exception as e:
-            print(f"[market_snapshot] watch MT5 failed ({e}), falling back to Deriv WebSocket", file=sys.stderr, flush=True)
+        async with Mt5TickClient() as client:
+            return await _watch_collect_from_client(
+                client, symbol, max_live_ticks, max_minutes
+            )
 
     factory = client_factory or (lambda: DerivWebSocketClient(credentials))
     async with factory() as client:
@@ -1470,7 +1508,8 @@ async def _watch_collect_from_client(
 # ── CSV tick cache ─────────────────────────────────────────────
 # Avoids re-reading the CSV file from disk on every call.
 # Keyed by symbol; invalidated when the file's mtime changes.
-_csv_tick_cache: dict[str, tuple[Path, float, list[Tick]]] = {}
+# Value: (csv_path, csv_mtime, (ticks, backfill_mtime)).
+_csv_tick_cache: dict[str, tuple[Path, float, tuple[list[Tick], float]]] = {}
 
 # Maximum age of CSV ticks considered valid for analysis.
 # Ticks older than this threshold are filtered out in _load_csv_ticks().
@@ -1721,6 +1760,19 @@ def _rotate_csv(csv_path: Path | str, max_lines: int = 200_000) -> None:
         import traceback
         traceback.print_exc()
 
+def _backfill_csv_mtime(symbol: str) -> float:
+    """Return the mtime of data/backfill/{symbol}_ticks.csv (0.0 if absent).
+
+    Used as part of the CSV cache signature so a growing backfill corpus
+    invalidates the cached merged ticks exactly when the file changes.
+    """
+    path = Path("data/backfill") / f"{symbol}_ticks.csv"
+    try:
+        return path.stat().st_mtime if path.exists() else 0.0
+    except OSError:
+        return 0.0
+
+
 def _load_csv_ticks(
     symbol: str,
     max_ticks: int = 200_000,
@@ -1758,11 +1810,18 @@ def _load_csv_ticks(
     # Cache hit — same file, same mtime → use cached ticks
     # Note: cache is only valid for the same max_age_seconds threshold.
     # If the caller provides a different threshold, we skip the cache.
+    # The backfill corpus mtime is part of the signature so a growing
+    # data/backfill corpus invalidates the cache exactly when it changes.
     cached = _csv_tick_cache.get(symbol)
     if cached is not None and max_age_seconds is None:
         cached_path, cached_mtime, cached_ticks = cached
-        if cached_path == csv_path and csv_path.stat().st_mtime == cached_mtime:
-            return cached_ticks
+        backfill_mtime = _backfill_csv_mtime(symbol)
+        if (
+            cached_path == csv_path
+            and csv_path.stat().st_mtime == cached_mtime
+            and backfill_mtime == cached_ticks[1]
+        ):
+            return cached_ticks[0]
 
     # Rotate CSV if it exceeds the maximum line threshold (200K lines).
     # The analysis reads up to 200K ticks from the tail, so
@@ -1771,6 +1830,22 @@ def _load_csv_ticks(
 
     try:
         ticks = _read_tail_ticks(csv_path, symbol, max_ticks)
+        # ── Backfill corpus merge ────────────────────────────────
+        # The live CSV (data/{symbol}_ticks.csv) only holds bursts written
+        # by on-demand live reads — it is NOT a continuous record, so on a
+        # quiet morning the engine saw "need 20 candles, have 19" despite
+        # 7 days of clean history sitting in data/backfill/.  Merge the
+        # continuous M1 corpus in (same Blueberry SYN scale — verified by
+        # the price sanity check downstream) so analysis always has full
+        # candle history.  The live CSV wins on epoch ties (it is fresher).
+        backfill_path = Path("data/backfill") / f"{symbol}_ticks.csv"
+        if backfill_path.exists() and backfill_path.resolve() != csv_path.resolve():
+            backfill_ticks = _read_tail_ticks(backfill_path, symbol, max_ticks)
+            if backfill_ticks:
+                by_epoch = {tick.epoch: tick for tick in backfill_ticks}
+                for tick in ticks:
+                    by_epoch[tick.epoch] = tick
+                ticks = sorted(by_epoch.values(), key=lambda item: item.epoch)
         # ── Age filter (regime-aware) ────────────────────────────
         # Discard ticks older than the age limit. The limit can be
         # regime-aware — e.g., volatile regimes use 2h, range uses 12h.
@@ -1785,7 +1860,7 @@ def _load_csv_ticks(
             # return the old cached (stale) ticks via the mtime match.
             _csv_tick_cache.pop(symbol, None)
             return None
-        _csv_tick_cache[symbol] = (csv_path, csv_path.stat().st_mtime, ticks)
+        _csv_tick_cache[symbol] = (csv_path, csv_path.stat().st_mtime, (ticks, _backfill_csv_mtime(symbol)))
         return ticks
     except Exception:
         import traceback
@@ -1922,11 +1997,11 @@ def analyze_live_snapshot(
         histories.setdefault(timeframe, []).append(candle)
 
     role_candles = {
-        role: histories.get(role_timeframe, [])
+        role: histories.get(role_timeframe, [])[-MAX_FEATURE_HISTORY:]
         for role, role_timeframe in role_timeframes.items()
     }
-    primary_candles = histories.get(timeframe_sec, [])
-    higher_timeframe_candles = histories.get(higher_timeframe_sec, [])
+    primary_candles = histories.get(timeframe_sec, [])[-MAX_FEATURE_HISTORY:]
+    higher_timeframe_candles = histories.get(higher_timeframe_sec, [])[-MAX_FEATURE_HISTORY:]
     execution_candles = role_candles["execution"]
     confirmation_candles = role_candles["confirmation"]
     current_close = primary_candles[-1].close if primary_candles else (ticks[-1].price if ticks else None)
@@ -2313,6 +2388,7 @@ async def run_live_snapshot(
     trading_mode: str = "sniper",
     model_path: str | None = None,
     skip_api: bool = False,
+    proven_only: bool | None = None,
 ) -> dict[str, object]:
     # Once-per-day cleanup (best-effort, time-gated)
     _maybe_cleanup_knowledge_base()
@@ -2363,6 +2439,7 @@ async def run_live_snapshot(
                 # a "Data staleness: X hours" warning in the dashboard.
                 result["stale_data_since"] = stale_epoch
                 result["stale_data_max_age_seconds"] = stale_max_age
+                result["venue"] = "csv"
                 _phases["analysis_ms"] = int((time.time() - _t_analysis) * 1000)
                 _phases["total_ms"] = int((time.time() - _t_start) * 1000)
                 result["phase_timing_ms"] = _phases
@@ -2396,6 +2473,7 @@ async def run_live_snapshot(
                 "stale_data_since": stale_epoch,
                 "stale_data_max_age_seconds": stale_max_age,
             }, [], DEFAULT_GUARDIAN_THRESHOLDS, trading_mode=trading_mode)
+            result["venue"] = "csv"
             _phases["total_ms"] = int((time.time() - _t_start) * 1000)
             result["phase_timing_ms"] = _phases
             return result
@@ -2406,6 +2484,7 @@ async def run_live_snapshot(
             higher_timeframe_sec=higher_timeframe_sec,
             trading_mode=trading_mode, model=model,
         )
+        result["venue"] = "csv"
         _phases["analysis_ms"] = int((time.time() - _t_analysis) * 1000)
         _phases["total_ms"] = int((time.time() - _t_start) * 1000)
         result["phase_timing_ms"] = _phases
@@ -2440,6 +2519,7 @@ async def run_live_snapshot(
             higher_timeframe_sec=higher_timeframe_sec,
             trading_mode=trading_mode, model=model,
         )
+        result["venue"] = _resolve_venue()
         _phases["analysis_ms"] = int((time.time() - _t_analysis) * 1000)
         _phases["total_ms"] = int((time.time() - _t_start) * 1000)
         result["phase_timing_ms"] = _phases
@@ -2453,14 +2533,14 @@ async def run_live_snapshot(
         result = build_guardian_snapshot({
             "call": "stand_aside", "trade_status": "not_valid",
             "direction_bias": "none",
-            "briefing": "MT5 connection in progress — waiting for fresh data",
+            "briefing": "MT5 unavailable — no Deriv fallback; start the Blueberry MT5 terminal",
             "symbol": symbol, "trading_mode": trading_mode,
-            "regime": "unknown", "regime_explanation": "Connecting to MT5 broker",
+            "regime": "unknown", "regime_explanation": "Broker link down (no fallback)",
             "structure_summary": "structure still forming",
             "confidence": None, "model_long_probability": None,
             "current_close": None,
-            "wait_for": "give the broker connection a few more seconds, then refresh",
-            "reasons": ["mt5 broker connection initialising, retry shortly"],
+            "wait_for": "start the Blueberry MT5 terminal, then refresh",
+            "reasons": ["mt5 terminal unavailable, no deriv fallback"],
             "risk_state": {
                 "equity": 1000.0, "open_positions": 0, "consecutive_losses": 0,
                 "realized_pnl": 0.0, "trades_today": 0, "max_open_positions": 1,
@@ -2470,6 +2550,7 @@ async def run_live_snapshot(
             "stale_data_since": _read_last_csv_epoch(symbol),
             "stale_data_max_age_seconds": stale_max_age,
         }, [], DEFAULT_GUARDIAN_THRESHOLDS, trading_mode=trading_mode)
+        result["venue"] = "mt5"
         result["phase_timing_ms"] = _phases
         return result
 
@@ -2480,6 +2561,7 @@ async def run_live_snapshot(
             higher_timeframe_sec=higher_timeframe_sec,
             trading_mode=trading_mode, model=model,
         )
+        result["venue"] = "csv"
         _phases["analysis_ms"] = int((time.time() - _t_analysis) * 1000)
         _phases["total_ms"] = int((time.time() - _t_start) * 1000)
         result["phase_timing_ms"] = _phases
@@ -2504,6 +2586,7 @@ async def run_live_snapshot(
         "stale_data_since": _read_last_csv_epoch(symbol),
         "stale_data_max_age_seconds": stale_max_age,
     }, [], DEFAULT_GUARDIAN_THRESHOLDS, trading_mode=trading_mode)
+    result["venue"] = "csv"
     _phases["total_ms"] = int((time.time() - _t_start) * 1000)
     result["phase_timing_ms"] = _phases
     return result
@@ -2604,6 +2687,7 @@ async def _build_watch_baseline(
     timeframe_sec: int,
     higher_timeframe_sec: int,
     app_id: str | None,
+    proven_only: bool | None = None,
 ) -> tuple[list, dict[str, object], WatchState]:
     """Collect warm-up ticks, build a snapshot, and return (ticks, alert, WatchState).
 
@@ -2619,7 +2703,7 @@ async def _build_watch_baseline(
         timeframe_sec=timeframe_sec,
         higher_timeframe_sec=higher_timeframe_sec,
     )
-    alert = build_watch_alert(snapshot)
+    alert = build_watch_alert(snapshot, proven_only=proven_only)
     alert["symbol"] = symbol
     state = build_watch_state(alert)
     return ticks, alert, state
@@ -2639,6 +2723,7 @@ async def _handle_reconnect(
     app_id: str | None,
     warmup_ticks: list,
     previous: WatchState | None,
+    proven_only: bool | None = None,
 ) -> tuple[bool, int, list, WatchState | None]:
     """Handle a transport failure: journal, sleep, rebuild baseline.
 
@@ -2664,6 +2749,7 @@ async def _handle_reconnect(
             timeframe_sec=timeframe_sec,
             higher_timeframe_sec=higher_timeframe_sec,
             app_id=app_id,
+            proven_only=proven_only,
         )
         _append_journal(journal_file, {
             "record_type": "watch_transport",
@@ -2682,12 +2768,17 @@ async def run_live_watch(
     timeframe_sec: int = 60,
     higher_timeframe_sec: int = 300,
     journal_path: str = "journals/live_watch_alerts.jsonl",
+    calls_journal_path: str | None = "journals/live_calibration_calls.jsonl",
     emit_initial: bool = False,
     max_alerts: int | None = None,
     max_minutes: int | None = None,
     max_reconnects: int = 5,
     reconnect_backoff_sec: int = 1,
     app_id: str | None = None,
+    auto_score_interval_sec: float | None = None,
+    auto_score_outcomes_path: str = DEFAULT_OUTCOMES_PATH,
+    auto_score_status_path: str = DEFAULT_STATUS_PATH,
+    proven_only: bool | None = None,
 ) -> list[dict[str, object]]:
     """Monitor a symbol and emit read-only operator calls on meaningful change.
 
@@ -2700,93 +2791,166 @@ async def run_live_watch(
     alert_log: list[dict[str, object]] = []
     journal_file = Path(journal_path)
     journal_file.parent.mkdir(parents=True, exist_ok=True)
+    calls_journal = Path(calls_journal_path) if calls_journal_path else None
+    if calls_journal is not None:
+        calls_journal.parent.mkdir(parents=True, exist_ok=True)
 
     previous: WatchState | None = None
     reconnects = 0
     context_cooldown_remaining = 0
 
-    # ── warm-up baseline ──────────────────────────────────────
-    warmup_ticks, baseline_alert, previous = await _build_watch_baseline(
-        symbol=symbol,
-        warmup_count=warmup_count,
-        timeframe_sec=timeframe_sec,
-        higher_timeframe_sec=higher_timeframe_sec,
-        app_id=app_id,
-    )
-
-    if emit_initial:
-        alert_log.append(baseline_alert)
-        _append_journal(journal_file, baseline_alert)
-        if baseline_alert.get("alert_type") == "context_update":
-            context_cooldown_remaining = DEFAULT_CONTEXT_ALERT_COOLDOWN
-
-    # ── main watch loop ───────────────────────────────────────
-    while reconnects <= max_reconnects:
-        if max_alerts and len(alert_log) >= max_alerts:
-            break
+    try:
+        # ── warm-up baseline ──────────────────────────────────────
+        # No fallback: when MT5 is configured but the terminal is down the
+        # collector raises.  That must NOT crash the watch — journal a
+        # transport record and start with an honest stand-aside baseline so
+        # the reconnect machinery below can retry the broker link.
         try:
-            fresh_ticks = await watch_live_ticks(
-                symbol=symbol, app_id=app_id, max_minutes=max_minutes,
-            )
-            if not fresh_ticks:
-                break
-
-            all_ticks = list(warmup_ticks) + list(fresh_ticks)
-            result = analyze_live_snapshot(
+            warmup_ticks, baseline_alert, previous = await _build_watch_baseline(
                 symbol=symbol,
-                ticks=all_ticks,
-                timeframe_sec=timeframe_sec,
-                higher_timeframe_sec=higher_timeframe_sec,
-            )
-            alert = build_watch_alert(result)
-            alert["symbol"] = symbol
-            current = build_watch_state(alert)
-
-            # Decrement cooldown counter per iteration (bucket-based)
-            if context_cooldown_remaining > 0:
-                context_cooldown_remaining -= 1
-
-            if should_emit_watch_alert(previous, current, context_cooldown_remaining=context_cooldown_remaining):
-                alert_log.append(alert)
-                _append_journal(journal_file, alert)
-                if alert.get("alert_type") == "context_update":
-                    context_cooldown_remaining = DEFAULT_CONTEXT_ALERT_COOLDOWN
-                previous = current
-            elif previous is not None and current != previous:
-                # Context changed but cooldown blocked emission — journal the
-                # suppression so the review command can show transport health.
-                suppressed = dict(alert)
-                suppressed["record_type"] = "suppressed_context"
-                _append_journal(journal_file, suppressed)
-
-            warmup_ticks = all_ticks
-            if max_alerts and len(alert_log) >= max_alerts:
-                break
-
-        except StopIteration:
-            # Exhausted snapshot source — clean exit
-            break
-        except Exception as exc:
-            should_break, reconnects, warmup_ticks, previous = await _handle_reconnect(
-                exc=exc,
-                symbol=symbol,
-                reconnects=reconnects,
-                max_reconnects=max_reconnects,
-                reconnect_backoff_sec=reconnect_backoff_sec,
-                journal_file=journal_file,
                 warmup_count=warmup_count,
                 timeframe_sec=timeframe_sec,
                 higher_timeframe_sec=higher_timeframe_sec,
                 app_id=app_id,
-                warmup_ticks=warmup_ticks,
-                previous=previous,
+                proven_only=proven_only,
             )
-            if should_break:
+        except Exception as exc:
+            _append_journal(journal_file, {
+                "record_type": "watch_transport",
+                "event": "baseline_failed",
+                "symbol": symbol,
+                "error": str(exc),
+            })
+            baseline_alert = build_guardian_snapshot({
+                "call": "stand_aside", "trade_status": "not_valid",
+                "direction_bias": "none",
+                "briefing": f"MT5 unavailable ({exc}) — no Deriv fallback; start the Blueberry terminal",
+                "symbol": symbol, "trading_mode": "sniper",
+                "regime": "unknown", "regime_explanation": "Broker link down",
+                "structure_summary": "structure still forming",
+                "confidence": None, "model_long_probability": None,
+                "current_close": None,
+                "wait_for": "start the Blueberry MT5 terminal, then refresh",
+                "reasons": [f"mt5 unavailable: {exc}"],                    "risk_state": {
+                        "equity": 1000.0, "open_positions": 0, "consecutive_losses": 0,
+                        "realized_pnl": 0.0, "trades_today": 0, "max_open_positions": 1,
+                        "max_daily_loss_fraction": 0.02, "max_consecutive_losses": 4,
+                        "daily_drawdown_pct": 0.0,
+                    },
+                }, [], DEFAULT_GUARDIAN_THRESHOLDS, trading_mode="sniper")
+            baseline_alert["venue"] = "mt5"
+            baseline_alert["symbol"] = symbol
+            warmup_ticks, previous = [], None
+
+        if emit_initial:
+            alert_log.append(baseline_alert)
+            _append_journal(journal_file, baseline_alert)
+            if calls_journal is not None:
+                _auto_log_call(calls_journal, baseline_alert)
+            if baseline_alert.get("alert_type") == "context_update":
+                context_cooldown_remaining = DEFAULT_CONTEXT_ALERT_COOLDOWN
+
+        # ── main watch loop ───────────────────────────────────────
+        while reconnects <= max_reconnects:
+            if max_alerts and len(alert_log) >= max_alerts:
                 break
+            try:
+                fresh_ticks = await watch_live_ticks(
+                    symbol=symbol, app_id=app_id, max_minutes=max_minutes,
+                )
+                if not fresh_ticks:
+                    break
+
+                all_ticks = list(warmup_ticks) + list(fresh_ticks)
+                result = analyze_live_snapshot(
+                    symbol=symbol,
+                    ticks=all_ticks,
+                    timeframe_sec=timeframe_sec,
+                    higher_timeframe_sec=higher_timeframe_sec,
+                )
+                alert = build_watch_alert(result, proven_only=proven_only)
+                alert["symbol"] = symbol
+                current = build_watch_state(alert)
+
+                # Decrement cooldown counter per iteration (bucket-based)
+                if context_cooldown_remaining > 0:
+                    context_cooldown_remaining -= 1
+
+                if should_emit_watch_alert(previous, current, context_cooldown_remaining=context_cooldown_remaining):
+                    alert_log.append(alert)
+                    _append_journal(journal_file, alert)
+                    if calls_journal is not None:
+                        _auto_log_call(calls_journal, alert)
+                    if alert.get("alert_type") == "context_update":
+                        context_cooldown_remaining = DEFAULT_CONTEXT_ALERT_COOLDOWN
+                    previous = current
+                elif previous is not None and current != previous:
+                    # Context changed but cooldown blocked emission — journal the
+                    # suppression so the review command can show transport health.
+                    suppressed = dict(alert)
+                    suppressed["record_type"] = "suppressed_context"
+                    _append_journal(journal_file, suppressed)
+
+                warmup_ticks = all_ticks
+                if max_alerts and len(alert_log) >= max_alerts:
+                    break
+
+            except StopIteration:
+                # Exhausted snapshot source — clean exit
+                break
+            except Exception as exc:
+                should_break, reconnects, warmup_ticks, previous = await _handle_reconnect(
+                    exc=exc,
+                    symbol=symbol,
+                    reconnects=reconnects,
+                    max_reconnects=max_reconnects,
+                    reconnect_backoff_sec=reconnect_backoff_sec,
+                    journal_file=journal_file,
+                    warmup_count=warmup_count,
+                    timeframe_sec=timeframe_sec,
+                    higher_timeframe_sec=higher_timeframe_sec,
+                    app_id=app_id,
+                    warmup_ticks=warmup_ticks,
+                    previous=previous,
+                    proven_only=proven_only,
+                )
+                if should_break:
+                    break
+    finally:
+        # ── automatic outcome scoring ────────────────────────────
+        # When enabled, sweep the calls journal on a timer WHILE the watch
+        # runs (``_auto_sweep_forever``), then perform one final sweep before
+        # the process exits so calls logged during this session are scored
+        # immediately (their hold horizon has likely elapsed).  The final
+        # sweep is an unconditional inline call — it never depends on the
+        # background task having started, so it runs on every exit path
+        # (max-alerts, session end, transport error).  Keeps the outcomes
+        # journal and the calibration health panel fresh without a separate
+        # ``score-live-loop`` process or a manual CLI step.
+        if auto_score_interval_sec is not None and calls_journal is not None:
+            auto_sweep_task = asyncio.create_task(
+                _auto_sweep_forever(
+                    calls_path=calls_journal,
+                    outcomes_path=Path(auto_score_outcomes_path),
+                    status_path=Path(auto_score_status_path),
+                    interval_sec=auto_score_interval_sec,
+                    app_id=app_id,
+                )
+            )
+            await asyncio.sleep(0)
+            auto_sweep_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await auto_sweep_task
+            sweep_once(
+                calls_path=calls_journal,
+                outcomes_path=Path(auto_score_outcomes_path),
+                symbol=None,
+                window_minutes=None,
+                app_id=app_id,
+                status_path=Path(auto_score_status_path),
+            )
 
     return alert_log
-
-
 def build_live_watch_review_snapshot(
     *,
     journal_path: Path,
@@ -2949,6 +3113,8 @@ def render_live_watch_review_text(snapshot: dict[str, object]) -> str:
 
 def build_watch_alert_from_prepared_state(
     prepared: PreparedSymbolState,
+    *,
+    proven_only: bool | None = None,
 ) -> dict[str, object]:
     """Convert a PreparedSymbolState into a watch alert dict."""
     call = prepared.call
@@ -2971,6 +3137,13 @@ def build_watch_alert_from_prepared_state(
         "entry": prepared.entry,
         "stop_loss": prepared.stop_loss,
         "take_profit": prepared.take_profit,
+        # The calls-journal logger (``build_call_record``) reads
+        # ``execution_stop``/``primary_target`` as the canonical level keys;
+        # mirror them here (same convention as ``build_watch_alert``) so live
+        # calls emitted from the prepared-state path are always scorable.
+        "execution_stop": prepared.stop_loss,
+        "primary_target": prepared.take_profit,
+        "hold_horizon_minutes": 60,
         "current_close": prepared.current_close,
         "reward_risk": prepared.reward_risk,
         "invalidates_if": prepared.invalidates_if,
@@ -2978,7 +3151,85 @@ def build_watch_alert_from_prepared_state(
         "call_age_seconds": prepared.call_age_seconds,
         "generated_at": prepared.generated_at,
     }
-    return alert
+    # Stage-3 gate: same empirical gate as ``build_watch_alert`` so the
+    # prepared-state path (used by live-watch emission) honors suppressed
+    # call types and honest hit-rate confidence too.  ``proven_only``
+    # (SYNTH_GATE_PROVEN_ONLY) closes live execution for anything that
+    # isn't market-proven yet.
+    return apply_stage3_gate(alert, proven_only=proven_only)
+
+
+def _auto_log_call(calls_journal: Path, alert: dict[str, object]) -> None:
+    """Append one emitted live call to the calibration calls journal.
+
+    Called for every alert the live-watch loop emits, so the auto-scoring
+    loop (``score-live-loop`` / the live-watch auto-sweep) can measure its
+    outcome (target/stop/neither) without a manual ``log-live-call`` step.
+    ``build_call_record`` keeps the pre-suppression call intent
+    (stage3.suppressed_call) so suppressed call types are still scored
+    honestly.  Best-effort: never crashes the watch.
+    """
+    try:
+        append_call_record(calls_journal, build_call_record(alert))
+    except Exception as exc:
+        logging.warning("[auto_log_call] failed to write %s: %s", calls_journal, exc)
+
+
+async def _auto_sweep_forever(
+    *,
+    calls_path: Path,
+    outcomes_path: Path,
+    status_path: Path,
+    interval_sec: float = 300.0,
+    app_id: str | None = None,
+    log: Callable[[str], None] = logging.info,
+) -> None:
+    """Sweep the calls journal on a schedule while the live watch runs.
+
+    Runs one sweep immediately, then every ``interval_sec`` until cancelled
+    (e.g. the live-watch loop exits).  Each sweep delegates to the shared
+    ``auto_scorer.sweep_once`` (single source of truth for sweep + status
+    telemetry), so this loop can never disagree with ``score-live-loop``.
+    A failed sweep is recorded on the status file and retried with backoff;
+    after ``MAX_CONSECUTIVE_ERRORS`` the loop gives up rather than spin
+    forever.  The final sweep on session exit is performed by
+    ``run_live_watch``'s ``finally`` block (unconditional), not here.
+    """
+    consecutive_errors = 0
+    while True:
+        # Run the sweep off the event loop — it does blocking market-data
+        # fetches (Deriv websocket / MT5) that would otherwise stall the
+        # live-watch tick loop for the duration of the sweep.
+        result = await asyncio.to_thread(
+            sweep_once,
+            calls_path=calls_path,
+            outcomes_path=outcomes_path,
+            symbol=None,
+            window_minutes=None,
+            app_id=app_id,
+            status_path=status_path,
+        )
+        if result.error is None:
+            consecutive_errors = 0
+            log(
+                "[auto-score] swept %s: scored=%d failed=%d skipped=%d pending=%d",
+                result.symbol,
+                result.calls_scored,
+                result.calls_failed,
+                result.calls_skipped,
+                result.calls_pending,
+            )
+        else:
+            consecutive_errors += 1
+            log("[auto-score] error: %s", result.error)
+        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            log(
+                "[auto-score] giving up after %d consecutive failed sweeps "
+                "- check DERIV_API_TOKEN / DERIV_APP_ID",
+                consecutive_errors,
+            )
+            break
+        await asyncio.sleep(interval_sec if consecutive_errors == 0 else SWEEP_BACKOFF_SEC)
 
 
 def _append_journal(path: Path, record: dict[str, object]) -> None:

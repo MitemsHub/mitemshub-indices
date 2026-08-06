@@ -7,8 +7,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from synthetic_trader.data.collector import deriv_credentials_from_env
-from synthetic_trader.execution.deriv_ws import DerivWebSocketClient
 from synthetic_trader.execution.venues import MarketDataClient
 
 
@@ -152,11 +150,19 @@ async def score_unresolved_records_from_market(
     resolved_keys = {_record_key(record) for record in existing_outcomes}
     result = CalibrationScoringResult()
 
+    # No silent venue: scoring requires the Blueberry MT5 client because the
+    # call levels (entry/stop/target) are measured on the SYN75/SYN100 scale.
+    # Deriv's 1HZ75V/1HZ100V trade at a different price scale (~7,000 vs
+    # ~1,542 for R_75) and would produce incomparable outcomes, so a missing
+    # client is a hard error — never a fallback.
     if client_factory is None:
-        credentials = deriv_credentials_from_env(app_id=app_id, token=token)
-        factory: Callable[[], MarketDataClient] = lambda: DerivWebSocketClient(credentials)
-    else:
-        factory = client_factory
+        raise RuntimeError(
+            "score_unresolved_records_from_market requires client_factory "
+            "(Blueberry MT5); the Deriv API fallback was removed because "
+            "1HZ75V/1HZ100V are on the WRONG price scale"
+        )
+    factory = client_factory
+    scoring_source = "mt5"
 
     async with factory() as client:
         for record in load_jsonl_records(calls_path):
@@ -202,6 +208,7 @@ async def score_unresolved_records_from_market(
                 continue
 
             outcome = score_call_outcome(record=record, prices=prices)
+            outcome["scoring_source"] = scoring_source
             append_jsonl_record(outcomes_path, outcome)
             resolved_keys.add(_record_key(record))
             result = CalibrationScoringResult(
@@ -275,6 +282,25 @@ def summarize_outcomes(
 ) -> dict[tuple[str, str | None, str | None], dict[str, float | int]]:
     grouped: dict[tuple[str, str | None, str | None], list[dict[str, object]]] = {}
     for outcome in outcomes:
+        # Only measured trade outcomes count as evidence.  A scored row is a
+        # real outcome only when the call carried entry/stop/target levels:
+        # level-less rows (the scorer's ``rejected_but_price_ran`` /
+        # ``forming_remained_correct`` fallback for calls that never had
+        # levels) would otherwise dilute the empirical rate with fake 0%
+        # evidence and suppress real call types — the stale July-12 journal
+        # poisoned ``setup_candidate`` exactly this way.
+        #
+        # Rows scored through the Deriv API fallback (``scoring_source ==
+        # "deriv_fallback"``) are on the wrong price scale and are excluded
+        # too — they are indistinguishable from real outcomes at the gate,
+        # so the tag is the only honest way to keep them out.
+        if (
+            outcome.get("entry") is None
+            or outcome.get("execution_stop") is None
+            or outcome.get("primary_target") is None
+            or outcome.get("scoring_source") == "deriv_fallback"
+        ):
+            continue
         key = (
             str(outcome.get("symbol")),
             outcome.get("trigger_type") if outcome.get("trigger_type") is None else str(outcome.get("trigger_type")),

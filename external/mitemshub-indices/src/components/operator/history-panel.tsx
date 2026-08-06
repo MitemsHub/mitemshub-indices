@@ -108,7 +108,13 @@ function HistoryEntry({
   const isStandAside = entry.call === "stand_aside";
   const isBuy = entry.call === "buy_candidate";
   const signalId = `${entry.symbol}_${entry.generated_at.replace(/:/g, "-").replace(/\./g, "-")}`;
-  const hasExecutionLevels = entry.entry !== null && entry.entry !== undefined;
+  // A failing/cancelled plan's old levels are invalid — never show them.
+  const isStaleEntry =
+    entry.guardian_state === "failing" || entry.guardian_state === "cancelled";
+  const hasExecutionLevels =
+    entry.entry !== null &&
+    entry.entry !== undefined &&
+    !isStaleEntry;
 
   return (
     <article className="rounded-xl border border-[var(--line-subtle)] bg-[var(--bg-panel-strong)] p-4 transition hover:shadow-[0_8px_24px_rgba(22,29,45,0.04)]">

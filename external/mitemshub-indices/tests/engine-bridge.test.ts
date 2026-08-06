@@ -232,6 +232,269 @@ describe("runFreshCall engine config", () => {
     expect(preparedMaxLiveTicks).toBeGreaterThan(manualMaxLiveTicks);
   });
 
+  it("maps the stage3 empirical gate block from the Python snapshot payload", async () => {
+    vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
+
+    const execFileMock = vi.fn((_command, _args, _options, callback) => {
+      callback(null, "", "");
+    });
+    const promisifiedExecFileMock = vi.fn(async (..._args: unknown[]) => {
+      const scriptArg = (_args[1] as string[])?.at(-1) ?? "";
+      // Import check — return OK first
+      if (scriptArg.startsWith("from synthetic_trader.live.market_snapshot import")) {
+        return { stdout: "OK", stderr: "" };
+      }
+      return {
+        stdout: JSON.stringify({
+          call: "buy_candidate",
+          trade_status: "valid",
+          direction_bias: "buy",
+          why: "structure aligned",
+          wait_for: "wait for confirmation",
+          guardian_state: "actionable",
+          guardian_reason: "The setup is actionable.",
+          // display_confidence — the Python gate already replaced model confidence
+          confidence: 0.62,
+          current_close: 51240.1,
+          stage3: {
+            state: "gated",
+            evidence_status: "proven",
+            trigger_type: "continuation_close",
+            empirical_target_hit_rate: 0.62,
+            empirical_sample_count: 24,
+            empirical_stop_hit_rate: 0.29,
+            horizon_verdict: "calibrated",
+            horizon_verdict_4h: "calibrated",
+            horizon_verdict_6h: "calibrated",
+            model_confidence: 0.71,
+            display_confidence: 0.62,
+            min_samples: 10,
+            hit_rate_floor: 0.5,
+            suppression_mode: "suppress",
+            suppressed_call: null,
+            proven_only: true,
+            execution_allowed: false,
+            note: "24 scored outcomes; target-hit rate 62% clears 50% and the horizon verdict is calibrated.",
+          },
+        }),
+        stderr: "",
+      };
+    });
+    (execFileMock as unknown as { [promisify.custom]: unknown })[
+      promisify.custom
+    ] = promisifiedExecFileMock;
+
+    vi.doMock("node:child_process", () => ({
+      execFile: execFileMock,
+      default: { execFile: execFileMock },
+    }));
+
+    const reloadedBridge = await import("../src/lib/engine-bridge");
+    const result = await reloadedBridge.liveSnapshotAdapter.read({
+      engineRoot: "c:\\engine-root",
+      symbol: "R_100",
+    });
+
+    expect(result.stage3).not.toBeNull();
+    expect(result.stage3?.state).toBe("gated");
+    expect(result.stage3?.evidence_status).toBe("proven");
+    expect(result.stage3?.trigger_type).toBe("continuation_close");
+    expect(result.stage3?.empirical_target_hit_rate).toBe(0.62);
+    expect(result.stage3?.empirical_sample_count).toBe(24);
+    expect(result.stage3?.horizon_verdict).toBe("calibrated");
+    expect(result.stage3?.min_samples).toBe(10);
+    expect(result.stage3?.hit_rate_floor).toBe(0.5);
+    // Legacy raw payloads (no sizing block) normalize to full/no-scaling.
+    expect(result.stage3?.sizing?.level).toBe("full");
+    expect(result.stage3?.sizing?.multiplier).toBe(1);
+    // The proven-only mode flag and the resulting go/no-go survive the bridge.
+    expect(result.stage3?.proven_only).toBe(true);
+    expect(result.stage3?.execution_allowed).toBe(false);
+    // The gate replaces raw model confidence with the market-verified rate.
+    expect(result.confidence).toBe(0.62);
+    vi.unstubAllEnvs();
+  });
+
+  it("carries the tuned 60s p50/p90 multipliers and live bands onto the call payload", async () => {
+    vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
+
+    const execFileMock = vi.fn((_command, _args, _options, callback) => {
+      callback(null, "", "");
+    });
+    const promisifiedExecFileMock = vi.fn(async (..._args: unknown[]) => {
+      const scriptArg = (_args[1] as string[])?.at(-1) ?? "";
+      // Import check — return OK first
+      if (scriptArg.startsWith("from synthetic_trader.live.market_snapshot import")) {
+        return { stdout: "OK", stderr: "" };
+      }
+      return {
+        stdout: JSON.stringify({
+          call: "buy_candidate",
+          trade_status: "valid",
+          direction_bias: "buy",
+          why: "structure aligned",
+          wait_for: "wait for confirmation",
+          guardian_state: "actionable",
+          guardian_reason: "The setup is actionable.",
+          confidence: 0.62,
+          current_close: 51240.1,
+          // stage3 from the Python gate — includes the tune-bands multipliers
+          // and the live forecast bands written into the verdict cache.
+          stage3: {
+            state: "gated",
+            evidence_status: "proven",
+            trigger_type: "continuation_close",
+            empirical_target_hit_rate: 0.62,
+            empirical_sample_count: 24,
+            empirical_stop_hit_rate: 0.29,
+            horizon_verdict: "calibrated",
+            horizon_verdict_4h: "calibrated",
+            horizon_verdict_6h: "calibrated",
+            model_confidence: 0.71,
+            display_confidence: 0.62,
+            min_samples: 10,
+            hit_rate_floor: 0.5,
+            suppression_mode: "suppress",
+            suppressed_call: null,
+            note: "24 scored outcomes; target-hit rate 62% clears 50% and the horizon verdict is calibrated.",
+            p50_mult: 1.52,
+            p90_mult: 2.44,
+            horizon_forecast: {
+              "4h": {
+                verdict: "calibrated",
+                p50_mult: 1.52,
+                p90_mult: 2.44,
+                forecast: {
+                  current_close: 51240.1,
+                  range_p50_price: 310.5,
+                  range_p90_price: 820.0,
+                  expected_low_p50: 51090.0,
+                  expected_high_p50: 51400.0,
+                  expected_low_p90: 50820.0,
+                  expected_high_p90: 51660.0,
+                  projected_sigma_avg: 0.0041,
+                  confidence: 0.8,
+                  vol_trend: "stable",
+                },
+              },
+              "6h": {
+                verdict: "calibrated",
+                p50_mult: 1.55,
+                p90_mult: 2.5,
+                forecast: {
+                  current_close: 51240.1,
+                  range_p50_price: 380.0,
+                  range_p90_price: 1000.0,
+                  expected_low_p50: 51050.0,
+                  expected_high_p50: 51430.0,
+                  expected_low_p90: 50740.0,
+                  expected_high_p90: 51740.0,
+                  projected_sigma_avg: 0.0041,
+                  confidence: 0.8,
+                  vol_trend: "stable",
+                },
+              },
+            },
+          },
+        }),
+        stderr: "",
+      };
+    });
+    (execFileMock as unknown as { [promisify.custom]: unknown })[
+      promisify.custom
+    ] = promisifiedExecFileMock;
+
+    vi.doMock("node:child_process", () => ({
+      execFile: execFileMock,
+      default: { execFile: execFileMock },
+    }));
+
+    const reloadedBridge = await import("../src/lib/engine-bridge");
+    const result = await reloadedBridge.liveSnapshotAdapter.read({
+      engineRoot: "c:\\engine-root",
+      symbol: "R_100",
+    });
+
+    // The tune-bands 60s multipliers reach the operator-facing call payload.
+    expect(result.stage3?.p50_mult).toBe(1.52);
+    expect(result.stage3?.p90_mult).toBe(2.44);
+    const fourH = result.stage3?.horizon_forecast?.["4h"];
+    expect(fourH?.p50_mult).toBe(1.52);
+    expect(fourH?.p90_mult).toBe(2.44);
+    expect(fourH?.forecast?.range_p50_price).toBe(310.5);
+    expect(fourH?.forecast?.expected_high_p90).toBe(51660.0);
+    expect(fourH?.forecast?.vol_trend).toBe("stable");
+    expect(result.stage3?.horizon_forecast?.["6h"]?.p90_mult).toBe(2.5);
+    vi.unstubAllEnvs();
+  });
+
+  it("maps a suppressed stage3 block and downgrades the call to stand_aside", async () => {
+    vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
+
+    const execFileMock = vi.fn((_command, _args, _options, callback) => {
+      callback(null, "", "");
+    });
+    const promisifiedExecFileMock = vi.fn(async (..._args: unknown[]) => {
+      const scriptArg = (_args[1] as string[])?.at(-1) ?? "";
+      if (scriptArg.startsWith("from synthetic_trader.live.market_snapshot import")) {
+        return { stdout: "OK", stderr: "" };
+      }
+      return {
+        stdout: JSON.stringify({
+          call: "stand_aside", // Python gate downgraded the suppressed call
+          trade_status: "valid",
+          direction_bias: "buy",
+          why: "suppressed by stage3",
+          wait_for: "wait for confirmation",
+          guardian_state: "actionable",
+          guardian_reason: "The setup is actionable.",
+          confidence: 0.2,
+          current_close: 51240.1,
+          stage3: {
+            state: "suppressed",
+            evidence_status: "suppressed",
+            trigger_type: "continuation_close",
+            empirical_target_hit_rate: 0.2,
+            empirical_sample_count: 14,
+            empirical_stop_hit_rate: 0.8,
+            horizon_verdict: "calibrated",
+            horizon_verdict_4h: "calibrated",
+            horizon_verdict_6h: "calibrated",
+            model_confidence: 0.71,
+            display_confidence: 0.2,
+            min_samples: 10,
+            hit_rate_floor: 0.5,
+            suppression_mode: "suppress",
+            suppressed_call: "buy_candidate",
+            note: "14 scored outcomes; target-hit rate 20% is BELOW the 50% floor.",
+          },
+        }),
+        stderr: "",
+      };
+    });
+    (execFileMock as unknown as { [promisify.custom]: unknown })[
+      promisify.custom
+    ] = promisifiedExecFileMock;
+
+    vi.doMock("node:child_process", () => ({
+      execFile: execFileMock,
+      default: { execFile: execFileMock },
+    }));
+
+    const reloadedBridge = await import("../src/lib/engine-bridge");
+    const result = await reloadedBridge.liveSnapshotAdapter.read({
+      engineRoot: "c:\\engine-root",
+      symbol: "R_100",
+    });
+
+    expect(result.call).toBe("stand_aside");
+    expect(result.stage3?.state).toBe("suppressed");
+    expect(result.stage3?.evidence_status).toBe("suppressed");
+    expect(result.stage3?.suppressed_call).toBe("buy_candidate");
+    expect(result.confidence).toBe(0.2);
+    vi.unstubAllEnvs();
+  });
+
   it("uses a long enough live snapshot timeout for tick-driven reads", async () => {
     vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
 
@@ -283,7 +546,7 @@ describe("runFreshCall engine config", () => {
       | { timeout?: number }
       | undefined;
 
-    expect(options?.timeout).toBe(35000);
+    expect(options?.timeout).toBe(60000);
   });
 
   it("uses a lower warmup count for prepared snapshot reads than the default manual path", async () => {
@@ -1151,14 +1414,12 @@ describe("prepared-call warmup", () => {
       .split(/\r?\n/)
       .map((line) => JSON.parse(line) as Record<string, unknown>);
 
-    expect(liveSnapshotSpy).toHaveBeenCalledTimes(4);
+    expect(liveSnapshotSpy).toHaveBeenCalledTimes(2);
     // Promise.all in warmPreparedCalls introduces non-determinism, so check
     // each expected combination was called (order-independent).
     const expectedCombos = [
       { symbol: "R_75", tradingMode: "sniper" },
-      { symbol: "R_75", tradingMode: "active_trader" },
       { symbol: "R_100", tradingMode: "sniper" },
-      { symbol: "R_100", tradingMode: "active_trader" },
     ];
     for (const { symbol, tradingMode } of expectedCombos) {
       expect(liveSnapshotSpy).toHaveBeenCalledWith(
@@ -1171,7 +1432,7 @@ describe("prepared-call warmup", () => {
         }),
       );
     }
-    expect(entries).toHaveLength(4);
+    expect(entries).toHaveLength(2);
     expect(entries).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1206,12 +1467,12 @@ describe("prepared-call warmup", () => {
     // we run it directly to avoid timer/I/O interaction in tests).
     await reloadedBridge.warmPreparedCalls();
 
-    expect(liveSnapshotSpy).toHaveBeenCalledTimes(4);
+    expect(liveSnapshotSpy).toHaveBeenCalledTimes(2);
 
     // Verify each expected call happened (order may vary between runs
     // because warmPreparedCalls uses Promise.all internally).
     for (const symbol of ["R_75", "R_100"] as const) {
-      for (const tradingMode of ["sniper", "active_trader"] as const) {
+      for (const tradingMode of ["sniper"] as const) {
         expect(liveSnapshotSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             engineRoot: "c:\\engine-root",
@@ -1237,7 +1498,7 @@ describe("prepared-call warmup", () => {
       .spyOn(reloadedBridge.liveSnapshotAdapter, "read")
       .mockImplementation(async ({ symbol }) => buildLiveSnapshot(symbol));
     await reloadedBridge.warmPreparedCalls();
-    expect(liveSnapshotSpy).toHaveBeenCalledTimes(4);
+    expect(liveSnapshotSpy).toHaveBeenCalledTimes(2);
 
     // Verify the warmup schedules the next cycle via setTimeout.
     const refreshDelay = setTimeoutSpy.mock.calls.at(-1)?.[1];
@@ -1251,12 +1512,12 @@ describe("prepared-call warmup", () => {
     // Call warmPreparedCalls a second time directly instead of relying
     // on timer advancement (which mixes real I/O with fake timers poorly).
     await reloadedBridge.warmPreparedCalls();
-    expect(liveSnapshotSpy).toHaveBeenCalledTimes(8);
+    expect(liveSnapshotSpy).toHaveBeenCalledTimes(4);
 
     // Verify each expected call happened (order may vary between runs
     // because warmPreparedCalls uses Promise.all internally).
     for (const symbol of ["R_75", "R_100"] as const) {
-      for (const tradingMode of ["sniper", "active_trader"] as const) {
+      for (const tradingMode of ["sniper"] as const) {
         expect(liveSnapshotSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             engineRoot: "c:\\engine-root",
@@ -1353,7 +1614,7 @@ describe("getCurrentPropProfileForRequest", () => {
         server: "EnvServer",
         login: "111111",
         password: "env-secret",
-        startingBalance: 100000,
+        startingBalance: 5000,
       }),
     });
     expect(profile.telemetry.status).toBe("own_account_fallback");
@@ -1373,9 +1634,9 @@ describe("getCurrentPropProfileForRequest", () => {
     expect(propProfileSpy).not.toHaveBeenCalled();
     expect(profile).toEqual({
       profile: "blueberry_2step_funded",
-      startingBalance: 100000,
-      currentBalance: 0,
-      currentEquity: 0,
+      startingBalance: 5000,
+      currentBalance: 5000,
+      currentEquity: 5000,
       todaysRealizedLoss: 0,
       todaysFloatingLossExposure: 0,
       highImpactNewsLockout: false,

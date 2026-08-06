@@ -22,9 +22,12 @@ import {
   type AccountMode,
   type FreshCallResponse,
   type GuardianStatus,
+  type HorizonForecast,
+  type HorizonForecastDetail,
   type PropConnectionInput,
   type PropProfileResponse,
   type PropProfileRequest,
+  type Stage3Block,
   type TradingMode,
 } from "./contracts";
 // Mock data removed — the system uses only real data from Deriv.
@@ -1454,6 +1457,7 @@ function buildUnavailableBaseCall({
     snapshot_structure: null,
     model_long_probability: null,
     trading_mode: null,
+    stage3: null,
   };
 }
 
@@ -1718,6 +1722,7 @@ export function toBaseFreshCall(call: FreshCallResponse): BaseFreshCall {
     snapshot_structure: call.snapshot_structure ?? null,
     model_long_probability: call.model_long_probability ?? null,
     trading_mode: call.trading_mode ?? null,
+    stage3: call.stage3 ?? null,
   };
 }
 
@@ -1787,6 +1792,12 @@ function normalizeTradingMode(value: unknown): TradingMode | null {
   return value === "sniper" ? value : null;
 }
 
+function normalizeVenue(value: unknown): BaseFreshCall["venue"] {
+  return value === "mt5" || value === "deriv" || value === "csv"
+    ? value
+    : null;
+}
+
 function normalizeGuardianState(
   value: unknown,
 ): BaseFreshCall["guardian_state"] {
@@ -1842,6 +1853,156 @@ function withTelemetry(
   return {
     ...profile,
     telemetry,
+  };
+}
+
+// Keys carried on the stage3.horizon_forecast detail (mirrors
+// horizon_forecast_stats._FORECAST_CACHE_KEYS).
+const HORIZON_FORECAST_KEYS = [
+  "current_close",
+  "range_p50_price",
+  "range_p90_price",
+  "expected_low_p50",
+  "expected_high_p50",
+  "expected_low_p90",
+  "expected_high_p90",
+  "projected_sigma_avg",
+  "confidence",
+  "vol_trend",
+] as const;
+
+function normalizeHorizonForecast(raw: unknown): HorizonForecast | null {
+  if (raw === null || raw === undefined || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const normalizeDetail = (entry: unknown): HorizonForecastDetail | null => {
+    if (entry === null || entry === undefined || typeof entry !== "object") return null;
+    const e = entry as Record<string, unknown>;
+    const rawForecast = e.forecast;
+    const forecast: HorizonForecastDetail["forecast"] =
+      rawForecast !== null &&
+      rawForecast !== undefined &&
+      typeof rawForecast === "object"
+        ? Object.fromEntries(
+            HORIZON_FORECAST_KEYS.map((key) => {
+              const value = (rawForecast as Record<string, unknown>)[key];
+              return [
+                key,
+                typeof value === "number" && Number.isFinite(value)
+                  ? value
+                  : typeof value === "string"
+                    ? value
+                    : null,
+              ];
+            }),
+          )
+        : null;
+    return {
+      verdict: normalizeText(e.verdict),
+      multipliers_applied: e.multipliers_applied === true,
+      p50_mult: normalizeNumber(e.p50_mult),
+      p90_mult: normalizeNumber(e.p90_mult),
+      forecast,
+    };
+  };
+  return {
+    "4h": normalizeDetail(r["4h"]),
+    "6h": normalizeDetail(r["6h"]),
+  };
+}
+
+function normalizeStage3(raw: unknown): Stage3Block | null {
+  if (raw === null || raw === undefined || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const state = r.state;
+  if (
+    state !== "gated" &&
+    state !== "annotated" &&
+    state !== "suppressed" &&
+    state !== "insufficient_data"
+  ) {
+    return null;
+  }
+  const evidenceStatus =
+    r.evidence_status === "proven" ||
+    r.evidence_status === "still_learning" ||
+    r.evidence_status === "suppressed" ||
+    r.evidence_status === "no_data"
+      ? r.evidence_status
+      : state === "suppressed"
+        ? "suppressed"
+        : state === "gated"
+          ? "proven"
+          : state === "annotated"
+            ? "proven"
+            : "no_data";
+  return {
+    state,
+    evidence_status: evidenceStatus,
+    trigger_type: normalizeText(r.trigger_type) ?? "unknown",
+    empirical_target_hit_rate: normalizeNumber(r.empirical_target_hit_rate),
+    empirical_sample_count:
+      typeof r.empirical_sample_count === "number" && Number.isFinite(r.empirical_sample_count)
+        ? Math.trunc(r.empirical_sample_count)
+        : 0,
+    empirical_stop_hit_rate: normalizeNumber(r.empirical_stop_hit_rate),
+    horizon_verdict: normalizeText(r.horizon_verdict),
+    horizon_verdict_4h: normalizeText(r.horizon_verdict_4h),
+    horizon_verdict_6h: normalizeText(r.horizon_verdict_6h),
+    model_confidence: normalizeNumber(r.model_confidence),
+    display_confidence: normalizeNumber(r.display_confidence),
+    min_samples:
+      typeof r.min_samples === "number" && Number.isFinite(r.min_samples)
+        ? Math.trunc(r.min_samples)
+        : 10,
+    hit_rate_floor:
+      typeof r.hit_rate_floor === "number" && Number.isFinite(r.hit_rate_floor)
+        ? r.hit_rate_floor
+        : 0.5,
+    suppression_mode: r.suppression_mode === "annotate" ? "annotate" : "suppress",
+    proven_only: r.proven_only === true,
+    execution_allowed: r.execution_allowed !== false,
+    below_floor: r.below_floor === true,
+    sizing: normalizeStage3Sizing(r.sizing),
+    suppressed_call: normalizeText(r.suppressed_call),
+    note: normalizeText(r.note) ?? "",
+    p50_mult: normalizeNumber(r.p50_mult),
+    p90_mult: normalizeNumber(r.p90_mult),
+    horizon_forecast: normalizeHorizonForecast(r.horizon_forecast),
+  };
+}
+
+function normalizeStage3Sizing(raw: unknown): Stage3Block["sizing"] {
+  if (raw === null || raw === undefined || typeof raw !== "object") {
+    // Legacy payload (no sizing computed): default to full — no empirical
+    // scaling was ever applied, so nothing is held back.
+    return {
+      level: "full",
+      multiplier: 1,
+      basis: "legacy",
+      reason: "no Stage-3 sizing computed for this payload",
+    };
+  }
+  const r = raw as Record<string, unknown>;
+  const level = r.level;
+  const multiplier =
+    typeof r.multiplier === "number" && Number.isFinite(r.multiplier)
+      ? r.multiplier
+      : 1;
+  return {
+    level:
+      level === "full" ||
+      level === "half" ||
+      level === "paper_only" ||
+      level === "stand_aside"
+        ? level
+        : multiplier <= 0
+          ? "paper_only"
+          : multiplier < 1
+            ? "half"
+            : "full",
+    multiplier,
+    basis: normalizeText(r.basis) ?? "unknown",
+    reason: normalizeText(r.reason) ?? "",
   };
 }
 
@@ -1915,6 +2076,10 @@ function mapLiveSnapshot(raw: Record<string, unknown>, symbol: SymbolCode): Base
     trading_mode: normalizeTradingMode(raw.trading_mode),
     signal_strength: normalizeText(raw.signal_strength) as FreshCallResponse["signal_strength"] ?? null,
     position_sizing: normalizeText(raw.position_sizing) as FreshCallResponse["position_sizing"] ?? null,
+    size_multiplier: normalizeNumber(raw.size_multiplier),
+    position_sizing_empirical: normalizeText(raw.position_sizing_empirical),
+    stage3: normalizeStage3(raw.stage3),
+    venue: normalizeVenue(raw.venue),
   };
 
   return {

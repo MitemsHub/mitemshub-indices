@@ -28,6 +28,30 @@ type SystemStatus = {
   backend_status: string;
 };
 
+/**
+ * Strip execution levels from a call that is no longer actionable.
+ *
+ * When the guardian reports a setup as failing or cancelled, the old
+ * entry/stop/target levels are invalid and must never be shown or
+ * executed. This helper nulls every price level so no stale number can
+ * leak into the lot-size calculator, history panel, or execution flow.
+ */
+function stripExecutionLevels(call: FreshCallResponse): FreshCallResponse {
+  return {
+    ...call,
+    entry: null,
+    stop_loss: null,
+    take_profit: null,
+    execution_stop: null,
+    thesis_invalidation: null,
+    primary_target: null,
+    extended_target: null,
+    entry_area: null,
+    stop_area: null,
+    target_area: null,
+  };
+}
+
 function buildUnavailableCall(
   symbol: SymbolCode,
   accountMode: AccountMode,
@@ -137,6 +161,26 @@ export function useOperatorWorkspace() {
     "idle" | "using_own_account_fallback" | "using_dedicated_prop_account"
   >("idle");
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("paper");
+  // Proven-only execution mode (SYNTH_GATE_PROVEN_ONLY): when on, only
+  // stage3.evidence_status == "proven" calls may place live MT5 orders;
+  // still_learning / no_data / suppressed calls never execute (paper-only),
+  // even in annotate suppression mode.  Persisted per-browser so the
+  // operator's risk preference survives refreshes.
+  const [provenOnly, setProvenOnly] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("synth-gate-proven-only") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleProvenOnly = (value: boolean) => {
+    setProvenOnly(value);
+    try {
+      localStorage.setItem("synth-gate-proven-only", value ? "1" : "0");
+    } catch {
+      // storage unavailable — in-memory toggle still applies
+    }
+  };
   const [trackedPosition, setTrackedPosition] = useState<TrackedPosition | null>(null);
   const [executing, setExecuting] = useState(false);
   const [executionError, setExecutionError] = useState<string | null>(null);
@@ -239,7 +283,46 @@ export function useOperatorWorkspace() {
           `/api/calls/guardian?symbol=${currentCall.symbol}&trading_mode=${tradingMode}`,
         );
         if (!cancelled && response.ok) {
-          setGuardianStatus((await response.json()) as GuardianStatus);
+          const fetched = (await response.json()) as GuardianStatus;
+          setGuardianStatus(fetched);
+
+          // ── Stale-plan safety ────────────────────────────────
+          // When the guardian reports the setup has failed or been
+          // cancelled, the old entry/stop/target levels are no longer
+          // valid. Strip them from the live call AND the history list
+          // so stale numbers never render or get executed anywhere.
+          if (
+            fetched.guardian_state === "failing" ||
+            fetched.guardian_state === "cancelled"
+          ) {
+            setCurrentCall((previous) => {
+              if (!previous) return previous;
+              if (
+                previous.guardian_state === "failing" ||
+                previous.guardian_state === "cancelled"
+              ) {
+                return previous;
+              }
+              return {
+                ...stripExecutionLevels(previous),
+                guardian_state: fetched.guardian_state,
+                guardian_reason: fetched.guardian_reason,
+              };
+            });
+            setHistory((previous) =>
+              previous.map((entry) =>
+                entry.symbol === fetched.symbol &&
+                (entry.guardian_state === "confirmed" ||
+                  entry.guardian_state === "actionable")
+                  ? {
+                      ...stripExecutionLevels(entry),
+                      guardian_state: fetched.guardian_state,
+                      guardian_reason: fetched.guardian_reason,
+                    }
+                  : entry,
+              ),
+            );
+          }
         }
       } catch {
         // Keep the last known guardian truth when polling fails.
@@ -492,7 +575,8 @@ export function useOperatorWorkspace() {
           const cached = (await response.json()) as FreshCallResponse;
           if (cached && cached.call && cached.call !== "stand_aside" && cached.guardian_state !== "unavailable") {
             // Cached call exists and is a real signal — use it immediately.
-            // Do NOT spawn a fresh calculation. User must click Refresh for that.
+            // The stale-refresh effect below silently re-reads it if older
+            // than 3 minutes, so the plan always self-heals.
             setCurrentCall(cached);
             setGuardianStatus({
               symbol: cached.symbol,
@@ -509,13 +593,16 @@ export function useOperatorWorkspace() {
           }
         }
       } catch {
-        // Cached call fetch failed — show error state so user knows to retry
-        setCachedCallError("Failed to load cached call — click Refresh to try again");
+        // Cached call fetch failed — proceed to the fresh-read fallback below.
+        setCachedCallError("Cached call unavailable — refreshing live data");
       }
 
-      // No cached call available — show placeholder state.
-      // User must explicitly click Refresh to spawn a fresh Python subprocess.
-      // This prevents unnecessary subprocess spawns on every page load.
+      // No usable cached call (missing, stand_aside, or unavailable): spawn a
+      // fresh read so the trade plan populates automatically on load — the
+      // user should never be stranded on a "Retry live read" placeholder.
+      // Non-silent so the "Analyzing the market…" state shows while the
+      // Python engine runs (takes ~15-35s).
+      void runSymbol(activeSymbol);
     }
 
     void loadCachedCallFirst();
@@ -640,6 +727,36 @@ export function useOperatorWorkspace() {
     if (!currentCall || currentCall.trade_status !== "valid" || !currentCall.entry) return;
     if (!currentCall.stop_loss || !currentCall.take_profit) return;
 
+    // Stage-3 empirical sizing: risk scales with empirical confidence.  A
+    // call with no empirical verdict yet (or evidence below the floor) is
+    // paper-only — it may be paper-traded (that generates the outcomes the
+    // gate needs) but must never place a real MT5 order.  The one escape
+    // hatch is annotate suppression mode (SYNTH_GATE_SUPPRESSION_MODE=
+    // annotate): the operator explicitly chose to keep below-floor/unverified
+    // types actionable, so the block is lifted (the scaled volume still
+    // applies).  Proven-only mode is the strictest belt and OVERRIDES the
+    // annotate escape hatch: when on, only evidence_status == "proven"
+    // calls may execute — still_learning / no_data / suppressed never place
+    // a live order, regardless of suppression mode.
+    const sizeMultiplier = currentCall.size_multiplier ?? 1;
+    const annotateMode =
+      currentCall.stage3?.suppression_mode === "annotate";
+    const evidenceStatus = currentCall.stage3?.evidence_status;
+    // Fail closed: unknown/missing evidence is treated as not-proven, so a
+    // payload with no stage3 block at all can never slip past the mode.
+    const provenOnlyBlocks = provenOnly && evidenceStatus !== "proven";
+    if (executionMode === "live_mt5" && (sizeMultiplier <= 0 || provenOnlyBlocks) && !(annotateMode && !provenOnly)) {
+      setExecutionError(
+        provenOnly
+          ? "Proven-only execution is ON: this call type is not market-proven yet (" +
+            `${evidenceStatus ?? "no_data"}) — no live MT5 order was placed. ` +
+            "Paper-trade it to build the scored outcomes the gate needs; only " +
+            "evidence_status == 'proven' call types may execute live."
+          : "This call type is paper-only (no empirical verdict yet, or below the verified floor) — no live MT5 order was placed. Run it on paper to build the scored outcomes the gate needs, or set SYNTH_GATE_SUPPRESSION_MODE=annotate to keep unverified types tradeable.",
+      );
+      return;
+    }
+
     const entry = overrides?.entry ?? currentCall.entry;
     const stopLoss = overrides?.stopLoss ?? currentCall.stop_loss ?? currentCall.entry;
     const takeProfit = overrides?.takeProfit ?? currentCall.take_profit ?? currentCall.entry;
@@ -661,7 +778,13 @@ export function useOperatorWorkspace() {
           primary_target: currentCall.primary_target,
           extended_target: currentCall.extended_target,
           execution_mode: executionMode,
-          mt5_volume: executionMode === "live_mt5" ? 0.01 : undefined,
+          // Scale the base lot by the Stage-3 empirical multiplier (floored at
+          // the broker's 0.01 minimum); paper_only calls were already blocked
+          // above, so the multiplier here is always > 0.
+          mt5_volume:
+            executionMode === "live_mt5"
+              ? Math.max(0.01, 0.01 * Math.min(sizeMultiplier, 1))
+              : undefined,
         }),
       });
 
@@ -904,6 +1027,8 @@ return {
   propConnectionStatus,
   propProfile,
   requestPropMode,
+  provenOnly,
+  setProvenOnly: toggleProvenOnly,
   setAccountMode,
   setExecutionMode,
   setTradingMode,

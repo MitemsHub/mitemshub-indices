@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from synthetic_trader.models.garch import EGARCHVarianceForecaster, GARCHState
+from synthetic_trader.models.garch import (
+    EGARCHVarianceForecaster,
+    GARCHState,
+    ez_student_t,
+)
 from synthetic_trader.models.confidence_decay import ConfidenceDecayTracker
 
 
@@ -129,6 +133,37 @@ class TestEGARCHVarianceForecaster:
         for i in range(50):
             forecaster.update(0.002 * ((-1) ** i))
         assert 0.0 <= forecaster.state.beta <= 0.999
+
+    def test_update_units_mismatch_regression(self):
+        """Bug fix: pred_error must be in log-variance space.
+
+        The old code subtracted the RAW squared return (~1e-6 at bar
+        scale) from log_variance (~-13) — a units mismatch that made
+        every gradient strongly positive and drove omega / long-run
+        variance upward without bound (inflating 4-6h bands ~300x).
+        After the fix, feeding a stream of realistic returns must keep
+        log_variance anchored near the true log-variance, not ratchet
+        up to the +5.0 clip.
+        """
+        forecaster = EGARCHVarianceForecaster(
+            min_observations=10, buffer_size=10, learning_rate=0.01
+        )
+        true_sigma = 0.0005  # realistic per-bar scale (R_75 @ 60s)
+        rng = __import__("random").Random(7)
+        for _ in range(400):
+            # Deterministic pseudo-normal-ish stream at a fixed scale
+            u = (rng.random() + rng.random() + rng.random() + rng.random()) - 2.0
+            forecaster.update(true_sigma * u * 0.5)
+        # log_variance must stay in the sane band around 2*log(true_sigma)
+        true_log_var = 2.0 * math.log(true_sigma)  # ≈ -15.2
+        assert forecaster.state.log_variance > -24.0
+        assert forecaster.state.log_variance < -6.0
+        # The pathological behavior was unbounded upward drift toward +5.0
+        assert forecaster.state.log_variance < -6.0 + 10.0
+        # Conditional vol must stay within an order of magnitude of the stream
+        vol = forecaster.state.conditional_volatility
+        assert vol < true_sigma * 10.0
+        assert forecaster.state.omega < -1.0  # not ratcheted up to ~+5
 
     def test_get_forecast_readonly(self):
         forecaster = EGARCHVarianceForecaster(min_observations=5, buffer_size=5)
@@ -298,3 +333,59 @@ class TestConfidenceDecayTracker:
         # Scoring short when the streak is long — short has no streak
         result = tracker.apply_decay(0.60, "short")
         assert result == 0.60  # no decay for opposite direction
+
+
+# ── Student-t innovation distribution ────────────────────────────
+
+class TestEzStudentT:
+    def test_exact_dof_two(self):
+        # E|z| for dof=2 equals sqrt(2)
+        assert abs(ez_student_t(2.0) - math.sqrt(2.0)) < 1e-9
+
+    def test_heavy_tails_larger_than_normal(self):
+        assert ez_student_t(3.0) > 0.7979
+        assert ez_student_t(5.0) > 0.7979
+
+    def test_converges_to_normal(self):
+        assert abs(ez_student_t(200.0) - 0.7979) < 0.02
+
+    def test_dof_one_guard(self):
+        assert ez_student_t(1.0) == 1.0
+
+
+class TestForecasterStudentT:
+    def test_studentt_forecast_is_finite(self):
+        forecaster = EGARCHVarianceForecaster(
+            min_observations=5,
+            buffer_size=5,
+            distribution="studentt",
+            dof=5.0,
+        )
+        for i in range(30):
+            features = forecaster.update(0.002 * ((-1) ** i))
+            assert math.isfinite(features["garch_forecast"])
+            assert features["garch_sigma"] > 0
+
+    def test_studentt_uses_heavier_shock_expectation(self):
+        normal = EGARCHVarianceForecaster(min_observations=5, buffer_size=5)
+        studentt = EGARCHVarianceForecaster(
+            min_observations=5, buffer_size=5, distribution="studentt", dof=5.0
+        )
+        assert studentt._ez > normal._ez
+
+    def test_save_load_preserves_distribution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "garch_t.json"
+            forecaster = EGARCHVarianceForecaster(
+                min_observations=5,
+                buffer_size=5,
+                distribution="studentt",
+                dof=7.0,
+            )
+            for i in range(20):
+                forecaster.update(0.001 * ((-1) ** i))
+            forecaster.save(path)
+            loaded = EGARCHVarianceForecaster.load(path)
+            assert loaded.distribution == "studentt"
+            assert loaded.dof == 7.0
+            assert loaded.state.observations == forecaster.state.observations

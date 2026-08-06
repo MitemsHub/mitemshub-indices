@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -221,8 +222,12 @@ BLUEBERRY_SYMBOL_MAP: dict[str, str] = {
 }
 
 DERIV_SYMBOL_MAP: dict[str, str] = {
-    "R_75": "Volatility 75 Index",
-    "R_100": "Volatility 100 Index",
+    # Verified live on the Blueberry Markets MT5 terminal (2026-08):
+    # "Volatility 75 Index" / "Volatility 100 Index" do NOT exist on the
+    # broker; the real symbols are SYN75 / SYN100 (matches the chart the
+    # user trades).  Keep the old names as fallback candidates.
+    "R_75": "SYN75",
+    "R_100": "SYN100",
     "V75": "Boom 1000 Index",
     "V100": "Crash 1000 Index",
 }
@@ -236,3 +241,170 @@ def get_venue_symbol(symbol: str) -> str:
     if symbol in DERIV_SYMBOL_MAP:
         return DERIV_SYMBOL_MAP[symbol]
     return symbol  # Pass through as-is
+
+
+def fetch_m1_candles(
+    symbol: str,
+    *,
+    since_epoch: float,
+    venue_symbol: str | None = None,
+    terminal_path: str | None = None,
+    max_rates: int = 100_000,
+) -> list[dict[str, float]]:
+    """Fetch closed M1 OHLC candles from the Blueberry MT5 terminal.
+
+    Returns candles (each ``{'epoch', 'open', 'high', 'low', 'close'}``)
+    ascending by epoch, covering ``[since_epoch, now]``.  The still-forming
+    candle at the current minute boundary is NOT included (MT5's
+    ``copy_rates_range`` returns it, but its OHLC is not final — consumers
+    must wait for it to close).  An empty list means no history in range
+    (e.g. mid-rollover or symbol not trading).
+
+    This is the fetch core shared by the one-shot backfill
+    (:func:`collect_mt5_candle_history`) and the continuous M1 capture
+    loop (``data.m1_capture``).  When ``terminal_path`` is omitted, the
+    terminal is resolved with the same registry/Program-Files scan the
+    live MT5 path uses (``mt5_data._resolve_mt5_terminal_path``) so the
+    Blueberry terminal is preferred over other MT5 installs on the machine.
+    """
+    try:
+        import MetaTrader5 as mt5
+    except ImportError:
+        raise RuntimeError("MetaTrader5 module not available. Install MT5 terminal.")
+
+    venue = venue_symbol or get_venue_symbol(symbol)
+
+    # Resolve the terminal executable: explicit arg, else the same scan the
+    # live path uses (avoids silently attaching to the wrong MT5 install).
+    resolved_terminal = terminal_path
+    if not resolved_terminal:
+        from synthetic_trader.execution.mt5_data import _resolve_mt5_terminal_path
+
+        resolved_terminal = _resolve_mt5_terminal_path()
+
+    init_kwargs = {}
+    if resolved_terminal:
+        init_kwargs["path"] = resolved_terminal
+
+    if not mt5.initialize(**init_kwargs):
+        error = mt5.last_error()
+        raise RuntimeError(f"MT5 initialize failed: {error} (path: {resolved_terminal})")
+
+    try:
+        if not mt5.symbol_select(venue, True):
+            error = mt5.last_error()
+            raise RuntimeError(f"Failed to select {venue}: {error}")
+
+        now = datetime.now(timezone.utc)
+        start = datetime.fromtimestamp(since_epoch, tz=timezone.utc)
+        rates = mt5.copy_rates_range(venue, mt5.TIMEFRAME_M1, start, now)
+        if rates is None or len(rates) == 0:
+            return []
+        if len(rates) > max_rates:
+            rates = rates[-max_rates:]
+
+        candles: list[dict[str, float]] = []
+        for row in rates:
+            candles.append(
+                {
+                    "epoch": float(row["time"]),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                }
+            )
+        candles.sort(key=lambda c: c["epoch"])
+        # Drop the still-forming candle at the current minute boundary.
+        now_bucket = int(now.timestamp()) // 60 * 60
+        candles = [c for c in candles if float(c["epoch"]) < now_bucket]
+        # ── Garbage-row defense ───────────────────────────────────
+        # ``copy_rates_range`` can hand back rows with uninitialised/garbage
+        # values when the terminal is still downloading history for the
+        # requested range (epochs near 0 or in the far future, prices of
+        # 0.0/1.0/4.0).  These would poison the compounding corpus if merged
+        # unfiltered, so drop anything that is not a plausible M1 candle:
+        # epoch after year 2001, not in the future, and sane OHLC values.
+        now_ts = now.timestamp()
+        candles = [
+            c for c in candles
+            if 1_000_000_000 <= float(c["epoch"]) <= now_ts + 3600
+            and min(float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])) > 0.0
+        ]
+        return candles
+    finally:
+        mt5.shutdown()
+
+
+def collect_mt5_candle_history(
+    symbol: str,
+    days: float,
+    output_path: str | Path,
+    venue_symbol: str | None = None,
+    terminal_path: str | None = None,
+    max_rates: int = 100_000,
+) -> "CollectedTicks":
+    """Backfill *days* of 1-minute OHLC history from the MT5 terminal.
+
+    Deriv's WebSocket API only serves a rolling ~5000-tick buffer and its
+    candle symbols (1HZ75V / 1HZ100V) trade at DIFFERENT price levels than
+    Blueberry Markets instruments (SYN75 / SYN100).  The only correct
+    source of multi-day history for the instruments the user actually
+    trades is the Blueberry MT5 terminal itself — ``copy_rates_range``
+    returns server-backed M1 OHLC that goes back days.
+
+    The M1 candles are expanded into an OHLC-exact tick stream (4 ticks
+    per candle, via ``candles_to_ticks``) so downstream candle builders
+    at 60s/300s reproduce the original OHLC exactly — the same
+    reconstruction used by the Deriv candle backfill.  M1 is always used
+    as the base spacing so 60s and 300s candle builders stay correct
+    (a 300s-sourced tick stream would put all 4 ticks inside the first
+    60s sub-slice and break 60s builders).
+
+    Returns a :class:`CollectedTicks` describing the written dataset.
+    """
+    from synthetic_trader.data.collector import candles_to_ticks
+    from synthetic_trader.data.tick_store import normalize_ticks, write_ticks_csv
+
+    if days <= 0:
+        raise ValueError("days must be positive")
+
+    # Resolve venue symbol on the terminal (SYN75/SYN100 for R_75/R_100)
+    venue = venue_symbol or get_venue_symbol(symbol)
+    now = datetime.now(timezone.utc)
+    candles = fetch_m1_candles(
+        symbol,
+        since_epoch=(now - timedelta(days=days)).timestamp(),
+        venue_symbol=venue_symbol,
+        terminal_path=terminal_path,
+        max_rates=max_rates,
+    )
+    if not candles:
+        raise RuntimeError(
+            f"No M1 rates returned for {venue} — symbol not visible "
+            f"or history unavailable. Set SYNTHETIC_MT5_SYMBOL_MAP in .env.local."
+        )
+
+    # Always expand at 60s so 60s AND 300s downstream builders are correct.
+    ticks = candles_to_ticks(symbol, candles, timeframe_sec=60)
+    normalized, _ = normalize_ticks(ticks)
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_ticks_csv(output, normalized, append=False)
+
+    prices = [t.price for t in normalized]
+    return CollectedTicks(
+        symbol=symbol,
+        venue_symbol=venue,
+        ticks_collected=len(normalized),
+        duration_sec=days * 86400.0,
+        output_path=str(output),
+        first_price=prices[0] if prices else 0.0,
+        last_price=prices[-1] if prices else 0.0,
+        min_price=min(prices) if prices else 0.0,
+        max_price=max(prices) if prices else 0.0,
+        mean_spread=0.0,
+        price_range_pct=(
+            (max(prices) - min(prices)) / min(prices) * 100 if prices else 0.0
+        ),
+    )

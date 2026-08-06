@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import asyncio
 import json
 import tempfile
@@ -17,7 +18,7 @@ from unittest.mock import patch
 _JOURNAL_DIR = Path(tempfile.mkdtemp(prefix="mitems-test-journals-"))
 
 from synthetic_trader.cli import main
-from synthetic_trader.config import TraderConfig
+from synthetic_trader.config import MAX_FEATURE_HISTORY, TraderConfig
 from synthetic_trader.domain import Direction, FeatureSnapshot, Regime, Tick, TradeSignal
 from synthetic_trader.live.live_symbol_watcher import PreparedSymbolState
 from synthetic_trader.live.market_snapshot import (
@@ -795,6 +796,107 @@ class LiveSnapshotDataTests(unittest.TestCase):
 
         self.assertEqual([tick.epoch for tick in ticks], [3, 4, 5])
 
+    def test_collect_live_snapshot_ticks_raises_when_mt5_down_no_deriv_fallback(self) -> None:
+        """When MT5 is configured but the terminal fails, the collector must
+        RAISE — it must not silently swap to Deriv WebSocket (whose 1HZ75V
+        prices are on the WRONG scale vs the Blueberry SYN75 call levels)."""
+
+        class _BrokenMt5:
+            async def __aenter__(self):
+                raise RuntimeError("terminal not running")
+
+            async def __aexit__(self, *args):
+                return None
+
+        with patch(
+            "synthetic_trader.live.market_snapshot.is_mt5_configured",
+            return_value=True,
+        ):
+            with patch(
+                "synthetic_trader.live.market_snapshot.Mt5TickClient",
+                return_value=_BrokenMt5(),
+            ):
+                with self.assertRaises(RuntimeError):
+                    asyncio.run(
+                        collect_live_snapshot_ticks(
+                            symbol="R_75", warmup_count=5, max_live_ticks=0,
+                        )
+                    )
+
+    def test_watch_live_ticks_raises_when_mt5_down_no_deriv_fallback(self) -> None:
+        """Same no-fallback rule for the watch loop: MT5 failure propagates
+        (run_live_watch's reconnect handler deals with it) instead of
+        silently producing Deriv-scale prices."""
+
+        class _BrokenMt5:
+            async def __aenter__(self):
+                raise ConnectionError("terminal not running")
+
+            async def __aexit__(self, *args):
+                return None
+
+        with patch(
+            "synthetic_trader.live.market_snapshot.is_mt5_configured",
+            return_value=True,
+        ):
+            with patch(
+                "synthetic_trader.live.market_snapshot.Mt5TickClient",
+                return_value=_BrokenMt5(),
+            ):
+                with self.assertRaises(ConnectionError):
+                    asyncio.run(
+                        watch_live_ticks(symbol="R_75", max_live_ticks=3)
+                    )
+
+    def test_run_live_snapshot_stamps_venue_mt5_when_configured(self) -> None:
+        """run_live_snapshot must report which venue the levels came from so
+        the operator always knows the price scale (mt5 = Blueberry SYN-scale)."""
+        ticks = [
+            Tick(symbol="R_75", epoch=epoch, price=100.0 + epoch / 100.0)
+            for epoch in range(1, 37)
+        ]
+        client = _FakeSnapshotClient(ticks, [])
+
+        def fake_analyze(**kwargs: object) -> dict[str, object]:
+            return {"history_len": len(kwargs["ticks"])}
+
+        async def fake_collect(**kwargs: object) -> list[Tick]:
+            return ticks
+
+        with patch(
+            "synthetic_trader.live.market_snapshot.is_mt5_configured",
+            return_value=True,
+        ):
+            with patch(
+                "synthetic_trader.live.market_snapshot._load_csv_ticks",
+                return_value=None,
+            ):
+                with patch(
+                    "synthetic_trader.live.market_snapshot._resolve_csv_path",
+                    return_value=Path(tempfile.mkdtemp()) / "R_75_ticks.csv",
+                ):
+                    with patch(
+                        "synthetic_trader.live.market_snapshot.append_ticks_csv",
+                    ):
+                        with patch(
+                            "synthetic_trader.live.market_snapshot.collect_live_snapshot_ticks",
+                            side_effect=fake_collect,
+                        ):
+                            with patch(
+                                "synthetic_trader.live.market_snapshot.analyze_live_snapshot",
+                                side_effect=fake_analyze,
+                            ):
+                                snapshot = asyncio.run(
+                                    run_live_snapshot(
+                                        symbol="R_75",
+                                        warmup_count=5,
+                                        timeframe_sec=60,
+                                        higher_timeframe_sec=300,
+                                        max_live_ticks=0,
+                                    )
+                                )
+        self.assertEqual(snapshot.get("venue"), "mt5")
+
     def test_build_guardian_snapshot_preserves_armed_reason_for_weak_persistence(self) -> None:
         ticks = [
             Tick(symbol="R_100", epoch=1, price=459.58),
@@ -1431,6 +1533,8 @@ class LiveSnapshotAnalysisTests(unittest.TestCase):
 
         role_candles = captured["role_candles"]
         assert isinstance(role_candles, dict)
+        # `candles=` and `role_candles["execution"]` must still be the SAME
+        # object (both are the bounded execution window now).
         self.assertIs(captured["candles"], role_candles["execution"])
         self.assertEqual(role_candles["bias"][-1].timeframe_sec, profile.bias_timeframe_sec)
         self.assertEqual(role_candles["setup"][-1].timeframe_sec, profile.setup_timeframe_sec)
@@ -1439,6 +1543,84 @@ class LiveSnapshotAnalysisTests(unittest.TestCase):
             profile.confirmation_timeframe_sec,
         )
         self.assertEqual(role_candles["execution"][-1].timeframe_sec, profile.execution_timeframe_sec)
+
+    def test_analyze_live_snapshot_bounds_history_to_max_feature_history(self) -> None:
+        """Long sessions must not rescan the full growing history (O(n²) guard)."""
+        config = TraderConfig.default()
+        # 5000 ticks at 60s spacing -> 5000 primary (60s) candles and 1000
+        # execution-role (300s) candles — both exceed MAX_FEATURE_HISTORY.
+        # The 900s confirmation role only yields ~334 candles (< the bound).
+        ticks = [
+            Tick(symbol="R_75", epoch=float(index * 60), price=100.0 + index * 0.1)
+            for index in range(5000)
+        ]
+        captured: dict[str, object] = {}
+        feature_snapshot = FeatureSnapshot(
+            symbol="R_75",
+            epoch=ticks[-1].epoch,
+            timeframe_sec=60,
+            features={"atr_14": 1.0},
+            regime=Regime.TREND_UP,
+            structure={"bos_up": 1.0},
+            notes=("execution snapshot",),
+        )
+
+        class _CapturingDecisionEngine:
+            def __init__(self, config, model=None) -> None:
+                self.model = SimpleNamespace(predict_proba=lambda features: 0.5)
+
+            def evaluate(
+                self,
+                symbol: str,
+                candles,
+                higher_timeframe_candles=None,
+                role_candles=None,
+                **kwargs,
+            ) -> DecisionReport:
+                captured["candles"] = candles
+                captured["role_candles"] = role_candles
+                return DecisionReport(
+                    signal=None,
+                    reasons=(
+                        "confidence 0.400 below threshold 0.580",
+                        "model long probability 0.500",
+                    ),
+                )
+
+            def save_state(self, path: Path) -> None:
+                pass
+
+            def load_state(self, path: Path) -> bool:
+                return False
+
+        with patch(
+            "synthetic_trader.live.market_snapshot.build_snapshot",
+            return_value=feature_snapshot,
+        ) as build_snapshot:
+            with patch(
+                "synthetic_trader.live.market_snapshot.DecisionEngine",
+                _CapturingDecisionEngine,
+            ):
+                analyze_live_snapshot(
+                    symbol="R_75",
+                    ticks=ticks,
+                    timeframe_sec=60,
+                    higher_timeframe_sec=300,
+                    config=config,
+                )
+
+        # Feature pipeline gets the bounded tail too.
+        self.assertEqual(len(build_snapshot.call_args.kwargs["candles"]), MAX_FEATURE_HISTORY)
+        self.assertEqual(len(build_snapshot.call_args.kwargs["higher_timeframe_candles"]), MAX_FEATURE_HISTORY)
+        # Decision engine gets the bounded tail, ending at the newest candle.
+        # `candles=` resolves to the execution ROLE window, the same object as
+        # role_candles["execution"].
+        execution_tf = config.symbols["R_75"].execution_timeframe_sec
+        self.assertEqual(len(captured["candles"]), MAX_FEATURE_HISTORY)
+        self.assertEqual(len(captured["role_candles"]["execution"]), MAX_FEATURE_HISTORY)
+        self.assertLess(len(captured["role_candles"]["confirmation"]), MAX_FEATURE_HISTORY)
+        self.assertEqual(captured["candles"][-1].timeframe_sec, execution_tf)
+        self.assertIs(captured["candles"], captured["role_candles"]["execution"])
 
 
 class LiveSnapshotRenderTests(unittest.TestCase):
@@ -1648,6 +1830,7 @@ class LiveWatchLoopTests(unittest.TestCase):
                             timeframe_sec=60,
                             higher_timeframe_sec=300,
                             journal_path=str(_JOURNAL_DIR / "test_live_watch.jsonl"),
+                            calls_journal_path=str(_JOURNAL_DIR / "test_live_watch_calls.jsonl"),
                             max_alerts=1,
                         )
                     )
@@ -1676,6 +1859,7 @@ class LiveWatchLoopTests(unittest.TestCase):
                             timeframe_sec=60,
                             higher_timeframe_sec=300,
                             journal_path=str(_JOURNAL_DIR / "test_live_watch.jsonl"),
+                            calls_journal_path=str(_JOURNAL_DIR / "calls_test_live_watch.jsonl"),
                             max_minutes=2,
                         )
                     )
@@ -1705,6 +1889,7 @@ class LiveWatchLoopTests(unittest.TestCase):
                             timeframe_sec=60,
                             higher_timeframe_sec=300,
                             journal_path=str(_JOURNAL_DIR / "test_live_watch.jsonl"),
+                            calls_journal_path=str(_JOURNAL_DIR / "calls_test_live_watch.jsonl"),
                             emit_initial=True,
                             max_alerts=1,
                         )
@@ -1713,6 +1898,47 @@ class LiveWatchLoopTests(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0]["call"], "stand_aside")
         self.assertIn("current movement is active", str(alerts[0]["why"]))
+
+    def test_run_live_watch_survives_mt5_down_baseline_no_fallback(self) -> None:
+        """When MT5 is configured but the terminal is down, the collectors
+        raise (no Deriv fallback).  The watch must NOT crash: it starts with
+        an honest stand-aside baseline, journals a transport record, and the
+        reconnect machinery takes over."""
+
+        async def boom(**kwargs):
+            raise RuntimeError("terminal not running")
+
+        with patch(
+            "synthetic_trader.live.market_snapshot.collect_live_snapshot_ticks",
+            side_effect=boom,
+        ):
+            with patch(
+                "synthetic_trader.live.market_snapshot.watch_live_ticks",
+                side_effect=boom,
+            ):
+                with patch(
+                    "synthetic_trader.live.market_snapshot.Mt5TickClient",
+                ):
+                    alerts = asyncio.run(
+                        run_live_watch(
+                            symbol="R_75",
+                            warmup_count=0,
+                            timeframe_sec=60,
+                            higher_timeframe_sec=300,
+                            journal_path=str(_JOURNAL_DIR / "test_live_watch_mt5down.jsonl"),
+                            calls_journal_path=str(_JOURNAL_DIR / "calls_test_live_watch_mt5down.jsonl"),
+                            emit_initial=True,
+                            max_alerts=1,
+                            max_reconnects=0,
+                            reconnect_backoff_sec=0,
+                        )
+                    )
+
+        # The watch did not crash: it emitted the honest stand-aside baseline.
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["call"], "stand_aside")
+        self.assertEqual(alerts[0]["venue"], "mt5")
+        self.assertIn("MT5 unavailable", str(alerts[0].get("briefing", "")))
 
     def test_run_live_watch_emits_setup_candidate_even_when_context_cooldown_is_active(self) -> None:
         ticks = [
@@ -1764,6 +1990,7 @@ class LiveWatchLoopTests(unittest.TestCase):
                             timeframe_sec=60,
                             higher_timeframe_sec=300,
                             journal_path=str(_JOURNAL_DIR / "test_live_watch_priority.jsonl"),
+                            calls_journal_path=str(_JOURNAL_DIR / "calls_test_live_watch_priority.jsonl"),
                             max_alerts=2,
                         )
                     )
@@ -1832,6 +2059,7 @@ class LiveWatchLoopTests(unittest.TestCase):
                             timeframe_sec=60,
                             higher_timeframe_sec=300,
                             journal_path=str(_JOURNAL_DIR / "test_live_watch_context_cooldown.jsonl"),
+                            calls_journal_path=str(_JOURNAL_DIR / "calls_test_live_watch_context_cooldown.jsonl"),
                             max_alerts=2,
                         )
                     )
@@ -2025,8 +2253,148 @@ class LiveWatchLoopTests(unittest.TestCase):
         self.assertEqual(journal_records[-1]["record_type"], "watch_transport")
         self.assertEqual(journal_records[-1]["event"], "reconnect_failed")
 
+    def test_run_live_watch_auto_score_sweeps_journal_and_writes_status(self) -> None:
+        """With auto_score_interval_sec set, the watch sweeps the calls journal
+        at least once (start) and again on exit, and writes the status file."""
+        baseline_snapshot = {
+            "call": "stand_aside",
+            "trade_status": "not_valid",
+            "direction_bias": "none",
+            "regime": "range",
+            "confidence": 0.52,
+            "wait_for": "wait for clearer structure",
+            "symbol": "R_75",
+        }
+        journal_path = _JOURNAL_DIR / "test_live_watch_auto_score.jsonl"
+        status_path = _JOURNAL_DIR / "test_live_watch_auto_score_status.json"
+        if journal_path.exists():
+            journal_path.unlink()
+        if status_path.exists():
+            status_path.unlink()
+
+        sweeps: list[dict] = []
+
+        def fake_sweep(calls_path, outcomes_path, symbol, window_minutes, app_id, **kwargs):
+            sweeps.append({"symbol": symbol})
+            # Mirror the real sweep_once: write the status telemetry file.
+            status_path = Path(kwargs.get("status_path"))
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(
+                json.dumps({"updated_at": 1, "symbols": {"ALL": {"calls_scored": 0}}}),
+                encoding="utf-8",
+            )
+            return SimpleNamespace(
+                symbol="ALL",
+                calls_scored=0,
+                calls_failed=0,
+                calls_skipped=0,
+                calls_pending=0,
+                error=None,
+            )
+
+        with patch("synthetic_trader.live.market_snapshot.collect_live_snapshot_ticks", return_value=[]):
+            with patch("synthetic_trader.live.market_snapshot.analyze_live_snapshot", return_value=baseline_snapshot):
+                with patch("synthetic_trader.live.market_snapshot.watch_live_ticks", return_value=[]):
+                    with patch(
+                        "synthetic_trader.live.market_snapshot.sweep_once",
+                        side_effect=fake_sweep,
+                    ):
+                        asyncio.run(
+                            run_live_watch(
+                                symbol="R_75",
+                                warmup_count=0,
+                                timeframe_sec=60,
+                                higher_timeframe_sec=300,
+                                journal_path=str(journal_path),
+                                calls_journal_path=str(_JOURNAL_DIR / "test_live_watch_auto_score_calls.jsonl"),
+                                auto_score_interval_sec=0.01,
+                                auto_score_status_path=str(status_path),
+                            )
+                        )
+
+        # Periodic sweep (background task) + unconditional final sweep on exit.
+        self.assertGreaterEqual(len(sweeps), 2, sweeps)
+        self.assertTrue(status_path.exists(), "auto-scorer status file must be written")
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertIn("symbols", status)
+        self.assertIn("updated_at", status)
+
+    def test_run_live_watch_auto_score_disabled_by_default(self) -> None:
+        """Without auto_score_interval_sec, no sweep runs and no status file is
+        written — the flag is opt-in."""
+        baseline_snapshot = {
+            "call": "stand_aside",
+            "trade_status": "not_valid",
+            "direction_bias": "none",
+            "regime": "range",
+            "confidence": 0.52,
+            "wait_for": "wait for clearer structure",
+            "symbol": "R_75",
+        }
+        journal_path = _JOURNAL_DIR / "test_live_watch_auto_score_off.jsonl"
+        status_path = _JOURNAL_DIR / "test_live_watch_auto_score_off_status.json"
+        if journal_path.exists():
+            journal_path.unlink()
+        if status_path.exists():
+            status_path.unlink()
+
+        sweeps: list[dict] = []
+
+        def fake_sweep(calls_path, outcomes_path, symbol, window_minutes, app_id, **kwargs):
+            sweeps.append({"symbol": symbol})
+            return SimpleNamespace(
+                symbol="ALL",
+                calls_scored=0,
+                calls_failed=0,
+                calls_skipped=0,
+                calls_pending=0,
+                error=None,
+            )
+
+        with patch("synthetic_trader.live.market_snapshot.collect_live_snapshot_ticks", return_value=[]):
+            with patch("synthetic_trader.live.market_snapshot.analyze_live_snapshot", return_value=baseline_snapshot):
+                with patch("synthetic_trader.live.market_snapshot.watch_live_ticks", return_value=[]):
+                    with patch(
+                        "synthetic_trader.live.market_snapshot.sweep_once",
+                        side_effect=fake_sweep,
+                    ):
+                        asyncio.run(
+                            run_live_watch(
+                                symbol="R_75",
+                                warmup_count=0,
+                                timeframe_sec=60,
+                                higher_timeframe_sec=300,
+                                journal_path=str(journal_path),
+                                calls_journal_path=str(_JOURNAL_DIR / "test_live_watch_auto_score_off_calls.jsonl"),
+                            )
+                        )
+
+        self.assertEqual(sweeps, [])
+        self.assertFalse(status_path.exists())
+
 
 class LiveWatchRenderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # build_watch_alert / build_watch_alert_from_prepared_state now apply
+        # the Stage-3 gate, which reads DEFAULT_OUTCOMES_PATH on every call.
+        # Pin those defaults to absent temp paths so these tests stay
+        # deterministic: once the live auto-scorer populates the real
+        # journals/live_calibration_outcomes.jsonl, unpinned tests would
+        # start flipping on real scored data.  The suppression test below
+        # overrides with its own patch, which nests correctly.
+        self._outcomes_patcher = patch(
+            "synthetic_trader.live.stage3_gate.DEFAULT_OUTCOMES_PATH",
+            Path(_JOURNAL_DIR) / "stage3_outcomes.jsonl",
+        )
+        self._verdict_patcher = patch(
+            "synthetic_trader.live.stage3_gate.DEFAULT_VERDICT_CACHE_PATH",
+            Path(_JOURNAL_DIR) / "stage3_verdicts.json",
+        )
+        self._outcomes_patcher.start()
+        self._verdict_patcher.start()
+        self.addCleanup(self._outcomes_patcher.stop)
+        self.addCleanup(self._verdict_patcher.stop)
+
     def test_build_watch_alert_from_prepared_state_preserves_actionable_levels(self) -> None:
         prepared = PreparedSymbolState(
             symbol="R_100",
@@ -2054,6 +2422,78 @@ class LiveWatchRenderTests(unittest.TestCase):
         self.assertEqual(alert["guardian_state"], "actionable")
         self.assertEqual(alert["entry"], 51234.6)
         self.assertEqual(alert["call_age_seconds"], 2)
+
+    def test_build_watch_alert_from_prepared_state_applies_stage3_suppression(self) -> None:
+        """The prepared-state builder must apply the Stage-3 gate too, so no
+        emission path can bypass suppression of a market-failing call type.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            outcomes = Path(td) / "outcomes.jsonl"
+            # PreparedSymbolState carries no trigger-type field, so the gate
+            # resolves the alert's trigger to "unknown" on this path — the
+            # journal is keyed the same way the builder will look it up.
+            with outcomes.open("w", encoding="utf-8") as handle:
+                for _ in range(10):  # 10 scored outcomes, all stop hits -> 0% hit rate
+                    handle.write(
+                        json.dumps(
+                            {
+                                "symbol": "R_100",
+                                "trigger_type": "unknown",
+                                "trade_status": "valid",
+                                "outcome_label": "stop_hit",
+                                "entry": 51234.6,
+                                "execution_stop": 51188.2,
+                                "primary_target": 51326.4,
+                                "max_favorable_excursion": 2.0,
+                                "max_adverse_excursion": 8.0,
+                            }
+                        )
+                        + "\n"
+                    )
+            verdicts = Path(td) / "forecast_verdicts.jsonl"
+            verdicts.write_text(
+                json.dumps(
+                    {
+                        "R_100": {
+                            "4h": {"verdict": "calibrated", "windows": 40, "coverage_p50": 0.5, "coverage_p90": 0.9},
+                            "6h": {"verdict": "calibrated", "windows": 40, "coverage_p50": 0.5, "coverage_p90": 0.9},
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            prepared = PreparedSymbolState(
+                symbol="R_100",
+                call="buy_candidate",
+                state="actionable",
+                confidence=0.64,
+                regime="trend_up",
+                market_thesis="buyers reclaimed the pullback shelf",
+                entry_area="around 51234.6",
+                entry=51234.6,
+                stop_area="below 51188.2",
+                stop_loss=51188.2,
+                target_area="toward 51326.4",
+                take_profit=51326.4,
+                reward_risk=2.0,
+                invalidates_if="price closes back below the reclaimed shelf",
+                next_trigger="another bullish continuation close",
+                current_close=51240.1,
+                call_age_seconds=2,
+                generated_at="2026-07-11T22:00:00.000Z",
+            )
+            with patch(
+                "synthetic_trader.live.stage3_gate.DEFAULT_OUTCOMES_PATH", outcomes
+            ), patch(
+                "synthetic_trader.live.stage3_gate.DEFAULT_VERDICT_CACHE_PATH", verdicts
+            ):
+                alert = build_watch_alert_from_prepared_state(prepared)
+
+        self.assertEqual(alert["call"], "stand_aside")  # suppressed, not surfaced
+        self.assertEqual(alert["stage3"]["state"], "suppressed")
+        self.assertEqual(alert["stage3"]["suppressed_call"], "buy_candidate")
 
     def test_build_watch_alert_marks_valid_setup_as_setup_candidate(self) -> None:
         alert = build_watch_alert(
@@ -2329,6 +2769,86 @@ class LiveWatchRenderTests(unittest.TestCase):
         self.assertIn("stop_loss=48880.0", rendered)
         self.assertIn("take_profit=48954.08", rendered)
         self.assertIn("reward_risk=1.9", rendered)
+
+
+class BackfillCorpusMergeTests(unittest.TestCase):
+    """_load_csv_ticks must merge the continuous data/backfill corpus with
+    the (gappy) live CSV so analysis always has enough candle history."""
+
+    def setUp(self) -> None:
+        import synthetic_trader.live.market_snapshot as ms
+
+        self._ms = ms
+        self._old_cwd = Path.cwd()
+        self._tmp = Path(tempfile.mkdtemp(prefix="mitems-backfill-merge-"))
+        (self._tmp / "data" / "backfill").mkdir(parents=True)
+        os.chdir(self._tmp)
+        ms._csv_tick_cache.clear()
+
+    def tearDown(self) -> None:
+        os.chdir(self._old_cwd)
+        self._ms._csv_tick_cache.clear()
+
+    def _write_live_csv(self, ticks: list[Tick]) -> None:
+        from synthetic_trader.data.tick_store import write_ticks_csv
+
+        write_ticks_csv(Path("data/R_75_ticks.csv"), ticks)
+
+    def _write_backfill_csv(self, ticks: list[Tick]) -> None:
+        from synthetic_trader.data.tick_store import write_ticks_csv
+
+        write_ticks_csv(Path("data/backfill/R_75_ticks.csv"), ticks)
+
+    def test_merges_backfill_corpus_with_live_csv(self) -> None:
+        now = time.time()
+        # Gappy live CSV: only the last 2 hours (bursts from on-demand reads).
+        live = [Tick("R_75", now - i * 60, 1700.0 + i * 0.1) for i in range(120)]
+        # Continuous 7-day corpus ending 2h ago — overlaps nothing in live.
+        backfill = [
+            Tick("R_75", now - 2 * 3600 - i * 60, 1600.0 + i * 0.1)
+            for i in range(1440)
+        ]
+        self._write_backfill_csv(backfill)
+        self._write_live_csv(live)
+
+        ticks = self._ms._load_csv_ticks("R_75")
+
+        self.assertIsNotNone(ticks)
+        # Both sources present: backfill contributes ~22h (the 24h age filter
+        # clips its oldest 2h), live brings the tail.  Without the merge this
+        # would be only the 2h of live bursts.
+        spans = (ticks[-1].epoch - ticks[0].epoch) / 3600
+        self.assertGreater(spans, 20)
+        self.assertGreater(len(ticks), len(live))
+        # Sorted ascending, no duplicates by epoch.
+        epochs = [t.epoch for t in ticks]
+        self.assertEqual(epochs, sorted(epochs))
+        self.assertEqual(len(set(epochs)), len(epochs))
+
+    def test_live_csv_wins_epoch_ties_with_backfill(self) -> None:
+        now = time.time()
+        shared_epoch = now - 3600
+        live = [Tick("R_75", shared_epoch, 1710.0), Tick("R_75", now, 1720.0)]
+        backfill = [Tick("R_75", shared_epoch, 1600.0)]
+        self._write_backfill_csv(backfill)
+        self._write_live_csv(live)
+
+        ticks = self._ms._load_csv_ticks("R_75")
+
+        self.assertIsNotNone(ticks)
+        tie_rows = [t for t in ticks if t.epoch == shared_epoch]
+        self.assertEqual(len(tie_rows), 1)
+        self.assertEqual(tie_rows[0].price, 1710.0)  # live price wins
+
+    def test_no_backfill_returns_live_only(self) -> None:
+        now = time.time()
+        live = [Tick("R_75", now - i * 60, 1700.0 + i * 0.1) for i in range(60)]
+        self._write_live_csv(live)
+
+        ticks = self._ms._load_csv_ticks("R_75")
+
+        self.assertIsNotNone(ticks)
+        self.assertLessEqual(len(ticks), len(live))
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ class ExperienceReplayBuffer:
 
     Parameters
     ----------        capacity : int
-        Maximum number of entries to retain (default 500).
+        Maximum number of entries to retain (default 10,000).
         Old entries are automatically pruned via reservoir sampling
         when this limit is reached, preventing unbounded growth
         during long-running sessions.
@@ -41,7 +41,7 @@ class ExperienceReplayBuffer:
 
     def __init__(
         self,
-        capacity: int = 500,
+        capacity: int = 10_000,
         mini_batch_size: int = 16,
         replay_ratio: float = 0.2,
     ) -> None:
@@ -80,10 +80,14 @@ class ExperienceReplayBuffer:
     def replay_updates(self, model: object, n_steps: int | None = None) -> int:
         """Replay mini-batches through the model's ``update`` method.
 
+        Replayed samples never feed the model's drift detector: they
+        belong to an older regime and would corrupt drift detection.
+
         Parameters
         ----------
         model : OnlineLogisticModel
-            The model to replay against.  Must have an ``update(features, label, sample_weight)`` method.
+            The model to replay against.  Must have an
+            ``update(features, label, sample_weight, *, observe_drift)`` method.
         n_steps : int | None
             Number of mini-batches to replay.  Each mini-batch contains up to
             ``mini_batch_size`` samples.  If *None*, computed as
@@ -104,7 +108,9 @@ class ExperienceReplayBuffer:
         for _ in range(n_steps):
             batch = self.sample_mini_batch()
             for entry in batch:
-                model.update(entry.features, entry.label, entry.sample_weight)
+                model.update(
+                    entry.features, entry.label, entry.sample_weight, observe_drift=False
+                )
                 steps_done += 1
 
         return steps_done
@@ -133,7 +139,7 @@ class ExperienceReplayBuffer:
         a partially-corrupt state file still yields a usable buffer.
         """
         # ── Validate top-level fields ───────────────────────────
-        capacity = cls._validate_positive_int(data.get("capacity"), "capacity", default=500)
+        capacity = cls._validate_positive_int(data.get("capacity"), "capacity", default=10_000)
         mini_batch_size = cls._validate_positive_int(data.get("mini_batch_size"), "mini_batch_size", default=16)
         replay_ratio = cls._validate_float_range(data.get("replay_ratio"), "replay_ratio", 0.0, 1.0, default=0.2)
         seen = cls._validate_non_negative_int(data.get("seen"), "seen", default=0)

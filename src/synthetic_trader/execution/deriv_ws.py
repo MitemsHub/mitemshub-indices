@@ -161,6 +161,58 @@ class DerivWebSocketClient:
         prices = history.get("prices", [])
         return [Tick(symbol=symbol, epoch=float(epoch), price=float(price)) for epoch, price in zip(times, prices)]
 
+    async def candles_history(
+        self,
+        symbol: str,
+        count: int = 5000,
+        end: str | int = "latest",
+        granularity: int = 60,
+    ) -> list[dict[str, float]]:
+        """Fetch historical OHLC candles for a symbol.
+
+        Unlike tick-style history (which only serves a rolling ~5000-tick
+        buffer and ignores the ``end`` parameter), candle-style history pages
+        back for days/weeks via ``end``. This is the only reliable way to
+        reconstruct multi-day market history from the Deriv API.
+
+        Returns a list of ``{"epoch", "open", "high", "low", "close"}`` dicts
+        ordered newest-first (as served by the API).
+        """
+        api_symbol = _deriv_api_symbol(symbol)
+        payload: dict[str, Any] = {
+            "ticks_history": api_symbol,
+            "count": count,
+            "end": end,
+            "style": "candles",
+            "granularity": granularity,
+        }
+        response = await self.request(payload)
+        candles = response.get("candles", [])
+        result: list[dict[str, float]] = []
+        for candle in candles:
+            if isinstance(candle, dict):
+                result.append(
+                    {
+                        "epoch": float(candle["epoch"]),
+                        "open": float(candle["open"]),
+                        "high": float(candle["high"]),
+                        "low": float(candle["low"]),
+                        "close": float(candle["close"]),
+                    }
+                )
+            else:
+                # Some API versions return arrays [epoch, open, high, low, close]
+                result.append(
+                    {
+                        "epoch": float(candle[0]),
+                        "open": float(candle[1]),
+                        "high": float(candle[2]),
+                        "low": float(candle[3]),
+                        "close": float(candle[4]),
+                    }
+                )
+        return result
+
     async def subscribe_ticks(self, symbol: str, timeout: float = 20.0) -> AsyncIterator[Tick]:
         if self._socket is None:
             raise RuntimeError("client is not connected")

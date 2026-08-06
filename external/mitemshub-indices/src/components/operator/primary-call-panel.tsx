@@ -33,6 +33,201 @@ function GuardianBadge({ state }: { state: FreshCallResponse["guardian_state"] }
   return <span className={`status-badge ${cls}`}>{formatGuardianState(state as GuardianState)}</span>;
 }
 
+function VenueBadge({ venue }: { venue: NonNullable<FreshCallResponse["venue"]> }) {
+  if (venue === "mt5") {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded-full border border-[var(--accent-success)]/40 bg-[var(--accent-success-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--accent-success)]"
+        title="Levels are on the Blueberry SYN price scale"
+      >
+        MT5 venue
+      </span>
+    );
+  }
+  if (venue === "deriv") {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded-full border border-[var(--accent-warn)]/40 bg-[var(--accent-warn-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--accent-warn)]"
+        title="Deriv 1HZ scale — levels are NOT comparable to the Blueberry SYN platform"
+      >
+        Deriv scale
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border border-[var(--accent-muted)]/40 bg-[var(--accent-muted-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--text-muted)]"
+      title="Levels come from the local CSV corpus"
+    >
+      CSV venue
+    </span>
+  );
+}
+
+function Stage3Verification({ block }: { block: NonNullable<FreshCallResponse["stage3"]> }) {
+  // suppress mode actually holds the call type back (downgraded to stand_aside).
+  const suppressed = block.state === "suppressed";
+  // annotate mode: the evidence is below the floor (evidence_status=suppressed)
+  // but the call is still emitted with its honest rate — the operator chose to
+  // watch the failing type rather than hold it back.
+  const belowFloorAnnotated =
+    block.state === "annotated" && block.evidence_status === "suppressed";
+  const gated = block.state === "gated";
+  const annotated = block.state === "annotated" && !belowFloorAnnotated;
+  const stillLearning = block.evidence_status === "still_learning";
+  const noData = block.evidence_status === "no_data";
+  const stateClass = suppressed
+    ? "bg-[var(--accent-danger)]/10 text-[var(--accent-danger)] border border-[var(--accent-danger)]/25"
+    : belowFloorAnnotated
+      ? "bg-[var(--accent-warn)]/10 text-[var(--accent-warn)] border border-[var(--accent-warn)]/25"
+      : gated
+        ? "bg-[var(--accent-positive)]/10 text-[var(--accent-positive)] border border-[var(--accent-positive)]/25"
+        : stillLearning
+          ? "bg-[var(--accent-info)]/10 text-[var(--accent-info)] border border-[var(--accent-info)]/25"
+          : annotated
+            ? "bg-[var(--accent-warn)]/10 text-[var(--accent-warn)] border border-[var(--accent-warn)]/25"
+            : noData
+              ? "bg-[var(--line-subtle)]/40 text-[var(--text-muted)] border border-[var(--line-subtle)]"
+              : "bg-[var(--accent-warn)]/10 text-[var(--accent-warn)] border border-[var(--accent-warn)]/25";
+  const stateLabel = suppressed
+    ? "Suppressed"
+    : belowFloorAnnotated
+      ? "Below verified floor"
+      : gated
+        ? "Proven"
+        : stillLearning
+          ? "Still learning"
+          : annotated
+            ? "Proven — horizon pending"
+            : noData
+              ? "Unverified"
+              : "Empirical";
+  const stateDot = suppressed
+    ? "bg-[var(--accent-danger)]"
+    : belowFloorAnnotated
+      ? "bg-[var(--accent-warn)]"
+      : gated
+        ? "bg-[var(--accent-positive)]"
+        : stillLearning
+          ? "bg-[var(--accent-info)]"
+          : annotated
+            ? "bg-[var(--accent-warn)]"
+            : "bg-[var(--text-muted)]";
+  const sampleCopy =
+    block.empirical_sample_count > 0 && stillLearning
+      ? `${block.empirical_sample_count}/${block.min_samples ?? 10} scored`
+      : block.empirical_sample_count > 0
+        ? `${block.empirical_sample_count} scored`
+        : "no outcomes yet";
+
+  return (
+    <div className={`mt-3 rounded-lg border px-3 py-2.5 ${suppressed ? "border-[var(--accent-danger)]/30 bg-[var(--accent-danger)]/5" : belowFloorAnnotated ? "border-[var(--accent-warn)]/30 bg-[var(--accent-warn)]/5" : "border-[var(--line-subtle)] bg-[var(--bg-panel-muted)]"}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${stateClass}`}>
+          <span className={`inline-block w-1.5 h-1.5 rounded-full ${stateDot}`} aria-hidden="true" />
+          {stateLabel}
+        </span>
+        {block.empirical_target_hit_rate !== null && block.empirical_target_hit_rate !== undefined && (
+          <span className="text-xs font-semibold text-[var(--text-strong)]">
+            {formatConfidence(block.empirical_target_hit_rate)} hit rate
+            <span className="ml-1 text-[10px] font-normal text-[var(--text-muted)]">({sampleCopy})</span>
+          </span>
+        )}
+        {(block.empirical_target_hit_rate === null || block.empirical_target_hit_rate === undefined) && (
+          <span className="text-[11px] text-[var(--text-muted)]">({sampleCopy})</span>
+        )}
+        <span className="text-[11px] font-mono text-[var(--text-muted)]">{block.trigger_type}</span>
+        {block.hit_rate_floor !== undefined && block.hit_rate_floor > 0 && (
+          <span className="text-[11px] text-[var(--text-muted)]">floor {formatConfidence(block.hit_rate_floor)}</span>
+        )}
+        {block.suppression_mode !== undefined && (
+          <span className="text-[11px] font-mono text-[var(--text-muted)]">
+            mode: {block.suppression_mode === "annotate" ? "annotate" : "suppress"}
+          </span>
+        )}
+        {block.proven_only === true && (
+          <span
+            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+              block.execution_allowed === false
+                ? "bg-[var(--accent-info)]/10 text-[var(--accent-info)] border border-[var(--accent-info)]/25"
+                : "bg-[var(--accent-positive)]/10 text-[var(--accent-positive)] border border-[var(--accent-positive)]/25"
+            }`}
+            title="SYNTH_GATE_PROVEN_ONLY — only market-proven call types may execute live"
+          >
+            proven-only {block.execution_allowed === false ? "· held paper" : "· ok"}
+          </span>
+        )}
+        {block.horizon_verdict && (
+          <span className={`text-[11px] font-medium ${block.horizon_verdict === "calibrated" ? "text-[var(--accent-positive)]" : "text-[var(--accent-warn)]"}`}>
+            horizon: {block.horizon_verdict === "calibrated" ? "calibrated" : block.horizon_verdict}
+          </span>
+        )}
+        {block.p50_mult !== null && block.p50_mult !== undefined && (
+          <span className="text-[11px] font-mono text-[var(--text-muted)]" title="Calibrated 60s range multipliers (tune-bands output)">
+            bands ×{block.p50_mult.toFixed(2)}/×{block.p90_mult != null ? block.p90_mult.toFixed(2) : "—"}
+          </span>
+        )}
+      </div>
+      {(() => {
+        const fourH = block.horizon_forecast?.["4h"];
+        const forecast = fourH?.forecast;
+        if (!forecast || forecast.range_p50_price == null || forecast.current_close == null) return null;
+        // Honest label: only call the bands "calibrated" when the walk-forward
+        // verdict for this horizon is calibrated — otherwise they are prior-based
+        // (no tuned multipliers on disk) and must not be oversold.
+        const calibrated = fourH?.verdict === "calibrated";
+        const p50Pct = ((forecast.range_p50_price / forecast.current_close) * 100) / 2;
+        const p90Pct =
+          forecast.range_p90_price != null ? ((forecast.range_p90_price / forecast.current_close) * 100) / 2 : null;
+        return (
+          <p className="mt-1.5 text-[11px] leading-5 text-[var(--text-muted)]">
+            {calibrated ? "Calibrated 4h vol bands" : "4h vol bands (uncalibrated)"}: p50 ±{p50Pct.toFixed(1)}% ·
+            {p90Pct != null ? ` p90 ±${p90Pct.toFixed(1)}%` : " p90 —"}
+            {forecast.expected_low_p50 != null && forecast.expected_high_p50 != null
+              ? ` (${formatPrice(forecast.expected_low_p50)} – ${formatPrice(forecast.expected_high_p50)})`
+              : ""}
+          </p>
+        );
+      })()}
+      {suppressed && block.suppressed_call ? (
+        <p className="mt-1.5 text-[11px] leading-5 text-[var(--accent-danger)]">
+          {block.suppressed_call} calls are held back — this setup type is below the verified floor.
+        </p>
+      ) : null}
+      {belowFloorAnnotated ? (
+        <p className="mt-1.5 text-[11px] leading-5 text-[var(--accent-warn)]">
+          Below the verified floor — suppression mode is {block.suppression_mode === "annotate" ? "annotate, so this type is still shown" : "suppress"}. Set SYNTH_GATE_SUPPRESSION_MODE=suppress to hold it back.
+        </p>
+      ) : null}
+      {block.sizing ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span
+            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+              block.sizing.level === "full"
+                ? "bg-[var(--accent-positive)]/10 text-[var(--accent-positive)] border border-[var(--accent-positive)]/25"
+                : block.sizing.level === "half"
+                  ? "bg-[var(--accent-warn)]/10 text-[var(--accent-warn)] border border-[var(--accent-warn)]/25"
+                  : block.sizing.level === "paper_only"
+                    ? "bg-[var(--accent-info)]/10 text-[var(--accent-info)] border border-[var(--accent-info)]/25"
+                    : "bg-[var(--accent-danger)]/10 text-[var(--accent-danger)] border border-[var(--accent-danger)]/25"
+            }`}
+          >
+            {block.sizing.level === "full"
+              ? "Full size"
+              : block.sizing.level === "half"
+                ? "Half size"
+                : block.sizing.level === "paper_only"
+                  ? "Paper only"
+                  : "Held back"}
+          </span>
+          <span className="text-[11px] leading-5 text-[var(--text-body)]">{block.sizing.reason}</span>
+        </div>
+      ) : null}
+      {block.note ? <p className="mt-1.5 text-[11px] leading-5 text-[var(--text-body)]">{block.note}</p> : null}
+    </div>
+  );
+}
+
 function DirectionIndicator({ direction }: { direction: string | null }) {
   if (!direction) return null;
   const isBuy = direction === "buy";
@@ -89,7 +284,14 @@ export function PrimaryCallPanel({
             <GuardianBadge state={guardianState ?? "unavailable"} />
             {call.confidence !== null && call.confidence !== undefined && (
               <span className="info-chip rounded-full px-2.5 py-0.5 text-xs font-medium">
-                Confidence&nbsp;{formatConfidence(call.confidence)}
+                {call.stage3?.state === "gated"
+                  ? "Verified&nbsp;"
+                  : call.stage3?.state === "annotated"
+                    ? "Empirical&nbsp;"
+                    : call.stage3?.state === "suppressed"
+                      ? "Suppressed&nbsp;"
+                      : "Confidence&nbsp;"}
+                {formatConfidence(call.confidence)}
               </span>
             )}
             {(call.direction_bias === "buy" || call.direction_bias === "sell") && (
@@ -108,7 +310,11 @@ export function PrimaryCallPanel({
             {call.reward_risk !== null && (
               <span>R:R {call.reward_risk.toFixed(1)}</span>
             )}
+            {call.venue && <VenueBadge venue={call.venue} />}
           </div>
+
+          {/* Stage-3 empirical verification strip */}
+          {call.stage3 && <Stage3Verification block={call.stage3} />}
 
           {/* Detail cards */}
           <div className="mt-4 grid gap-4 md:grid-cols-3">
@@ -160,7 +366,13 @@ export function PrimaryCallPanel({
                       <polyline points="23 4 23 10 17 10" />
                       <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
                     </svg>
-                    {retryLabel ?? "Reconnect & re-read"}
+                    {/* An unavailable read means something failed ("re-read" is
+                        honest).  A forming setup is normal market state — the
+                        engine is connected and working, so the button just
+                        refreshes the plan rather than implying a failure. */}
+                    {guardianState === "unavailable"
+                      ? (retryLabel ?? "Reconnect & re-read")
+                      : "Refresh plan"}
                   </button>
                 </div>
               )}
@@ -191,6 +403,23 @@ export function PrimaryCallPanel({
             </div>
           )}
         </>
+      ) : loading ? (
+        <div className="mt-6 flex flex-col items-center gap-4 py-10 text-center">
+          <div
+            className="h-9 w-9 animate-spin rounded-full border-2 border-[var(--line-subtle)] border-t-[var(--accent-ink)]"
+            role="status"
+            aria-label="Analyzing the market"
+          />
+          <div className="max-w-md">
+            <p className="text-sm font-medium leading-6 text-[var(--text-strong)]">
+              Analyzing the market — building your trade plan…
+            </p>
+            <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
+              Reading live MT5 ticks, running the strategy engines, and calibrating the
+              4–6 hour volatility horizon. This takes a few seconds.
+            </p>
+          </div>
+        </div>
       ) : (
         <div className="mt-6 flex flex-col items-center gap-4 py-8 text-center">
           <div className="pulse-dot pulse-dot--muted" aria-hidden="true" />

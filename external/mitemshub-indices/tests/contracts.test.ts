@@ -5,7 +5,6 @@ import {
   guardianStateSchema,
   propComplianceSchema,
 } from "../src/lib/contracts";
-import { latestMockCall } from "../src/lib/mock-data";
 
 describe("contracts", () => {
   it("accepts a fresh call response with prop compliance fields", () => {
@@ -188,8 +187,32 @@ describe("contracts", () => {
   });
 
   it("keeps mock call fixtures aligned with the current contract", () => {
+    // Inline fixture (mock-data.ts was removed in the sniper-only refactor).
     const parsed = freshCallResponseSchema.parse({
-      ...latestMockCall("R_75"),
+      symbol: "R_75",
+      call: "buy_candidate",
+      alert_type: "setup_candidate",
+      trade_status: "valid",
+      confidence: 0.64,
+      regime: "trend_up",
+      direction_bias: "buy",
+      why: "4H and 1H structure align bullishly",
+      wait_for: "wait for a clean bullish continuation close",
+      decision_summary:
+        "4H bullish bias; 1H pullback held; 15m confirmed continuation",
+      invalidates_if: "price closes back below the defended 1H shelf",
+      entry_area: "around 53886.0",
+      stop_area: "below 53779.1",
+      target_area: "toward 54089.3",
+      entry: 53886.0,
+      stop_loss: 53779.1,
+      take_profit: 54089.3,
+      reward_risk: 1.9,
+      current_close: 53886.0,
+      guardian_state: "actionable",
+      guardian_reason:
+        "The setup is actionable, but live continuation still needs more persistence.",
+      generated_at: new Date().toISOString(),
       account_mode: "own_account",
       prop_compliance: null,
       prop_adjusted_risk: null,
@@ -199,5 +222,441 @@ describe("contracts", () => {
     });
 
     expect(parsed.guardian_state).toBe("actionable");
+  });
+
+  it("accepts a fresh call response with a stage3 empirical gate block", () => {
+    const result = freshCallResponseSchema.parse({
+      symbol: "R_75",
+      call: "buy_candidate",
+      alert_type: "setup_candidate",
+      trade_status: "valid",
+      confidence: 0.62,
+      regime: "range",
+      direction_bias: "buy",
+      why: "structure aligned",
+      wait_for: "wait for confirmation",
+      decision_summary: "buy setup ready",
+      entry_area: null,
+      stop_area: null,
+      target_area: null,
+      entry: 51234.6,
+      stop_loss: 51188.2,
+      take_profit: 51326.4,
+      reward_risk: 2,
+      current_close: 51240.1,
+      guardian_state: "actionable",
+      guardian_reason: "The setup is actionable.",
+      generated_at: "2026-07-12T12:00:00Z",
+      account_mode: "own_account",
+      prop_compliance: null,
+      prop_adjusted_risk: null,
+      prop_block_reason: null,
+      prop_remaining_daily_buffer: null,
+      prop_remaining_overall_buffer: null,
+      stage3: {
+        state: "gated",
+        evidence_status: "proven",
+        trigger_type: "continuation_close",
+        empirical_target_hit_rate: 0.62,
+        empirical_sample_count: 24,
+        empirical_stop_hit_rate: 0.29,
+        horizon_verdict: "calibrated",
+        horizon_verdict_4h: "calibrated",
+        horizon_verdict_6h: "calibrated",
+        model_confidence: 0.71,
+        display_confidence: 0.62,
+        min_samples: 10,
+        hit_rate_floor: 0.5,
+        suppression_mode: "suppress",
+        suppressed_call: null,
+        note: "24 scored outcomes; target-hit rate 62% clears 50% and the horizon verdict is calibrated.",
+      },
+    });
+
+    expect(result.stage3?.state).toBe("gated");
+    expect(result.stage3?.evidence_status).toBe("proven");
+    expect(result.stage3?.empirical_target_hit_rate).toBe(0.62);
+    expect(result.stage3?.horizon_verdict).toBe("calibrated");
+  });
+
+  it("accepts a stage3 block carrying tuned 60s p50/p90 multipliers and live bands", () => {
+    const result = freshCallResponseSchema.parse({
+      symbol: "R_75",
+      call: "buy_candidate",
+      alert_type: "setup_candidate",
+      trade_status: "valid",
+      confidence: 0.62,
+      regime: "range",
+      direction_bias: "buy",
+      why: "structure aligned",
+      wait_for: "wait for confirmation",
+      decision_summary: "buy setup ready",
+      entry_area: null,
+      stop_area: null,
+      target_area: null,
+      entry: 51234.6,
+      stop_loss: 51188.2,
+      take_profit: 51326.4,
+      reward_risk: 2,
+      current_close: 51240.1,
+      guardian_state: "actionable",
+      guardian_reason: "The setup is actionable.",
+      generated_at: "2026-07-12T12:00:00Z",
+      account_mode: "own_account",
+      prop_compliance: null,
+      prop_adjusted_risk: null,
+      prop_block_reason: null,
+      prop_remaining_daily_buffer: null,
+      prop_remaining_overall_buffer: null,
+      stage3: {
+        state: "gated",
+        evidence_status: "proven",
+        trigger_type: "continuation_close",
+        empirical_target_hit_rate: 0.62,
+        empirical_sample_count: 24,
+        empirical_stop_hit_rate: 0.29,
+        horizon_verdict: "calibrated",
+        horizon_verdict_4h: "calibrated",
+        horizon_verdict_6h: "calibrated",
+        model_confidence: 0.71,
+        display_confidence: 0.62,
+        min_samples: 10,
+        hit_rate_floor: 0.5,
+        suppression_mode: "suppress",
+        suppressed_call: null,
+        note: "24 scored outcomes; target-hit rate 62% clears 50% and the horizon verdict is calibrated.",
+        p50_mult: 1.52,
+        p90_mult: 2.44,
+        horizon_forecast: {
+          "4h": {
+            verdict: "calibrated",
+            p50_mult: 1.52,
+            p90_mult: 2.44,
+            forecast: {
+              current_close: 51240.1,
+              range_p50_price: 310.5,
+              range_p90_price: 820.0,
+              expected_low_p50: 51090.0,
+              expected_high_p50: 51400.0,
+              expected_low_p90: 50820.0,
+              expected_high_p90: 51660.0,
+              projected_sigma_avg: 0.0041,
+              confidence: 0.8,
+              vol_trend: "stable",
+            },
+          },
+          "6h": {
+            verdict: "calibrated",
+            p50_mult: 1.55,
+            p90_mult: 2.5,
+            forecast: {
+              current_close: 51240.1,
+              range_p50_price: 380.0,
+              range_p90_price: 1000.0,
+              expected_low_p50: 51050.0,
+              expected_high_p50: 51430.0,
+              expected_low_p90: 50740.0,
+              expected_high_p90: 51740.0,
+              projected_sigma_avg: 0.0041,
+              confidence: 0.8,
+              vol_trend: "stable",
+            },
+          },
+        },
+      },
+    });
+
+    expect(result.stage3?.p50_mult).toBe(1.52);
+    expect(result.stage3?.p90_mult).toBe(2.44);
+    expect(result.stage3?.horizon_forecast?.["4h"]?.forecast?.range_p50_price).toBe(310.5);
+    expect(result.stage3?.horizon_forecast?.["4h"]?.forecast?.expected_high_p90).toBe(51660.0);
+    expect(result.stage3?.horizon_forecast?.["6h"]?.p90_mult).toBe(2.5);
+  });
+
+  it("accepts a suppressed stage3 block (call held below the floor)", () => {
+    const result = freshCallResponseSchema.parse({
+      symbol: "R_75",
+      call: "stand_aside",
+      alert_type: "context_update",
+      trade_status: "valid",
+      confidence: 0.2,
+      regime: "range",
+      direction_bias: "buy",
+      why: "suppressed by stage3",
+      wait_for: null,
+      decision_summary: null,
+      entry_area: null,
+      stop_area: null,
+      target_area: null,
+      entry: 51234.6,
+      stop_loss: 51188.2,
+      take_profit: 51326.4,
+      reward_risk: 2,
+      current_close: 51240.1,
+      guardian_state: "actionable",
+      guardian_reason: "The setup is actionable.",
+      generated_at: "2026-07-12T12:00:00Z",
+      account_mode: "own_account",
+      prop_compliance: null,
+      prop_adjusted_risk: null,
+      prop_block_reason: null,
+      prop_remaining_daily_buffer: null,
+      prop_remaining_overall_buffer: null,
+      stage3: {
+        state: "suppressed",
+        evidence_status: "suppressed",
+        trigger_type: "continuation_close",
+        empirical_target_hit_rate: 0.2,
+        empirical_sample_count: 14,
+        empirical_stop_hit_rate: 0.8,
+        horizon_verdict: "calibrated",
+        horizon_verdict_4h: "calibrated",
+        horizon_verdict_6h: "calibrated",
+        model_confidence: 0.71,
+        display_confidence: 0.2,
+        min_samples: 10,
+        hit_rate_floor: 0.5,
+        suppression_mode: "suppress",
+        suppressed_call: "buy_candidate",
+        note: "14 scored outcomes; target-hit rate 20% is BELOW the 50% floor — continuation_close calls are suppressed until the market-verified rate improves.",
+      },
+    });
+
+    expect(result.call).toBe("stand_aside");
+    expect(result.stage3?.state).toBe("suppressed");
+    expect(result.stage3?.evidence_status).toBe("suppressed");
+    expect(result.stage3?.suppressed_call).toBe("buy_candidate");
+    expect(result.stage3?.hit_rate_floor).toBe(0.5);
+    expect(result.stage3?.min_samples).toBe(10);
+    expect(result.stage3?.suppression_mode).toBe("suppress");
+  });
+
+  it("accepts an annotate-mode below-floor stage3 block (call still emitted)", () => {
+    const result = freshCallResponseSchema.parse({
+      symbol: "R_75",
+      call: "buy_candidate",
+      alert_type: "setup_candidate",
+      trade_status: "valid",
+      confidence: 0.3,
+      regime: "range",
+      direction_bias: "buy",
+      why: "below floor but annotate mode keeps it visible",
+      wait_for: "wait for confirmation",
+      decision_summary: null,
+      entry_area: null,
+      stop_area: null,
+      target_area: null,
+      entry: 51234.6,
+      stop_loss: 51188.2,
+      take_profit: 51326.4,
+      reward_risk: 2,
+      current_close: 51240.1,
+      guardian_state: "actionable",
+      guardian_reason: "The setup is actionable.",
+      generated_at: "2026-07-12T12:00:00Z",
+      account_mode: "own_account",
+      prop_compliance: null,
+      prop_adjusted_risk: null,
+      prop_block_reason: null,
+      prop_remaining_daily_buffer: null,
+      prop_remaining_overall_buffer: null,
+      stage3: {
+        state: "annotated",
+        evidence_status: "suppressed",
+        trigger_type: "continuation_close",
+        empirical_target_hit_rate: 0.3,
+        empirical_sample_count: 14,
+        empirical_stop_hit_rate: 0.6,
+        horizon_verdict: "calibrated",
+        horizon_verdict_4h: "calibrated",
+        horizon_verdict_6h: "calibrated",
+        model_confidence: 0.71,
+        display_confidence: 0.3,
+        min_samples: 10,
+        hit_rate_floor: 0.5,
+        suppression_mode: "annotate",
+        below_floor: true,
+        sizing: {
+          level: "paper_only",
+          multiplier: 0,
+          basis: "below_floor",
+          reason: "below the 50% verified floor (30%) — paper only even in annotate mode",
+        },
+        suppressed_call: null,
+        note: "14 scored outcomes; target-hit rate 30% is BELOW the 50% floor — suppression mode is 'annotate'.",
+      },
+    });
+
+    expect(result.call).toBe("buy_candidate");
+    expect(result.stage3?.state).toBe("annotated");
+    expect(result.stage3?.evidence_status).toBe("suppressed");
+    expect(result.stage3?.suppression_mode).toBe("annotate");
+    expect(result.stage3?.below_floor).toBe(true);
+    expect(result.stage3?.sizing?.level).toBe("paper_only");
+    expect(result.stage3?.suppressed_call).toBeNull();
+  });
+
+  it("accepts a stage3 block with empirical position sizing", () => {
+    const result = freshCallResponseSchema.parse({
+      symbol: "R_75",
+      call: "buy_candidate",
+      alert_type: "setup_candidate",
+      trade_status: "valid",
+      confidence: 0.62,
+      regime: "range",
+      direction_bias: "buy",
+      why: "structure aligned",
+      wait_for: "wait for confirmation",
+      decision_summary: "buy setup ready",
+      entry_area: null,
+      stop_area: null,
+      target_area: null,
+      entry: 51234.6,
+      stop_loss: 51188.2,
+      take_profit: 51326.4,
+      reward_risk: 2,
+      current_close: 51240.1,
+      guardian_state: "actionable",
+      guardian_reason: "The setup is actionable.",
+      generated_at: "2026-07-12T12:00:00Z",
+      account_mode: "own_account",
+      prop_compliance: null,
+      prop_adjusted_risk: null,
+      prop_block_reason: null,
+      prop_remaining_daily_buffer: null,
+      prop_remaining_overall_buffer: null,
+      size_multiplier: 0.5,
+      position_sizing_empirical: "half",
+      stage3: {
+        state: "annotated",
+        evidence_status: "proven",
+        trigger_type: "continuation_close",
+        empirical_target_hit_rate: 0.62,
+        empirical_sample_count: 24,
+        empirical_stop_hit_rate: 0.29,
+        horizon_verdict: "needs_more_data_or_tuning",
+        horizon_verdict_4h: "needs_more_data_or_tuning",
+        horizon_verdict_6h: "needs_more_data_or_tuning",
+        model_confidence: 0.71,
+        display_confidence: 0.62,
+        min_samples: 10,
+        hit_rate_floor: 0.5,
+        suppression_mode: "suppress",
+        below_floor: false,
+        sizing: {
+          level: "half",
+          multiplier: 0.5,
+          basis: "annotated",
+          reason: "62% hit rate clears the floor but the horizon verdict is not calibrated — half size",
+        },
+        suppressed_call: null,
+        note: "24 scored outcomes; target-hit rate 62% clears the floor (horizon verdict not calibrated).",
+      },
+    });
+
+    expect(result.stage3?.sizing?.level).toBe("half");
+    expect(result.stage3?.sizing?.multiplier).toBe(0.5);
+    expect(result.size_multiplier).toBe(0.5);
+    expect(result.position_sizing_empirical).toBe("half");
+  });
+
+  it("accepts a still-learning stage3 block", () => {
+    const result = freshCallResponseSchema.parse({
+      symbol: "R_75",
+      call: "buy_candidate",
+      alert_type: "setup_candidate",
+      trade_status: "valid",
+      confidence: 0.71,
+      regime: "range",
+      direction_bias: "buy",
+      why: "structure aligned",
+      wait_for: "wait for confirmation",
+      decision_summary: "buy setup ready",
+      entry_area: null,
+      stop_area: null,
+      target_area: null,
+      entry: 51234.6,
+      stop_loss: 51188.2,
+      take_profit: 51326.4,
+      reward_risk: 2,
+      current_close: 51240.1,
+      guardian_state: "actionable",
+      guardian_reason: "The setup is actionable.",
+      generated_at: "2026-07-12T12:00:00Z",
+      account_mode: "own_account",
+      prop_compliance: null,
+      prop_adjusted_risk: null,
+      prop_block_reason: null,
+      prop_remaining_daily_buffer: null,
+      prop_remaining_overall_buffer: null,
+      stage3: {
+        state: "insufficient_data",
+        evidence_status: "still_learning",
+        trigger_type: "continuation_close",
+        empirical_target_hit_rate: 0.6,
+        empirical_sample_count: 4,
+        empirical_stop_hit_rate: 0.25,
+        horizon_verdict: "calibrated",
+        horizon_verdict_4h: "calibrated",
+        horizon_verdict_6h: "calibrated",
+        model_confidence: 0.71,
+        display_confidence: 0.71,
+        min_samples: 10,
+        hit_rate_floor: 0.5,
+        suppression_mode: "suppress",
+        suppressed_call: null,
+        note: "only 4/10 scored outcome(s) — the raw model confidence is shown; 6 more outcome(s) needed for an empirical verdict.",
+      },
+    });
+
+    expect(result.stage3?.evidence_status).toBe("still_learning");
+    expect(result.stage3?.empirical_sample_count).toBe(4);
+  });
+
+  it("rejects a stage3 block with an unknown state", () => {
+    const payload = {
+      symbol: "R_75",
+      call: "stand_aside",
+      alert_type: "context_update",
+      trade_status: "not_valid",
+      confidence: null,
+      regime: null,
+      direction_bias: null,
+      why: null,
+      wait_for: null,
+      decision_summary: null,
+      entry_area: null,
+      stop_area: null,
+      target_area: null,
+      entry: null,
+      stop_loss: null,
+      take_profit: null,
+      reward_risk: null,
+      current_close: null,
+      guardian_state: "forming",
+      guardian_reason: "not armed",
+      generated_at: "2026-07-12T12:00:00Z",
+      account_mode: "own_account",
+      prop_compliance: null,
+      prop_adjusted_risk: null,
+      prop_block_reason: null,
+      prop_remaining_daily_buffer: null,
+      prop_remaining_overall_buffer: null,
+      stage3: {
+        state: "mystery_state",
+        trigger_type: "continuation_close",
+        empirical_target_hit_rate: 0.5,
+        empirical_sample_count: 5,
+        empirical_stop_hit_rate: 0.3,
+        horizon_verdict: null,
+        horizon_verdict_4h: null,
+        horizon_verdict_6h: null,
+        model_confidence: 0.5,
+        display_confidence: 0.5,
+        note: "bad state",
+      },
+    };
+
+    expect(() => freshCallResponseSchema.parse(payload)).toThrow();
   });
 });

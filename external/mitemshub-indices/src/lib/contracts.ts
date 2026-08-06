@@ -128,6 +128,92 @@ export const timeframeAnalysisSchema = z.object({
 
 export type TimeframeAnalysis = z.infer<typeof timeframeAnalysisSchema>;
 
+export const stage3SizingSchema = z.object({
+  level: z.enum(["full", "half", "paper_only", "stand_aside"]),
+  multiplier: z.number(),
+  basis: z.string(),
+  reason: z.string(),
+});
+
+export type Stage3Sizing = z.infer<typeof stage3SizingSchema>;
+
+// Horizon forecast band detail carried on a Stage-3 call: the calibrated 60s
+// p50/p90 range multipliers (tune-bands output) plus the live band numbers
+// they produced.  All fields optional so legacy payloads (verdict-only)
+// still parse — the bridge normalizer fills nulls for absent data.
+export const horizonForecastDetailSchema = z.object({
+  verdict: z.string().nullable().optional(),
+  // True only when the multipliers were walk-forward TUNED; false/absent means
+  // the bands fall back to Gaussian priors and must not be called "calibrated".
+  multipliers_applied: z.boolean().nullable().optional(),
+  p50_mult: z.number().nullable().optional(),
+  p90_mult: z.number().nullable().optional(),
+  forecast: z
+    .object({
+      current_close: z.number().nullable().optional(),
+      range_p50_price: z.number().nullable().optional(),
+      range_p90_price: z.number().nullable().optional(),
+      expected_low_p50: z.number().nullable().optional(),
+      expected_high_p50: z.number().nullable().optional(),
+      expected_low_p90: z.number().nullable().optional(),
+      expected_high_p90: z.number().nullable().optional(),
+      projected_sigma_avg: z.number().nullable().optional(),
+      confidence: z.number().nullable().optional(),
+      vol_trend: z.string().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
+});
+
+export type HorizonForecastDetail = z.infer<typeof horizonForecastDetailSchema>;
+
+export const horizonForecastSchema = z.object({
+  "4h": horizonForecastDetailSchema.nullable().optional(),
+  "6h": horizonForecastDetailSchema.nullable().optional(),
+});
+
+export type HorizonForecast = z.infer<typeof horizonForecastSchema>;
+
+export const stage3BlockSchema = z.object({
+  state: z.enum(["gated", "annotated", "suppressed", "insufficient_data"]),
+  evidence_status: z.enum(["proven", "still_learning", "suppressed", "no_data"]),
+  trigger_type: z.string(),
+  empirical_target_hit_rate: z.number().nullable(),
+  empirical_sample_count: z.number(),
+  empirical_stop_hit_rate: z.number().nullable(),
+  horizon_verdict: z.string().nullable(),
+  horizon_verdict_4h: z.string().nullable(),
+  horizon_verdict_6h: z.string().nullable(),
+  model_confidence: z.number().nullable(),
+  display_confidence: z.number().nullable(),
+  min_samples: z.number(),
+  hit_rate_floor: z.number(),
+  // Defaulted so stale/legacy payloads (written before the mode existed) still
+  // parse — the bridge normalizer applies the same default.
+  suppression_mode: z.enum(["suppress", "annotate"]).default("suppress"),
+  // Proven-only execution mode (SYNTH_GATE_PROVEN_ONLY): when true, ONLY
+  // evidence_status == "proven" calls may trigger live orders; everything
+  // else is forced paper-only.  execution_allowed is the resulting go/no-go
+  // for this specific call (false = the submit path must refuse a live
+  // order, even in annotate mode).  Both defaulted so legacy payloads parse.
+  proven_only: z.boolean().default(false),
+  execution_allowed: z.boolean().default(true),
+  // True whenever the empirical evidence is below the floor, in both modes —
+  // downstream consumers can tell a below-floor call from a genuine one.
+  below_floor: z.boolean().default(false),
+  // Empirical position sizing: risk scales with empirical confidence.
+  sizing: stage3SizingSchema.optional(),
+  suppressed_call: z.string().nullable(),
+  note: z.string(),
+  // Calibrated 60s range multipliers + live band numbers (tune-bands →
+  // verdict cache → gate).  Null/absent for legacy payloads or no data.
+  p50_mult: z.number().nullable().optional(),
+  p90_mult: z.number().nullable().optional(),
+  horizon_forecast: horizonForecastSchema.nullable().optional(),
+});
+
+export type Stage3Block = z.infer<typeof stage3BlockSchema>;
+
 export const freshCallResponseSchema = z.object({
   symbol: z.enum(["R_75", "R_100"]),
   call: z.enum(["buy_candidate", "sell_candidate", "stand_aside"]),
@@ -171,6 +257,13 @@ export const freshCallResponseSchema = z.object({
   prop_block_reason: z.string().nullable(),
   prop_remaining_daily_buffer: z.number().nullable(),
   prop_remaining_overall_buffer: z.number().nullable(),
+  // Empirical-confidence position sizing from the Stage-3 gate (0.0-1.0).
+  size_multiplier: z.number().nullable().optional(),
+  position_sizing_empirical: z.string().nullable().optional(),
+  stage3: stage3BlockSchema.nullable().optional(),
+  // Data venue the levels came from: "mt5" (Blueberry SYN scale),
+  // "deriv" (1HZ scale — NOT execution-comparable), or "csv" (local file).
+  venue: z.enum(["mt5", "deriv", "csv"]).nullable().optional(),
 });
 
 export type FreshCallResponse = z.infer<typeof freshCallResponseSchema>;

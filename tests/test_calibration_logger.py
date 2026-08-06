@@ -99,6 +99,54 @@ def test_build_call_record_uses_watch_alert_shape_from_live_snapshot() -> None:
     )
 
 
+def test_build_call_record_resolves_levels_from_prepared_state_alert() -> None:
+    """The prepared-state alert builder only sets stop_loss/take_profit, but the
+    calls journal must persist scorable execution_stop/primary_target levels -
+    otherwise every scored outcome is target=0% and the gate suppresses
+    everything."""
+    alert = {
+        "symbol": "R_75",
+        "call": "buy_candidate",
+        "trade_status": "valid",
+        "alert_type": "setup_candidate",
+        "entry": 1542.5,
+        "stop_loss": 1539.0,
+        "take_profit": 1550.0,
+        "current_close": 1542.5,
+        "generated_at": "2026-08-05T15:00:00+00:00",
+    }
+
+    record = build_call_record(alert)
+
+    assert record["execution_stop"] == 1539.0
+    assert record["primary_target"] == 1550.0
+    # No explicit hold horizon on the alert -> scorer default 60.
+    assert record["hold_horizon_minutes"] == 60
+
+
+def test_build_call_record_keeps_main_path_levels_untouched() -> None:
+    """Alerts that already carry execution_stop/primary_target (main
+    build_watch_alert path) must not be clobbered by the alias fallback."""
+    alert = {
+        "symbol": "R_75",
+        "call": "sell_candidate",
+        "trade_status": "valid",
+        "entry": 1545.0,
+        "execution_stop": 1548.5,
+        "primary_target": 1535.0,
+        "stop_loss": 0.0,  # deliberately different - must NOT win
+        "take_profit": 9999.0,
+        "hold_horizon_minutes": 120,
+        "generated_at": "2026-08-05T15:00:00+00:00",
+    }
+
+    record = build_call_record(alert)
+
+    assert record["execution_stop"] == 1548.5
+    assert record["primary_target"] == 1535.0
+    assert record["hold_horizon_minutes"] == 120
+
+
 def test_append_call_record_appends_jsonl_line(tmp_path: Path) -> None:
     output_path = tmp_path / "journals" / "live_calibration_calls.jsonl"
 

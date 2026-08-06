@@ -5,6 +5,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from synthetic_trader.domain import Tick
 from synthetic_trader.live.calibration_scorer import (
     fetch_prices_for_record,
@@ -152,6 +154,9 @@ def test_summarize_outcomes_groups_by_symbol_trigger_type_and_trade_status() -> 
             "trigger_type": "continuation_close",
             "trade_status": "valid",
             "outcome_label": "target_hit",
+            "entry": 100.0,
+            "execution_stop": 98.0,
+            "primary_target": 102.0,
             "max_favorable_excursion": 120.0,
             "max_adverse_excursion": 30.0,
         },
@@ -160,6 +165,9 @@ def test_summarize_outcomes_groups_by_symbol_trigger_type_and_trade_status() -> 
             "trigger_type": "continuation_close",
             "trade_status": "valid",
             "outcome_label": "stop_hit",
+            "entry": 100.0,
+            "execution_stop": 98.0,
+            "primary_target": 102.0,
             "max_favorable_excursion": 40.0,
             "max_adverse_excursion": 90.0,
         },
@@ -168,6 +176,9 @@ def test_summarize_outcomes_groups_by_symbol_trigger_type_and_trade_status() -> 
             "trigger_type": "reclaim_pullback",
             "trade_status": "valid",
             "outcome_label": "target_hit",
+            "entry": 300.0,
+            "execution_stop": 297.0,
+            "primary_target": 305.0,
             "max_favorable_excursion": 8.0,
             "max_adverse_excursion": 2.0,
         },
@@ -176,6 +187,8 @@ def test_summarize_outcomes_groups_by_symbol_trigger_type_and_trade_status() -> 
             "trigger_type": "continuation_close",
             "trade_status": "not_valid",
             "outcome_label": "rejected_but_price_ran",
+            # Deliberately level-less: the scorer only produces this label
+            # when the call never carried levels, so it must not count.
             "max_favorable_excursion": 60.0,
             "max_adverse_excursion": 10.0,
         },
@@ -186,8 +199,80 @@ def test_summarize_outcomes_groups_by_symbol_trigger_type_and_trade_status() -> 
     assert summary[("R_75", "continuation_close", "valid")]["count"] == 2
     assert summary[("R_75", "continuation_close", "valid")]["target_hit_rate"] == 0.5
     assert summary[("R_75", "continuation_close", "valid")]["stop_hit_rate"] == 0.5
-    assert summary[("R_75", "continuation_close", "not_valid")]["count"] == 1
+    # Level-less rows are not measured trades and must not appear as evidence.
+    assert ("R_75", "continuation_close", "not_valid") not in summary
     assert summary[("R_100", "reclaim_pullback", "valid")]["target_hit_rate"] == 1.0
+
+
+def test_summarize_outcomes_excludes_deriv_fallback_rows_as_evidence() -> None:
+    """Outcomes scored through the Deriv API fallback are on the wrong price
+    scale (1HZ75V ~7,000 vs SYN75 ~1,542) and must never feed the gate, even
+    when they carry levels."""
+    outcomes = [
+        {
+            "symbol": "R_75",
+            "trigger_type": "setup_candidate",
+            "trade_status": "valid",
+            "outcome_label": "target_hit",
+            "entry": 100.0,
+            "execution_stop": 98.0,
+            "primary_target": 102.0,
+            "scoring_source": "deriv_fallback",
+        },
+        {
+            "symbol": "R_75",
+            "trigger_type": "setup_candidate",
+            "trade_status": "valid",
+            "outcome_label": "target_hit",
+            "entry": 100.0,
+            "execution_stop": 98.0,
+            "primary_target": 102.0,
+            "scoring_source": "mt5",
+        },
+    ]
+
+    summary = summarize_outcomes(outcomes)
+
+    key = ("R_75", "setup_candidate", "valid")
+    assert key in summary
+    assert summary[key]["count"] == 1
+    assert summary[key]["target_hit_rate"] == 1.0
+
+
+def test_summarize_outcomes_excludes_level_less_rows_as_evidence() -> None:
+    """Regression: stale level-less outcomes (no entry/stop/target) must never
+    count as evidence -- they would suppress a real call type with fake 0%
+    evidence (the July-12 journal poisoned setup_candidate this way)."""
+    outcomes = [
+        {
+            "symbol": "R_75",
+            "trigger_type": "setup_candidate",
+            "trade_status": "valid",
+            "outcome_label": "forming_remained_correct",
+            "entry": None,
+            "execution_stop": None,
+            "primary_target": None,
+        }
+        for _ in range(45)
+    ]
+    outcomes.append(
+        {
+            "symbol": "R_75",
+            "trigger_type": "setup_candidate",
+            "trade_status": "valid",
+            "outcome_label": "target_hit",
+            "entry": 100.0,
+            "execution_stop": 98.0,
+            "primary_target": 102.0,
+        }
+    )
+
+    summary = summarize_outcomes(outcomes)
+
+    key = ("R_75", "setup_candidate", "valid")
+    assert key in summary
+    assert summary[key]["count"] == 1
+    assert summary[key]["target_hit_rate"] == 1.0
 
 
 def test_score_unresolved_records_appends_only_records_old_enough_for_evaluation(tmp_path: Path) -> None:
@@ -253,6 +338,10 @@ def test_score_unresolved_records_from_market_writes_target_hit_and_counts_skip_
     assert result.failed_records == 1
     assert result.skipped_records == 1
     assert written[0]["outcome_label"] == "target_hit"
+    # A supplied client factory means Blueberry-scale scoring (MT5), which
+    # must be stamped so the evidence aggregator can keep Deriv-fallback
+    # (wrong-scale) rows out of the gate.
+    assert written[0]["scoring_source"] == "mt5"
 
 
 def test_score_unresolved_records_from_market_writes_stop_hit_when_stop_is_reached_first(
@@ -292,3 +381,28 @@ def test_score_unresolved_records_from_market_writes_stop_hit_when_stop_is_reach
     assert result.failed_records == 0
     assert result.skipped_records == 0
     assert written[0]["outcome_label"] == "stop_hit"
+
+
+def test_score_unresolved_records_from_market_raises_without_client_no_deriv_fallback(
+    tmp_path: Path,
+) -> None:
+    """A missing client_factory is a hard error — there is no silent Deriv
+    fallback.  Deriv 1HZ75V/1HZ100V are on the WRONG price scale vs the call
+    levels (SYN75/SYN100), so scoring without the Blueberry MT5 client must
+    never produce outcomes."""
+    calls_path = tmp_path / "calls.jsonl"
+    calls_path.write_text(
+        '{"symbol":"R_75","generated_at":"2026-07-12T10:00:00+00:00","hold_horizon_minutes":60,"entry":100.0,"execution_stop":98.0,"primary_target":103.0,"trade_status":"valid"}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="client_factory"):
+        asyncio.run(
+            score_unresolved_records_from_market(
+                calls_path=calls_path,
+                outcomes_path=tmp_path / "outcomes.jsonl",
+                now=datetime(2026, 7, 12, 11, 30, tzinfo=timezone.utc),
+                client_factory=None,
+            )
+        )
+    # No outcomes were written.
+    assert not (tmp_path / "outcomes.jsonl").exists()

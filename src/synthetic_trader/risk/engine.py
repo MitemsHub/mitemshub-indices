@@ -47,9 +47,30 @@ class RiskEngine:
             initial_balance=config.starting_equity,
         )
 
-    def evaluate(self, signal: TradeSignal) -> RiskDecision:
+    def evaluate(
+        self,
+        signal: TradeSignal,
+        *,
+        size_multiplier: float | None = None,
+    ) -> RiskDecision:
+        """Evaluate a signal for approval and compute the position stake.
+
+        ``size_multiplier`` (0.0-1.0) is the empirical-confidence scaling from
+        the Stage-3 gate: a call from a calibrated horizon with an above-floor
+        hit rate carries 1.0 (full), a positive-but-uncalibrated call 0.5
+        (half), and any call without an empirical verdict or below the floor
+        0.0 (paper-only — the decision stays approved so the call is emitted
+        and logged, but with a zero stake).  ``None`` (the default, used by
+        backtests and the raw paper loop) means no scaling.
+        """
         reasons: list[str] = []
         min_confidence = signal.min_confidence
+        empirical_scale = (
+            clamp(float(size_multiplier), 0.0, 1.0)
+            if size_multiplier is not None
+            else 1.0
+        )
+        paper_only = empirical_scale <= 0.0
         if self.state.open_positions >= self.config.max_open_positions:
             reasons.append("max open positions reached")
         if self.state.consecutive_losses >= self.config.max_consecutive_losses:
@@ -121,8 +142,17 @@ class RiskEngine:
             0.0,
             1.0,
         )
-        stake = max(self.config.stake_floor, risk_budget * (0.55 + 0.70 * quality))
-        stake = min(stake, risk_budget * 1.25)
+        if paper_only:
+            # No empirical verdict (or evidence below the floor): the call is
+            # still approved so it is emitted and logged, but with zero stake —
+            # risk scales with empirical confidence.
+            stake = 0.0
+        else:
+            stake = max(
+                self.config.stake_floor,
+                risk_budget * (0.55 + 0.70 * quality),
+            ) * empirical_scale
+            stake = min(stake, risk_budget * 1.25)
 
         # ── Enforce prop firm risk-per-trade cap ──────────────
         if self.prop_firm is not None and self.prop_firm.risk_per_trade_pct > 0:
@@ -146,9 +176,16 @@ class RiskEngine:
                 "risk_budget": round(risk_budget, 2),
                 "quality": round(quality, 4),
                 "prop_firm_active": self.prop_firm is not None,
+                "size_multiplier": round(empirical_scale, 4),
+                "paper_only": paper_only,
             },
         )
-        return RiskDecision(True, intent, ("risk approved",))
+        reason = (
+            "risk approved (paper-only — no empirical verdict)"
+            if paper_only
+            else "risk approved"
+        )
+        return RiskDecision(True, intent, (reason,))
 
     def register_open(self) -> None:
         self.state.open_positions += 1

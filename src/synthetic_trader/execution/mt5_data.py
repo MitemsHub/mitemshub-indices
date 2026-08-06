@@ -154,6 +154,9 @@ def _resolve_mt5_symbol(symbol: str, mt5_module=None) -> str:
 
     vol_num = "75" if symbol == "R_75" else "100"
     candidates = [
+        # Blueberry Markets' actual broker symbols (verified live on the
+        # Blueberry MT5 terminal) — try these first.
+        f"SYN{vol_num}",
         f"Blueberry Volatility {vol_num}",
         f"Volatility {vol_num} Index",
         f"Volatility {vol_num}",
@@ -570,3 +573,24 @@ class Mt5TickClient:
 
     def mt5_symbol(self, symbol: str) -> str:
         return _resolve_mt5_symbol(symbol)
+
+    async def latest_tick(self, symbol: str) -> Tick | None:
+        """Return the most recent real tick for ``symbol``, or None.
+
+        Uses the terminal's actual tick timestamp (``time_msc``) rather than
+        the local poll time so downstream tick stores can deduplicate across
+        process restarts and sessions.
+        """
+        if self._mt5_module is None:
+            raise RuntimeError("MT5 client not connected")
+        mt5 = self._mt5_module
+        mt5_symbol = _resolve_mt5_symbol(symbol, mt5)
+        loop = asyncio.get_running_loop()
+        tick = await loop.run_in_executor(None, mt5.symbol_info_tick, mt5_symbol)
+        if tick is None:
+            return None
+        price = float(tick.bid) if tick.bid > 0 else float(tick.ask)
+        if price <= 0:
+            return None
+        epoch = float(tick.time_msc) / 1000.0 if tick.time_msc > 0 else time.time()
+        return Tick(symbol=symbol, epoch=epoch, price=price)

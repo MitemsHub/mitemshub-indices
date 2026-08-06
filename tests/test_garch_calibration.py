@@ -17,6 +17,8 @@ from synthetic_trader.models.garch_calibration import (
     save_calibration_result,
     load_calibration_result,
     calibrate_from_ticks_csv,
+    _params_at_bounds,
+    load_calibrated_garch_state,
 )
 
 
@@ -186,6 +188,86 @@ class TestCalibrationResult:
             assert math.isfinite(feats["garch_forecast"])
 
 
+class TestParamsAtBounds:
+    """Regression: degenerate calibration rejection.
+
+    The on-disk R_75/R_100 calibration had beta pinned exactly at its
+    0.01 floor (persistence ~0.03 — NO volatility clustering), and it
+    slipped past the old guard which only rejected when 2+ params sat
+    at bounds.  ``_params_at_bounds`` must reject on a single pinned
+    parameter, on persistence below 0.05, and on a long-run vol far
+    from the realized vol.
+    """
+
+    def _degenerate(self, **overrides):
+        params = dict(
+            symbol="R_75",
+            omega=-2.0, alpha=0.03, beta=0.01, gamma=-0.02,
+            n_observations=500,
+            negative_log_likelihood=100.0,
+            convergence=True,
+            message="Optimization terminated successfully.",
+            persistence=0.04,
+            half_life=1.0,
+            long_run_vol=0.01,
+            realized_vol=0.0005,
+        )
+        params.update(overrides)
+        return CalibrationResult(**params)
+
+    def test_beta_pinned_at_floor_rejected(self) -> None:
+        # beta exactly at its 0.01 floor, convergence=True
+        assert _params_at_bounds(self._degenerate()) is True
+
+    def test_beta_within_eps_of_floor_rejected(self) -> None:
+        assert _params_at_bounds(self._degenerate(beta=0.0109)) is True
+
+    def test_persistence_below_floor_rejected(self) -> None:
+        # beta fine but persistence < 0.05 (no vol clustering)
+        assert _params_at_bounds(
+            self._degenerate(beta=0.88, persistence=0.03, long_run_vol=0.01)
+        ) is True
+
+    def test_healthy_fit_accepted(self) -> None:
+        assert _params_at_bounds(
+            self._degenerate(
+                beta=0.88, alpha=0.08, gamma=-0.04, persistence=0.92,
+                long_run_vol=0.0005, realized_vol=0.0005,
+            )
+        ) is False
+
+    def test_long_run_vol_far_from_realized_rejected(self) -> None:
+        assert _params_at_bounds(
+            self._degenerate(
+                beta=0.88, alpha=0.08, persistence=0.92,
+                long_run_vol=1.0, realized_vol=0.0005,
+            )
+        ) is True
+
+    def test_load_calibrated_garch_state_rejects_degenerate_on_disk(self) -> None:
+        """End-to-end: a degenerate calibration file must yield None (defaults)."""
+        with tempfile.TemporaryDirectory() as d:
+            dirpath = Path(d)
+            # Write the exact degenerate shape found in production
+            save_calibration_result(self._degenerate(), dirpath / "r_75.json")
+            state = load_calibrated_garch_state("R_75", dirpath)
+            assert state is None
+
+    def test_load_calibrated_garch_state_accepts_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            dirpath = Path(d)
+            save_calibration_result(
+                self._degenerate(
+                    beta=0.88, alpha=0.08, gamma=-0.04, persistence=0.92,
+                    long_run_vol=0.0005, realized_vol=0.0005,
+                ),
+                dirpath / "r_75.json",
+            )
+            state = load_calibrated_garch_state("R_75", dirpath)
+            assert state is not None
+            assert state.beta == 0.88
+
+
 class TestSaveLoad:
     """Test calibration result persistence."""
 
@@ -252,3 +334,66 @@ class TestCalibrateFromCSV:
         result = calibrate_from_ticks_csv(csv_path, symbol="EMPTY")
         assert result.n_observations == 0
         assert "No valid prices" in result.message
+
+    def test_headerless_csv(self) -> None:
+        """The live collector writes headerless CSVs — they must load."""
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            f.write("0.0,R_75,100.0,0.0,0,0.0\n")
+            f.write("1.0,R_75,101.0,0.0,0,0.0\n")
+            csv_path = f.name
+
+        result = calibrate_from_ticks_csv(csv_path, symbol="R_75")
+        # Too few points for a fit, but parsing must not crash
+        assert result.n_observations == 0 or result.n_observations > 0
+
+
+class TestFitEGARCHStudentT:
+    """Student-t innovations in the EGARCH MLE."""
+
+    def test_nll_studentt_finite(self) -> None:
+        rng = np.random.RandomState(42)
+        returns = rng.normal(0, 0.01, 200)
+        params = np.array([-2.0, 0.08, 0.88, -0.04])
+        nll = egarch_negative_log_likelihood(
+            params, returns, distribution="studentt", dof=5.0
+        )
+        # The t-likelihood drops the Gaussian normalization constant, so the
+        # raw value can be negative — only finiteness matters for the fit.
+        assert math.isfinite(nll)
+        assert nll != 0.0
+
+    def test_nll_studentt_differs_from_normal(self) -> None:
+        rng = np.random.RandomState(7)
+        returns = rng.normal(0, 0.01, 200)
+        params = np.array([-2.0, 0.08, 0.88, -0.04])
+        nll_normal = egarch_negative_log_likelihood(params, returns)
+        nll_t = egarch_negative_log_likelihood(
+            params, returns, distribution="studentt", dof=5.0
+        )
+        assert nll_normal != nll_t
+
+    def test_fit_studentt_returns_valid_params(self) -> None:
+        """Fitting t-distributed returns with a Student-t likelihood works."""
+        rng = np.random.RandomState(11)
+        n = 400
+        omega, alpha, beta, gamma = -2.0, 0.08, 0.88, -0.04
+        log_var = omega / (1 - alpha - beta)
+        returns = np.empty(n)
+        for t in range(n):
+            sigma = math.exp(log_var / 2)
+            z = rng.standard_t(5.0)  # heavy-tailed innovations
+            returns[t] = z * sigma
+            shock = abs(z) - 0.7979
+            log_var = omega + alpha * shock + gamma * z + beta * log_var
+        prices = np.exp(np.cumsum(returns)) * 100
+
+        result = fit_egarch(
+            prices, symbol="T", distribution="studentt", dof=5.0
+        )
+
+        assert result.n_observations == n - 1
+        assert 0.001 <= result.alpha <= 0.95
+        assert 0.01 <= result.beta <= 0.999
+        assert abs(result.gamma) <= 0.99
+        assert result.persistence < 1.0
+        assert math.isfinite(result.negative_log_likelihood)

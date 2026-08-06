@@ -3,6 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+# Maximum number of candles fed to the decision/feature pipeline per
+# evaluation.  Every indicator is a rolling window (<= 50 bars: atr_50,
+# ema_50, MACD needs 35); swings/FVGs only need the last ~10-30 bars.
+# Bounding the history prevents an O(n^2) full-history rescan per candle as
+# the backtest (or live session) grows — over 10k candles that rescan made a
+# 60s backtest take hours.
+#
+# Semantics note: hurst_exponent() estimates over whatever sample it is given,
+# so once history exceeds this bound the Hurst estimate uses a fixed 400-bar
+# sample instead of the full growing history.  Verified results-identical on
+# the 300s backtest (2k candles, bound engaged), so this is harmless in
+# practice — the rolling-window indicators are all far below the bound.
+MAX_FEATURE_HISTORY = 400
+
 
 DEFAULT_DERIV_APP_ID = "116450"
 

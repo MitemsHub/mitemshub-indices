@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from synthetic_trader.config import TraderConfig
+from synthetic_trader.config import MAX_FEATURE_HISTORY, TraderConfig
 from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
 from synthetic_trader.domain import Candle, Tick, TradeOutcome
 from synthetic_trader.execution.paper import PaperBroker
@@ -102,8 +102,8 @@ class BacktestEngine:
             histories[timeframe].append(primary)
             report = decision_engine.evaluate(
                 symbol=symbol,
-                candles=histories[timeframe],
-                higher_timeframe_candles=histories[higher_timeframe],
+                candles=histories[timeframe][-MAX_FEATURE_HISTORY:],
+                higher_timeframe_candles=histories[higher_timeframe][-MAX_FEATURE_HISTORY:],
             )
             if report.signal is None:
                 if self.journal is not None:
@@ -187,19 +187,54 @@ class BacktestEngine:
 
 
 def load_ticks_csv(path: str | Path, default_symbol: str) -> list[Tick]:
+    """Load ticks from a CSV, tolerating headerless files.
+
+    Supports header'd CSVs (epoch,symbol,price,...) written by the tick
+    store, plus the headerless files written by the live collector.
+    Headerless files are parsed positionally: epoch in column 0, symbol in
+    column 1, price in column 2 (or column 1 for a 2-column epoch,price
+    file).
+    """
     ticks: list[Tick] = []
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        required = {"epoch", "price"}
-        missing = required.difference(reader.fieldnames or [])
-        if missing:
-            raise ValueError(f"CSV missing required columns: {', '.join(sorted(missing))}")
-        for row in reader:
-            ticks.append(
-                Tick(
-                    symbol=row.get("symbol") or default_symbol,
-                    epoch=float(row["epoch"]),
-                    price=float(row["price"]),
+        first_line = handle.readline()
+        handle.seek(0)
+        stripped = first_line.strip().lower()
+        has_header = stripped.startswith(("epoch", "symbol", "price"))
+
+        if has_header:
+            reader = csv.DictReader(handle)
+            required = {"epoch", "price"}
+            missing = required.difference(reader.fieldnames or [])
+            if missing:
+                raise ValueError(f"CSV missing required columns: {', '.join(sorted(missing))}")
+            for row in reader:
+                epoch_raw = row.get("epoch")
+                price_raw = row.get("price")
+                if epoch_raw is None or price_raw is None:
+                    continue  # short/malformed row
+                ticks.append(
+                    Tick(
+                        symbol=row.get("symbol") or default_symbol,
+                        epoch=float(epoch_raw),
+                        price=float(price_raw),
+                    )
                 )
-            )
+            return ticks
+
+        reader = csv.reader(handle)
+        for row in reader:
+            if not row:
+                continue
+            try:
+                if len(row) == 2:
+                    epoch, price = float(row[0]), float(row[1])
+                elif len(row) > 2:
+                    epoch, price = float(row[0]), float(row[2])
+                else:
+                    continue
+            except ValueError:
+                continue
+            symbol = row[1].strip() if len(row) > 1 and row[1].strip() else default_symbol
+            ticks.append(Tick(symbol=symbol, epoch=epoch, price=price))
     return ticks

@@ -52,6 +52,11 @@ BRIER_CEIL = 0.10
 MIN_RAISE_SAMPLES = 30
 BASE_MIN_CONFIDENCE = 0.48
 MAX_RAISED_CONFIDENCE = 0.55
+# Drift-aware confidence bump: right after the model detects a regime
+# shift (ADWIN), its probabilities are less trustworthy until it
+# re-learns the new regime.  The penalty decays over N model updates.
+DRIFT_MAX_PENALTY = 0.02
+DRIFT_PENALTY_DECAY_STEPS = 500
 
 
 @dataclass
@@ -619,7 +624,32 @@ class DecisionEngine:
         progress = (BRIER_FLOOR - brier_clamped) / (BRIER_FLOOR - BRIER_CEIL)
         dynamic_min = BASE_MIN_CONFIDENCE + progress * (MAX_RAISED_CONFIDENCE - BASE_MIN_CONFIDENCE)
 
-        return clamp(dynamic_min, BASE_MIN_CONFIDENCE, MAX_RAISED_CONFIDENCE)
+        # Drift penalty: after a regime shift, require slightly higher
+        # confidence until the model re-adapts to the new distribution.
+        dynamic_min += self._drift_confidence_penalty()
+        return clamp(dynamic_min, BASE_MIN_CONFIDENCE, MAX_RAISED_CONFIDENCE + DRIFT_MAX_PENALTY)
+
+    def _drift_confidence_penalty(self) -> float:
+        """Confidence bump while the model is recovering from a regime shift.
+
+        Uses the online model's ADWIN drift detector: the penalty is
+        largest immediately after a detected drift and decays linearly
+        to zero over ``DRIFT_PENALTY_DECAY_STEPS`` model updates.
+        """
+        model = self.model
+        if model is None:
+            return 0.0
+        drift_detector = getattr(model, "drift_detector", None)
+        if getattr(model, "drift_resets", 0) <= 0 or drift_detector is None:
+            return 0.0
+        last_drift = drift_detector.last_drift_step
+        if last_drift is None:
+            return 0.0
+        steps_since = drift_detector.steps_since_last_drift(model.updates)
+        if steps_since >= DRIFT_PENALTY_DECAY_STEPS:
+            return 0.0
+        decay = 1.0 - steps_since / DRIFT_PENALTY_DECAY_STEPS
+        return DRIFT_MAX_PENALTY * decay
 
     def _classify_signal_strength(
         self,

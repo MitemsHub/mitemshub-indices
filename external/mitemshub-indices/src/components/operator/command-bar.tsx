@@ -87,9 +87,9 @@ export function CommandBar({
           <div>
             <p className="mt-1.5 max-w-lg text-sm leading-6 text-[var(--text-body)]">
               {loading
-                ? loadingElapsedSeconds >= 10
-                  ? "Still loading… The snapshot is taking longer than expected."
-                  : "Fetching the latest local market reading and trade plan…"
+                ? loadingElapsedSeconds >= 30
+                  ? "Taking longer than expected — you can tap Stop and retry."
+                  : "Analyzing live market data — a fresh read takes about 20 seconds…"
                 : "Latest market structure analysis, trade plan, and risk assessment are displayed below."}
             </p>
 
@@ -106,7 +106,8 @@ export function CommandBar({
               >
                 <span className="waiting-banner__dot" aria-hidden="true" />
                 <span className="waiting-banner__text">
-                  Still waiting… Tap <strong>Stop</strong> to cancel
+                  Still working — a full read takes about 20 seconds. Tap{" "}
+                  <strong>Stop</strong> to cancel
                 </span>
               </div>
             )}

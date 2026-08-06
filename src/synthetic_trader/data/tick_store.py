@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
@@ -44,7 +45,20 @@ def normalize_ticks(ticks: list[Tick]) -> tuple[list[Tick], int]:
     seen: set[tuple[str, float, float]] = set()
     normalized: list[Tick] = []
     duplicates = 0
+    dropped_junk = 0
     for tick in sorted(ticks, key=lambda item: (item.symbol, item.epoch, item.price)):
+        # Junk-row defense: drop ticks with epochs before year 2001 or in the
+        # far future, and non-positive prices.  MT5's copy_rates_range can
+        # return uninitialised rows (epoch 0, price 0.0/1.0/4.0) while the
+        # terminal is still downloading history; without this filter those
+        # rows get merged into the compounding corpus (mirrors the existing
+        # epoch>1e9 guard in backfill_derived_columns).
+        if tick.epoch < 1_000_000_000 or tick.epoch > time.time() + 3600:
+            dropped_junk += 1
+            continue
+        if not (tick.price > 0.0):
+            dropped_junk += 1
+            continue
         key = (tick.symbol, tick.epoch, tick.price)
         if key in seen:
             duplicates += 1
@@ -145,6 +159,20 @@ def _read_tail_ticks(csv_path: Path, symbol: str, max_count: int) -> list[Tick]:
             break
     ticks.reverse()
     return ticks
+
+
+def read_ticks_csv(path: str | Path, symbol: str = "") -> list[Tick]:
+    """Read ALL ticks from a tick CSV (legacy 3-col or rich 6-col).
+
+    Returns an empty list when the file is missing or empty.  *symbol* is
+    only used to tag the returned :class:`Tick` objects (the rows carry no
+    per-row symbol in the legacy format); pass the corpus symbol to get
+    correctly-tagged ticks.
+    """
+    target = Path(path)
+    if not target.exists() or target.stat().st_size == 0:
+        return []
+    return _read_full_ticks(target, symbol)
 
 
 def write_ticks_csv(path: str | Path, ticks: list[Tick], append: bool = False) -> None:
@@ -293,44 +321,36 @@ def _read_full_ticks(csv_path: Path, symbol: str) -> list[Tick]:
     """Read ALL ticks from a CSV file (not just the tail).
 
     Used by backfill_derived_columns to process the entire file.
-    Reads in chunks for memory efficiency on large files.
+    Reads line-by-line (see the readline note below).
     """
-    BUFFER_SIZE = 256 * 1024  # 256 KB chunks
-    file_size = csv_path.stat().st_size
-    if file_size <= 0:
+    if not csv_path.exists() or csv_path.stat().st_size <= 0:
         return []
 
-    with csv_path.open("rb") as fh:
-        # Skip header
-        first_line = fh.readline()
-        if not first_line:
-            return []
-
-        ticks: list[Tick] = []
-        while True:
-            chunk = fh.read(BUFFER_SIZE)
-            if not chunk:
-                break
-            # Decode and split into lines
-            text = chunk.decode("utf-8", errors="replace")
-            lines = text.splitlines()
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split(",")
-                if len(parts) < 3:
-                    continue
-                try:
-                    spread = float(parts[3]) if len(parts) > 3 else 0.0
-                    direction = int(parts[4]) if len(parts) > 4 else 0
-                    vol_proxy = float(parts[5]) if len(parts) > 5 else 0.0
-                    ticks.append(Tick(
-                        symbol=symbol, epoch=float(parts[0]), price=float(parts[2]),
-                        spread=spread, tick_direction=direction, volume_proxy=vol_proxy,
-                    ))
-                except (ValueError, IndexError):
-                    continue
+    ticks: list[Tick] = []
+    with csv_path.open("r", encoding="utf-8", errors="replace", newline="") as fh:
+        # Skip header.  Iterating with readline() is correct where chunked
+        # reads are NOT: a 256KB chunk boundary can split a CSV line in half,
+        # and parsing the fragments independently fabricates garbage ticks
+        # (e.g. the tail "9999999999482,-1,4.0" of a split price becomes a
+        # bogus epoch of ~1e13).  readline() never fragments lines.
+        fh.readline()
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(",")
+            if len(parts) < 3:
+                continue
+            try:
+                spread = float(parts[3]) if len(parts) > 3 else 0.0
+                direction = int(parts[4]) if len(parts) > 4 else 0
+                vol_proxy = float(parts[5]) if len(parts) > 5 else 0.0
+                ticks.append(Tick(
+                    symbol=symbol, epoch=float(parts[0]), price=float(parts[2]),
+                    spread=spread, tick_direction=direction, volume_proxy=vol_proxy,
+                ))
+            except (ValueError, IndexError):
+                continue
     return ticks
 
 

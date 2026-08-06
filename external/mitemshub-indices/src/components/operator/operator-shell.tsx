@@ -23,6 +23,8 @@ import { IntelPanelToggles } from "./intel-panel-toggles";
 import { HealthDashboard } from "./health-dashboard";
 import { PipelineDiagnosticsPanel } from "./pipeline-diagnostics-panel";
 import { SignalQualityPanel } from "./signal-quality-panel";
+import { HorizonForecastPanel } from "./horizon-forecast-panel";
+import { CalibrationHealthPanel } from "./calibration-health-panel";
 import { CombinedMenuButton } from "./combined-menu-button";
 import { NotificationBell } from "./notification-bell";
 import { LotSizeCalculator } from "./lot-size-calculator";
@@ -506,9 +508,11 @@ export function OperatorShell() {
                 trackedPosition={workspace.trackedPosition}
                 executing={workspace.executing}
                 executionMode={workspace.executionMode}
+                provenOnly={workspace.provenOnly}
                 onExecute={() => workspace.submitTradeOrder()}
                 onClose={() => workspace.closeTrackedPosition()}
                 onSetExecutionMode={workspace.setExecutionMode}
+                onSetProvenOnly={workspace.setProvenOnly}
               />
             </div>
           )}
@@ -598,6 +602,20 @@ export function OperatorShell() {
           </ErrorBoundary>
         </section>
 
+        {/* ── Horizon Volatility Forecast ────────────────────────── */}
+        <section className="mt-6">
+          <ErrorBoundary label="Horizon forecast">
+            <HorizonForecastPanel />
+          </ErrorBoundary>
+        </section>
+
+        {/* ── Calibration Health ──────────────────────────────────── */}
+        <section className="mt-6">
+          <ErrorBoundary label="Calibration health">
+            <CalibrationHealthPanel />
+          </ErrorBoundary>
+        </section>
+
         {/* ── Pipeline Diagnostics ────────────────────────────────── */}
         <section className="mt-6">
           <ErrorBoundary label="Pipeline diagnostics">
@@ -653,9 +671,11 @@ export function OperatorShell() {
         trackedPosition={workspace.trackedPosition}
         executing={workspace.executing}
         executionMode={workspace.executionMode}
+        provenOnly={workspace.provenOnly}
         onSubmitTrade={workspace.submitTradeOrder}
         onCloseTrade={workspace.closeTrackedPosition}
         onSetExecutionMode={workspace.setExecutionMode}
+        onSetProvenOnly={workspace.setProvenOnly}
         onClose={() => setBottomSheetOpen(false)}
       />
 

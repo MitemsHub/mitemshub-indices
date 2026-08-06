@@ -16,9 +16,11 @@ type TradeInstructionPanelProps = {
   trackedPosition?: TrackedPosition | null;
   executing?: boolean;
   executionMode?: ExecutionMode;
+  provenOnly?: boolean;
   onExecute?: () => void;
   onClose?: () => void;
   onSetExecutionMode?: (mode: ExecutionMode) => void;
+  onSetProvenOnly?: (value: boolean) => void;
 };
 
 function StatusBadge({ state }: { state: FreshCallResponse["guardian_state"] }) {
@@ -101,9 +103,11 @@ export function TradeInstructionPanel({
   trackedPosition = null,
   executing = false,
   executionMode = "paper",
+  provenOnly = false,
   onExecute = () => {},
   onClose = () => {},
   onSetExecutionMode = () => {},
+  onSetProvenOnly = () => {},
 }: TradeInstructionPanelProps) {
   const effectiveGuardianState =
     guardianStatus?.guardian_state ?? call?.guardian_state ?? "unavailable";
@@ -332,6 +336,51 @@ export function TradeInstructionPanel({
                   Live MT5
                 </button>
               </div>
+
+              {/* Proven-only execution toggle: the strictest belt.  When on,
+                  only market-proven call types (stage3.evidence_status ==
+                  "proven") may place live orders — still_learning and
+                  suppressed calls never execute, even in annotate mode. */}
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--line-subtle)] px-3.5 py-2.5">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-[var(--text-strong)]">
+                    Proven-only execution
+                  </p>
+                  <p className="mt-0.5 text-[11px] leading-4 text-[var(--text-body)]">
+                    {provenOnly
+                      ? "Only market-proven call types may trade live. Learning & suppressed calls are paper-only."
+                      : "All call types can trade once sized (annotate mode may lift paper-only)."}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={provenOnly}
+                  aria-label="Toggle proven-only execution"
+                  onClick={() => onSetProvenOnly(!provenOnly)}
+                  className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+                    provenOnly
+                      ? "bg-[var(--accent-positive)]"
+                      : "bg-[var(--line-subtle)]"
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                      provenOnly ? "translate-x-[22px]" : "translate-x-0.5"
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Proven-only hold notice for the current call */}
+              {provenOnly &&
+              call?.stage3 &&
+              call.stage3.evidence_status !== "proven" &&
+              executionMode === "live_mt5" ? (
+                <p className="text-xs text-[var(--accent-warn)]">
+                  Held paper-only: this call type is "{call.stage3.evidence_status}" — proven-only mode blocks live execution until the market verifies it.
+                </p>
+              ) : null}
 
               {/* Execute button */}
               <button

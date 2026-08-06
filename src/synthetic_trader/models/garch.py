@@ -39,6 +39,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def ez_student_t(dof: float) -> float:
+    """E|z| for a standardized Student-t distribution with ``dof`` degrees of freedom.
+
+    For dof -> inf this converges to the standard-normal value (~0.7979).
+    Heavier tails (small dof) give a larger E|z|.
+    """
+    if dof <= 1.0:
+        return 1.0  # E|z| is undefined for dof <= 1 (no finite variance)
+    return math.sqrt(dof / math.pi) * math.exp(
+        math.lgamma((dof - 1.0) / 2.0) - math.lgamma(dof / 2.0)
+    )
+
+
 @dataclass
 class GARCHState:
     """Current state of the EGARCH(1,1) model."""
@@ -127,6 +140,12 @@ class EGARCHVarianceForecaster:
         Threshold for high-vol regime (fraction of long-run vol).  Default 1.5.
     mean_revert_lookback : int
         Number of observations to estimate mean-reversion probability.  Default 50.
+    distribution : str
+        Innovation distribution: ``"normal"`` (default) or ``"studentt"``
+        (fat-tailed, uses E|z| for a Student-t with ``dof`` degrees of
+        freedom in the EGARCH shock term).
+    dof : float
+        Degrees of freedom used when ``distribution="studentt"``.
     """
 
     def __init__(
@@ -139,6 +158,8 @@ class EGARCHVarianceForecaster:
         vol_regime_high: float = 1.5,
         mean_revert_lookback: int = 50,
         buffer_size: int = 50,
+        distribution: str = "normal",
+        dof: float = 5.0,
     ) -> None:
         self.learning_rate = learning_rate
         self.min_observations = min_observations
@@ -147,6 +168,11 @@ class EGARCHVarianceForecaster:
         self.vol_regime_high = vol_regime_high
         self.mean_revert_lookback = mean_revert_lookback
         self._buffer_size = buffer_size
+        # Innovation distribution: "normal" or "studentt" (fat tails).
+        # E|z| differs per distribution and scales the EGARCH shock term.
+        self.distribution = distribution
+        self.dof = dof
+        self._ez = ez_student_t(dof) if distribution == "studentt" else 0.7979
 
         self.state = GARCHState(
             log_variance=math.log(long_run_var_prior),
@@ -197,8 +223,9 @@ class EGARCHVarianceForecaster:
 
         # Standardized shock magnitude (absolute value minus expectation)
         abs_z = abs(z_t)
-        # E|z| for standard normal ≈ 0.7979
-        shock_magnitude = abs_z - 0.7979
+        # E|z| depends on the innovation distribution (normal ≈ 0.7979,
+        # Student-t heavier).  Scales the EGARCH shock term.
+        shock_magnitude = abs_z - self._ez
 
         # One-step-ahead log-variance forecast
         log_var_new = (
@@ -213,8 +240,15 @@ class EGARCHVarianceForecaster:
         if self.state.persistence > self.persistence_cap:
             new_beta *= self.persistence_cap / self.state.persistence
 
-        # Compute prediction error for online gradient update
-        realized_log_var = log_return ** 2
+        # Compute prediction error for online gradient update.
+        # EGARCH lives in log-variance space: the model predicts
+        # log σ²_t, so the realized quantity must be a log-variance too
+        # (log r_t²).  The old code subtracted the RAW squared return
+        # (~1e-6 at bar scale) from log_variance (~-13) — a units
+        # mismatch that made every gradient strongly positive and drove
+        # omega (and the long-run variance) upward without bound,
+        # inflating the 4-6h horizon bands ~300x.
+        realized_log_var = 2.0 * math.log(max(abs(log_return), 1e-12))
         pred_error = realized_log_var - self.state.log_variance
 
         # Online parameter update (stochastic gradient)
@@ -355,6 +389,8 @@ class EGARCHVarianceForecaster:
             "vol_regime_high": self.vol_regime_high,
             "mean_revert_lookback": self.mean_revert_lookback,
             "buffer_size": self._buffer_size,
+            "distribution": self.distribution,
+            "dof": self.dof,
             "state": self.state.to_dict(),
             "z_history": self._z_history[-self.mean_revert_lookback:],
             "grad_sq_ema": self._grad_sq_ema,
@@ -374,6 +410,8 @@ class EGARCHVarianceForecaster:
             vol_regime_high=data["vol_regime_high"],
             mean_revert_lookback=data["mean_revert_lookback"],
             buffer_size=data.get("buffer_size", 50),
+            distribution=data.get("distribution", "normal"),
+            dof=data.get("dof", 5.0),
         )
         forecaster.state = GARCHState.from_dict(data["state"])
         forecaster._z_history = data.get("z_history", [])

@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from synthetic_trader.models.garch import GARCHState
+from synthetic_trader.models.garch import GARCHState, ez_student_t
 
 
 # Standard normal E|z| for EGARCH standardization
@@ -117,9 +117,21 @@ def compute_log_returns(prices: np.ndarray) -> np.ndarray:
     return np.diff(np.log(np.maximum(prices, 1e-10)))
 
 
+def _log_t_density(z: float, dof: float) -> float:
+    """Log density of a standardized Student-t with ``dof`` degrees of freedom."""
+    return (
+        math.lgamma((dof + 1.0) / 2.0)
+        - math.lgamma(dof / 2.0)
+        - 0.5 * math.log(dof * math.pi)
+        - ((dof + 1.0) / 2.0) * math.log1p(z * z / dof)
+    )
+
+
 def egarch_negative_log_likelihood(
     params: np.ndarray,
     log_returns: np.ndarray,
+    distribution: str = "normal",
+    dof: float = 5.0,
 ) -> float:
     """Compute negative log-likelihood for EGARCH(1,1).
 
@@ -129,6 +141,11 @@ def egarch_negative_log_likelihood(
         [omega, alpha, beta, gamma]
     log_returns : np.ndarray
         Log-return series
+    distribution : str
+        Innovation distribution: ``"normal"`` (default) or ``"studentt"``
+        (fat-tailed Student-t with ``dof`` degrees of freedom).
+    dof : float
+        Degrees of freedom used when ``distribution="studentt"``.
 
     Returns
     -------
@@ -136,6 +153,7 @@ def egarch_negative_log_likelihood(
         Negative log-likelihood (to be minimized)
     """
     omega, alpha, beta, gamma = params
+    ez = ez_student_t(dof) if distribution == "studentt" else EZ_NORMAL
     n = len(log_returns)
 
     # Stability constraints — match the wider bounds used in fit_egarch()
@@ -152,7 +170,9 @@ def egarch_negative_log_likelihood(
     # Initialize variance from sample
     sample_var = max(np.var(log_returns), 1e-10)
     log_var = np.log(sample_var)
-    long_run_var = omega / max(1.0 - persistence, 1e-10)
+    # omega is a LOG-variance intercept, so the unconditional variance is
+    # exp(omega / (1 - persistence)).
+    long_run_var = math.exp(min(omega / max(1.0 - persistence, 1e-10), 5.0))
 
     # EGARCH recursion
     log_var_series = np.empty(n)
@@ -161,15 +181,20 @@ def egarch_negative_log_likelihood(
     for t in range(n):
         if t > 0:
             z_prev = log_returns[t - 1] / max(math.exp(log_var_series[t - 1] / 2.0), 1e-10)
-            shock_magnitude = abs(z_prev) - EZ_NORMAL
+            shock_magnitude = abs(z_prev) - ez
             log_var_series[t] = omega + alpha * shock_magnitude + gamma * z_prev + beta * log_var_series[t - 1]
             # Clip for numerical stability
             log_var_series[t] = max(-30.0, min(5.0, log_var_series[t]))
         else:
             log_var_series[t] = log_var
 
-        var_t = math.exp(log_var_series[t])
-        nll += 0.5 * (log_var_series[t] + log_returns[t] ** 2 / max(var_t, 1e-10))
+        if distribution == "studentt":
+            # Student-t innovations: -log f(r_t) = log(sigma_t) - log g(z_t)
+            z_t = log_returns[t] / max(math.exp(log_var_series[t] / 2.0), 1e-10)
+            nll += log_var_series[t] / 2.0 - _log_t_density(z_t, dof)
+        else:
+            var_t = math.exp(log_var_series[t])
+            nll += 0.5 * (log_var_series[t] + log_returns[t] ** 2 / max(var_t, 1e-10))
 
     return nll
 
@@ -179,6 +204,8 @@ def fit_egarch(
     symbol: str = "unknown",
     initial_params: tuple[float, float, float, float] | None = None,
     max_iter: int = 500,
+    distribution: str = "normal",
+    dof: float = 5.0,
 ) -> CalibrationResult:
     """Fit EGARCH(1,1) parameters to observed price data using MLE.
 
@@ -263,7 +290,7 @@ def fit_egarch(
             result = minimize(
                 egarch_negative_log_likelihood,
                 guess,
-                args=(log_returns,),
+                args=(log_returns, distribution, dof),
                 method="L-BFGS-B",
                 bounds=bounds,
                 options={"maxiter": max_iter, "ftol": 1e-10},
@@ -288,7 +315,7 @@ def fit_egarch(
             de_result = differential_evolution(
                 egarch_negative_log_likelihood,
                 bounds=bounds,
-                args=(log_returns,),
+                args=(log_returns, distribution, dof),
                 maxiter=max(max_iter * 5, 2000),
                 seed=42,
                 tol=1e-8,
@@ -318,12 +345,20 @@ def fit_egarch(
     # Compute diagnostics
     persistence = alpha_fit + beta_fit
     half_life = math.log(0.5) / math.log(persistence) if 0.0 < persistence < 1.0 else float("inf")
-    long_run_var = omega_fit / max(1.0 - persistence, 1e-10)
+    # omega is a LOG-variance intercept: unconditional variance is
+    # exp(omega / (1 - persistence)).  The old code treated omega as a
+    # raw variance (omega / (1 - persistence)), which produced
+    # long_run_vol ~ 0.0 for every real fit and a vol_ratio of ~0.0001.
+    log_long_run_var = min(omega_fit / max(1.0 - persistence, 1e-10), 5.0)
+    long_run_var = math.exp(log_long_run_var)
     long_run_vol = math.sqrt(max(long_run_var, 1e-10))
 
     # Goodness-of-fit diagnostics (skip if fit didn't converge)
     if converged:
-        std_resid = _compute_standardized_residuals(log_returns, omega_fit, alpha_fit, beta_fit, gamma_fit)
+        std_resid = _compute_standardized_residuals(
+            log_returns, omega_fit, alpha_fit, beta_fit, gamma_fit,
+            distribution=distribution, dof=dof,
+        )
         ljung_box_p = _ljung_box_test_with_residuals(std_resid)
         arch_p = _arch_test_with_residuals(std_resid)
     else:
@@ -360,8 +395,11 @@ def fit_egarch(
 def _compute_standardized_residuals(
     log_returns: np.ndarray,
     omega: float, alpha: float, beta: float, gamma: float,
+    distribution: str = "normal",
+    dof: float = 5.0,
 ) -> np.ndarray:
     """Compute standardized residuals from fitted EGARCH parameters."""
+    ez = ez_student_t(dof) if distribution == "studentt" else EZ_NORMAL
     n = len(log_returns)
     log_var = math.log(max(np.var(log_returns), 1e-10))
     std_resid = np.empty(n)
@@ -370,7 +408,7 @@ def _compute_standardized_residuals(
         std_resid[t] = log_returns[t] / max(math.sqrt(var_t), 1e-10)
         if t < n - 1:
             z_prev = std_resid[t]
-            shock = abs(z_prev) - EZ_NORMAL
+            shock = abs(z_prev) - ez
             log_var = omega + alpha * shock + gamma * z_prev + beta * log_var
             log_var = max(-30.0, min(5.0, log_var))
     return std_resid
@@ -537,15 +575,36 @@ def calibrate_from_ticks_csv(
     epochs: list[float] = []
     prices: list[float] = []
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv_mod.DictReader(f, delimiter=delimiter)
+        # Tolerate headerless CSVs (epoch,symbol,price,...) as written by
+        # the collector, plus header'd files from the migrate tools.
+        first_line = f.readline()
+        f.seek(0)
+        stripped = first_line.strip().lower()
+        has_header = stripped.startswith(("epoch", "symbol", "price"))
+        epoch_idx, price_idx = 0, 2  # enriched format: epoch,symbol,price,...
+        reader = csv_mod.reader(f, delimiter=delimiter)
+        if has_header:
+            header = next(reader, None) or []
+            if "epoch" in header:
+                epoch_idx = header.index("epoch")
+            if price_column in header:
+                price_idx = header.index(price_column)
         for row in reader:
+            if not row:
+                continue
+            if len(row) == 2:
+                e_raw, p_raw = row[0], row[1]  # legacy epoch,price
+            elif len(row) > max(epoch_idx, price_idx):
+                e_raw, p_raw = row[epoch_idx], row[price_idx]
+            else:
+                continue
             try:
-                e = float(row.get("epoch", 0))
-                p = float(row[price_column])
+                e = float(e_raw)
+                p = float(p_raw)
                 if p > 0:
                     epochs.append(e)
                     prices.append(p)
-            except (ValueError, KeyError):
+            except (ValueError, IndexError):
                 continue
 
     if not prices:
@@ -645,12 +704,17 @@ def save_calibrated_garch_state(
 def _params_at_bounds(result: CalibrationResult) -> bool:
     """Check if fitted parameters hit optimizer bounds (degenerate fit).
 
-    An optimizer can report ``convergence=True`` while multiple parameters
-    are stuck at their bounds — this is a degenerate fit, not a good one.
-    We require at least 3 parameters at bounds to reject (was 2), since
-    with wider bounds a single parameter near its edge is more common.
+    An optimizer can report ``convergence=True`` while parameters are
+    stuck at their bounds — this is a degenerate fit, not a good one.
+    The on-disk R_75/R_100 calibration had beta pinned exactly at its
+    0.01 floor (persistence ~0.03, i.e. NO volatility clustering at all),
+    and it slipped past the old guard (which only rejected when 2+ params
+    sat at bounds).  We now reject on:
+      1. any single parameter at a bound, OR
+      2. persistence below 0.05 (no vol clustering to model), OR
+      3. a long-run vol absurdly far from the realized vol.
 
-    Updated bounds (matching fit_egarch):
+    Bounds (matching fit_egarch):
         omega: [-30, 2], alpha: [0.001, 0.95], beta: [0.01, 0.999], gamma: [-0.99, 0.99]
     """
     BOUND_EPS = 0.001  # within 0.1% of bound edge
@@ -663,7 +727,15 @@ def _params_at_bounds(result: CalibrationResult) -> bool:
         at_bounds += 1
     if abs(result.gamma) >= 0.99 - BOUND_EPS:
         at_bounds += 1
-    return at_bounds >= 2
+    if at_bounds >= 1:
+        return True
+    if result.persistence < 0.05:
+        return True
+    if result.realized_vol > 0:
+        ratio = result.long_run_vol / result.realized_vol
+        if ratio < 0.02 or ratio > 50.0:
+            return True
+    return False
 
 
 def load_calibrated_garch_state(
