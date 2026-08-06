@@ -90,6 +90,17 @@ class GuardianContext:
     # only check thesis invalidation (stop hit).  Swing trades target
     # 4-6 hour holds so tick-level microstructure noise is irrelevant.
     trading_mode: str | None = None
+    # Execution timeframe in seconds for the swing plan (sniper: 900 = 15m).
+    # Used by the stop-lock grace: a stop trade-through only cancels the
+    # plan when it is confirmed by a CLOSED candle of this timeframe, so
+    # spread/jitter wicks inside the still-forming candle cannot stop out
+    # a valid plan.
+    execution_timeframe_sec: int = 900
+    # Precomputed by the caller (``build_guardian_snapshot``): True when a
+    # closed execution-timeframe candle has traded through the stop.  None
+    # means the caller provided no candle data — treated as not confirmed
+    # (conservative: intraday wicks alone never cancel a swing plan).
+    stop_traded_on_closed_candle: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -373,8 +384,11 @@ def evaluate_signal_guardian(
     if context.trading_mode == "sniper":
         # Sniper mode is a 4-6 hour swing trade.  A plan is only cancelled
         # beyond reasonable doubt when:
-        #   1. price has actually TRADED THROUGH the stop (adverse_ratio >= 1.0)
-        #      — the position would have been stopped out; or
+        #   1. price has actually TRADED THROUGH the stop AND a CLOSED
+        #      execution-timeframe candle confirms it (stop-lock grace).  An
+        #      intraday spread/jitter wick inside the still-forming candle is
+        #      NOT enough — the stop must be confirmed by a full closed
+        #      candle before the plan dies; or
         #   2. the adverse excursion reached the near-stop threshold AND the
         #      price is STILL sitting at or beyond the weakening line right
         #      now (sustained, not a transient wick that already recovered).
@@ -383,12 +397,17 @@ def evaluate_signal_guardian(
         current_adverse = _current_adverse_excursion(snapshot)
         current_ratio = current_adverse / stop_distance
         sustained = current_ratio >= thresholds.weakening_excursion_ratio
-        if adverse_ratio >= 1.0 or (
+        stop_confirmed_on_candle = bool(context.stop_traded_on_closed_candle)
+        if (
+            adverse_ratio >= 1.0 and stop_confirmed_on_candle
+        ) or (
             adverse_ratio >= thresholds.max_adverse_excursion_ratio and sustained
         ):
+            timeframe_min = max(1, int(context.execution_timeframe_sec or 0) // 60)
             return GuardianEvaluation(
                 "cancelled",
-                "The original trade thesis is broken and should not be used.",
+                "The original trade thesis is broken after the stop traded through on a "
+                f"closed {timeframe_min}m candle — the position would have been stopped out.",
             )
     else:
         if adverse_ratio >= thresholds.max_adverse_excursion_ratio:

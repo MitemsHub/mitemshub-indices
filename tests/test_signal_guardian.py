@@ -372,9 +372,32 @@ class SignalGuardianTests(unittest.TestCase):
 
         self.assertEqual(result.state, "confirmed")
 
-    def test_sniper_stop_trade_through_cancels_plan(self) -> None:
-        # Price traded through the stop (459.6 -> 458.1 < stop 458.2): the
-        # thesis is genuinely broken — the position would be stopped out.
+    def test_sniper_intraday_wick_through_stop_without_closed_candle_holds(self) -> None:
+        # Price wick-traded THROUGH the stop intraday (window max adverse 1.6,
+        # ratio 1.14 >= 1.0) but has RECOVERED to 459.55, and no CLOSED
+        # execution candle confirms the breach — a spread/jitter wick inside
+        # the still-forming candle.  The stop-lock grace must hold the plan.
+        snapshot = self._sniper_snapshot(current_close=459.55)
+        context = GuardianContext(
+            tick_prices=[459.6, 459.2, 458.8, 458.5, 459.3, 459.55],
+            ticks_since_armed=30,
+            max_favorable_excursion=0.1,
+            max_adverse_excursion=1.6,
+            previous_guardian_state="confirmed",
+            first_confirmed_at_tick=1,
+            trading_mode="sniper",
+            stop_traded_on_closed_candle=False,
+        )
+
+        result = evaluate_signal_guardian(snapshot, context, DEFAULT_THRESHOLDS)
+
+        self.assertEqual(result.state, "confirmed")
+        self.assertNotIn("broken", result.reason.lower())
+
+    def test_sniper_intraday_wick_through_stop_cancels_when_sustained_right_now(self) -> None:
+        # Same wick, but price is STILL through the stop at the current close
+        # (458.1 < stop 458.2): sustained beyond reasonable doubt — cancels
+        # even without a closed candle.
         snapshot = self._sniper_snapshot(current_close=458.1)
         context = GuardianContext(
             tick_prices=[459.6, 459.2, 458.8, 458.5, 458.3, 458.1],
@@ -384,12 +407,33 @@ class SignalGuardianTests(unittest.TestCase):
             previous_guardian_state="confirmed",
             first_confirmed_at_tick=1,
             trading_mode="sniper",
+            stop_traded_on_closed_candle=False,
         )
 
         result = evaluate_signal_guardian(snapshot, context, DEFAULT_THRESHOLDS)
 
         self.assertEqual(result.state, "cancelled")
-        self.assertIn("broken", result.reason.lower())
+
+    def test_sniper_stop_trade_through_on_closed_candle_cancels_plan(self) -> None:
+        # Price traded through the stop (459.6 -> 458.1 < stop 458.2) AND a
+        # closed execution candle confirms the breach: the thesis is genuinely
+        # broken — the position would have been stopped out.
+        snapshot = self._sniper_snapshot(current_close=458.1)
+        context = GuardianContext(
+            tick_prices=[459.6, 459.2, 458.8, 458.5, 458.3, 458.1],
+            ticks_since_armed=30,
+            max_favorable_excursion=0.1,
+            max_adverse_excursion=1.5,
+            previous_guardian_state="confirmed",
+            first_confirmed_at_tick=1,
+            trading_mode="sniper",
+            stop_traded_on_closed_candle=True,
+        )
+
+        result = evaluate_signal_guardian(snapshot, context, DEFAULT_THRESHOLDS)
+
+        self.assertEqual(result.state, "cancelled")
+        self.assertIn("closed 15m candle", result.reason.lower())
 
     def test_sniper_sustained_near_stop_position_cancels_plan(self) -> None:
         # Window max 1.15 (0.82 >= 0.8) AND price is STILL sitting 0.857 of

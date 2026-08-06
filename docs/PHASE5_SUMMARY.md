@@ -2274,15 +2274,42 @@ on stop trade-through or horizon expiry.”` and `plan_held: true` (surfaced in
 the dashboard payload).  MT5-down / stale-CSV reads (`current_close is None`)
 never resurrect a plan.
 
+### 38b — Stop-lock grace: stop trade-through needs a closed 15m candle
+
+Follow-up to §38: the stop trade-through cancel (`adverse_ratio >= 1.0`) is
+now gated by **closed-candle confirmation** on the execution timeframe.
+`build_guardian_snapshot` buckets the tick stream into 900s windows, drops
+the still-forming bucket, and sets `stop_traded_on_closed_candle` when a
+CLOSED candle's low (buy) / high (sell) traded through the stop.  The check
+is bounded by the plan's confirmation time (`first_confirmed_at_epoch` from
+guardian memory): every closed candle that OPENED after confirmation counts,
+so a genuine stop confirmed by any closed candle during the plan's life
+cancels even if no evaluation ran for a while and price later recovered
+(brand-new plans with no confirmation time use a 2-candle recency fallback).
+The sniper cancel then requires EITHER:
+
+- stop trade-through **confirmed by a closed execution candle** (a
+  spread/jitter wick inside the forming candle never cancels alone), **or**
+- a **sustained** near-stop position right now (current price still beyond
+the weakening line — beyond reasonable doubt regardless of candle state).
+
+So a wick that pierces the stop and recovers inside the same 15m candle
+leaves the plan standing; if that candle closes with the stop breached (or
+the price stays pinned through the stop), the plan cancels with the reason
+"stop traded through on a closed 15m candle".  Cancellation semantics now
+match the plan's own invalidation text (a *close* through the level), not
+tick-level wicks.
+
 ### Validation
 
-- 11 new tests: sniper transient-wick-does-not-cancel, stop-trade-through
-  cancels, sustained near-stop cancels, generic mode keeps the strict rule,
-  confirmed plan carries across refresh, cancelled plan sticks across refresh,
-  different plan resets stale memory, plan-hold restore + the three
-  no-restore guards (stop trade-through, horizon expiry, no fresh price).
-  147 tests pass across the guardian / market-snapshot / calibration-logger /
-  stage3-gate suites.
+- 13 new tests: sniper transient-wick-does-not-cancel, intraday-wick-through-
+  stop holds, wick-through-stop cancels when sustained right now,
+  stop-trade-through on a closed candle cancels, generic mode keeps the
+  strict rule, confirmed plan carries across refresh, cancelled plan sticks
+  across refresh, different plan resets stale memory, plan-hold restore + the
+  three no-restore guards, plus the closed-candle helper's forming-vs-closed
+  bucket behavior.  107 tests pass across the guardian / market-snapshot
+  suites; 47 more across calibration-logger / stage3-gate.
 - Live smoke test against the real running dashboard's memory files: a
   stand_aside read now returns the held `buy_candidate` plan for both R_75
   and R_100 with `plan_held: true` — the exact behavior the operator asked

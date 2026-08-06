@@ -2914,11 +2914,21 @@ class GuardianMemoryTests(unittest.TestCase):
 
     def test_cancelled_plan_sticks_across_refresh(self) -> None:
         mem_dir = self._mem_dir()
-        # Stop trade-through -> cancelled, and the cancellation is persisted.
+        # Stop traded through AND confirmed by a CLOSED 15m candle (bucket 0
+        # spans epochs 0-899 with a low of 458.0 <= stop 458.2) -> cancelled,
+        # and the cancellation is persisted.
         snap = self._plan_snapshot(current_close=458.1)
+        closed_bucket_ticks = [
+            Tick(symbol="R_100", epoch=0.0, price=459.6),
+            Tick(symbol="R_100", epoch=300.0, price=458.0),
+            Tick(symbol="R_100", epoch=600.0, price=458.5),
+            Tick(symbol="R_100", epoch=900.0, price=458.3),
+            Tick(symbol="R_100", epoch=1200.0, price=458.2),
+            Tick(symbol="R_100", epoch=1500.0, price=458.1),
+        ]
         enriched = build_guardian_snapshot(
             snap,
-            self._ticks([459.6, 459.0, 458.5, 458.3, 458.2, 458.1]),
+            closed_bucket_ticks,
             guardian_memory_dir=mem_dir,
         )
         self.assertEqual(enriched["guardian_state"], "cancelled")
@@ -2932,6 +2942,96 @@ class GuardianMemoryTests(unittest.TestCase):
             guardian_memory_dir=mem_dir,
         )
         self.assertEqual(enriched2["guardian_state"], "cancelled")
+
+    def test_build_guardian_snapshot_intraday_wick_through_stop_holds(self) -> None:
+        # All ticks land in ONE 900s bucket -> no CLOSED candle exists, and the
+        # wick through the stop has RECOVERED (current close 459.55): an intraday
+        # spread/jitter wick inside the forming candle — the stop-lock grace
+        # must NOT cancel the plan.
+        snap = self._plan_snapshot(current_close=459.55)
+        enriched = build_guardian_snapshot(
+            snap,
+            self._ticks([459.6, 459.2, 458.8, 458.5, 459.3, 459.55]),
+            guardian_memory_dir=self._mem_dir(),
+        )
+        self.assertNotEqual(enriched["guardian_state"], "cancelled")
+        self.assertNotIn("broken", str(enriched["guardian_reason"]).lower())
+
+    def test_build_guardian_snapshot_stop_on_closed_candle_cancels(self) -> None:
+        # A CLOSED 15m candle (bucket 0, low 458.0) breached the stop while
+        # the current candle recovers above it: the closed-candle confirmation
+        # still cancels — the position would have been stopped out.
+        snap = self._plan_snapshot(current_close=459.55)
+        ticks = [
+            Tick(symbol="R_100", epoch=0.0, price=459.6),
+            Tick(symbol="R_100", epoch=300.0, price=458.0),
+            Tick(symbol="R_100", epoch=600.0, price=459.0),
+            Tick(symbol="R_100", epoch=900.0, price=459.4),
+            Tick(symbol="R_100", epoch=1200.0, price=459.5),
+            Tick(symbol="R_100", epoch=1500.0, price=459.55),
+        ]
+        enriched = build_guardian_snapshot(snap, ticks, guardian_memory_dir=self._mem_dir())
+        self.assertEqual(enriched["guardian_state"], "cancelled")
+        self.assertIn("closed 15m candle", str(enriched["guardian_reason"]).lower())
+
+    def test_stop_traded_on_closed_candle_helper(self) -> None:
+        from synthetic_trader.live.market_snapshot import _stop_traded_on_closed_candle
+
+        def _ticks_pairs(pairs: list[tuple[float, float]]) -> list[Tick]:
+            return [Tick(symbol="R_100", epoch=epoch, price=price) for epoch, price in pairs]
+
+        # Forming-candle wick only (all ticks in one 900s bucket) -> False.
+        forming_only = _ticks_pairs([(0.0, 459.6), (300.0, 458.0), (600.0, 459.5)])
+        self.assertFalse(
+            _stop_traded_on_closed_candle(
+                direction_bias="buy", stop=458.2, ticks=forming_only, timeframe_sec=900
+            )
+        )
+
+        # A CLOSED bucket breached the stop -> True.
+        closed = forming_only + _ticks_pairs([(900.0, 459.4), (1200.0, 459.5)])
+        self.assertTrue(
+            _stop_traded_on_closed_candle(
+                direction_bias="buy", stop=458.2, ticks=closed, timeframe_sec=900
+            )
+        )
+
+        # Bucket boundary: a wick at epoch 899 is inside the forming bucket
+        # (bucket 0 closes at 900), so with ticks spanning 0..1500 the 899 wick
+        # is the breach in the CLOSED bucket 0 -> True.
+        boundary = _ticks_pairs([(0.0, 459.6), (899.0, 458.0), (900.0, 459.4), (1500.0, 459.5)])
+        self.assertTrue(
+            _stop_traded_on_closed_candle(
+                direction_bias="buy", stop=458.2, ticks=boundary, timeframe_sec=900
+            )
+        )
+
+        # since_epoch bounds the check to candles opened after confirmation:
+        # the breach sits in bucket 0 (opened before since_epoch 1500) and is
+        # therefore excluded.
+        self.assertFalse(
+            _stop_traded_on_closed_candle(
+                direction_bias="buy", stop=458.2, ticks=closed, timeframe_sec=900,
+                since_epoch=1500.0,
+            )
+        )
+        # A breach in a bucket opened after since_epoch (bucket 2, epoch 1800+)
+        # is included — with a tick in bucket 3 so bucket 2 is CLOSED.
+        later = _ticks_pairs([(0.0, 459.6), (300.0, 459.0), (1800.0, 458.0), (2700.0, 459.5)])
+        self.assertTrue(
+            _stop_traded_on_closed_candle(
+                direction_bias="buy", stop=458.2, ticks=later, timeframe_sec=900,
+                since_epoch=1500.0,
+            )
+        )
+
+        # Sell direction checks the high.
+        sell = _ticks_pairs([(0.0, 458.0), (300.0, 461.5), (900.0, 459.0), (1200.0, 458.5)])
+        self.assertTrue(
+            _stop_traded_on_closed_candle(
+                direction_bias="sell", stop=461.2, ticks=sell, timeframe_sec=900
+            )
+        )
 
     def test_different_plan_resets_stale_guardian_memory(self) -> None:
         mem_dir = self._mem_dir()

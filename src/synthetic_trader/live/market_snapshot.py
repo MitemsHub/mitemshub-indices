@@ -1111,6 +1111,53 @@ def _excursion_window(
     return 0.0, 0.0
 
 
+def _stop_traded_on_closed_candle(
+    *,
+    direction_bias: str,
+    stop: float | None,
+    ticks: list[Tick],
+    timeframe_sec: int,
+    since_epoch: float | None = None,
+    lookback_candles: int = 2,
+) -> bool:
+    """True when a CLOSED candle of the execution timeframe traded through the stop.
+
+    Ticks are bucketed into ``timeframe_sec`` windows; the currently-forming
+    (latest) bucket is EXCLUDED — only completed candles count.  This is the
+    stop-lock grace: a spread/jitter wick inside the forming candle cannot
+    cancel a confirmed swing plan.  The stop must be confirmed by a full
+    closed candle before the plan is invalidated.
+
+    When ``since_epoch`` is given (the plan's confirmation time), ALL closed
+    candles that opened at or after it are considered — a genuine stop
+    confirmed by any closed candle during the plan's life cancels, even if no
+    evaluation ran for a while and price later recovered.  Without it, only
+    the last ``lookback_candles`` closed candles are considered (for brand-new
+    plans with no confirmation time yet).
+    """
+    if stop is None or not ticks or timeframe_sec <= 0:
+        return False
+    buckets: dict[int, list[float]] = {}
+    for tick in ticks:
+        key = int(tick.epoch // timeframe_sec)
+        buckets.setdefault(key, []).append(tick.price)
+    if len(buckets) < 2:
+        return False  # no closed candle yet
+    closed_keys = sorted(buckets.keys())[:-1]  # drop the forming candle
+    if since_epoch is not None:
+        # Only candles that OPENED after the plan was confirmed.  A candle
+        # already forming before confirmation is given the benefit of the
+        # doubt (its breach may predate the plan).
+        recent = [key for key in closed_keys if key * timeframe_sec >= since_epoch]
+    else:
+        recent = closed_keys[-lookback_candles:]
+    if direction_bias == "buy":
+        return any(min(buckets[key]) <= stop for key in recent)
+    if direction_bias == "sell":
+        return any(max(buckets[key]) >= stop for key in recent)
+    return False
+
+
 def _guardian_prices_since_entry(
     *,
     direction_bias: str,
@@ -1263,6 +1310,39 @@ def build_guardian_snapshot(
         # Preserve the confidence level from when the signal was first confirmed
         confidence_at_confirmation = float(snapshot.get("confidence_at_confirmation", 0.0) or 0.0) or None
 
+    # ── Stop-lock grace: was the stop confirmed by a CLOSED execution candle?
+    # Only completed execution-timeframe candles count — an intraday
+    # spread/jitter wick inside the still-forming candle cannot stop out a
+    # confirmed swing plan.  The evaluation consumes this flag so a stop
+    # trade-through only cancels once a full candle confirms it.
+    # The sniper execution timeframe is 900s (swing_execution_timeframe_sec);
+    # the snapshot may carry an override.
+    execution_tf = int(snapshot.get("execution_timeframe_sec") or 900)
+    # Bound the closed-candle check by the plan's confirmation time when a
+    # confirmed plan already exists (so a genuine stop confirmed by any closed
+    # candle since confirmation cancels, even if no evaluation ran for a while).
+    _since = None
+    if memory is not None and memory.get("state") == "confirmed":
+        try:
+            _confirmed_at = float(memory.get("first_confirmed_at_epoch") or 0.0)
+        except (TypeError, ValueError):
+            _confirmed_at = 0.0
+        if _confirmed_at > 0 and _plan_matches(
+            memory,
+            direction=signal_snapshot.direction_bias,
+            entry=signal_snapshot.entry,
+            stop=signal_snapshot.stop_loss,
+            target=signal_snapshot.take_profit,
+        ):
+            _since = _confirmed_at
+    stop_on_closed_candle = _stop_traded_on_closed_candle(
+        direction_bias=signal_snapshot.direction_bias,
+        stop=signal_snapshot.stop_loss,
+        ticks=ticks,
+        timeframe_sec=execution_tf,
+        since_epoch=_since,
+    )
+
     guardian = evaluate_signal_guardian(
         signal_snapshot,
         GuardianContext(
@@ -1276,6 +1356,8 @@ def build_guardian_snapshot(
             current_confidence=current_confidence,
             atr_14=snapshot.get("atr_14") if isinstance(snapshot.get("atr_14"), (int, float)) else None,
             trading_mode=trading_mode,
+            execution_timeframe_sec=execution_tf,
+            stop_traded_on_closed_candle=stop_on_closed_candle,
         ),
         thresholds,
     )
@@ -1571,6 +1653,11 @@ def _restore_held_plan(alert: dict[str, object], memory_dir: str | Path | None =
     horizon_min = float(memory.get("hold_horizon_minutes") or 360)
     if issued_at and (now - issued_at) > horizon_min * 60:
         return  # hold horizon expired — the plan is over
+    # The CURRENT print is the invalidation line here (not closed-candle
+    # confirmation): if the latest price is through the stop, a real position
+    # would have been stopped out, so a dead plan must never be restored.  The
+    # stop-lock grace lives in the guardian's cancel decision, which already
+    # ran on this same read (and would have written 'cancelled' to memory).
     if direction == "buy" and price < stop:
         return  # stop traded through — genuinely invalidated
     if direction == "sell" and price > stop:
