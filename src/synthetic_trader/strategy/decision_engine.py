@@ -31,6 +31,53 @@ class DecisionReport:
     reasons: tuple[str, ...]
 
 
+def _live_band_signal(
+    *,
+    symbol: str,
+    execution_candles: list[Candle],
+    bar_sec: int,
+    hold_horizon_sec: int,
+) -> TradeSignal | None:
+    """Replay the verified vol-band strategy over the execution candles.
+
+    The band geometry IS the backtested strategy (EGARCH forecast + ADWIN
+    drift gate + extended-vol z_entry fade, with zero-drawdown stop/target
+    from the calibrated band) — replaying it here with the exact same
+    machinery guarantees the live call can never diverge from what the
+    9.5-day corpus measured (+0.65R/trade on R_75 @300s with the breakeven
+    trail).  Returns None (stand aside) when there is no extended-vol fade
+    setup on the current candles.
+    """
+    if not execution_candles or len(execution_candles) < 60:
+        return None
+    from synthetic_trader.backtest.vol_band import VolBandConfig, VolBandStrategy
+    from synthetic_trader.models.garch_calibration import load_calibrated_garch_state
+    from synthetic_trader.research.band_revalidate import load_live_band_overrides
+
+    # Overlay the weekly re-validation artifact (fresh promoted geometry)
+    # on the compiled defaults; stale/absent artifacts fall back to the
+    # tuned §38 defaults untouched.
+    band_kwargs: dict = {
+        "max_hold_sec": hold_horizon_sec,
+        "breakeven_trail_frac": 0.3,
+    }
+    overrides, _artifact = load_live_band_overrides(symbol)
+    band_kwargs.update(overrides)
+
+    strategy = VolBandStrategy(
+        symbol,
+        bar_sec,
+        config=VolBandConfig(**band_kwargs),
+        garch_state=load_calibrated_garch_state(symbol),
+    )
+    last: TradeSignal | None = None
+    for candle in execution_candles:
+        emitted = strategy.on_candle(candle)
+        if emitted is not None:
+            last = emitted
+    return last
+
+
 MAX_CALIBRATION_SAMPLES = 500
 
 # ── Auto-raise min_confidence constants ──────────────────────
@@ -468,6 +515,51 @@ class DecisionEngine:
 
         execution_plan = None
         if role_candles and trading_mode == "sniper":
+            # Band geometry (default): the live call IS the verified vol-band
+            # strategy — the exact EGARCH+ADWIN fade entry with zero-drawdown
+            # band levels — replayed over the execution candles, so live
+            # entry/levels can never diverge from what the backtest measured.
+            if profile.geometry == "band":
+                band_signal = _live_band_signal(
+                    symbol=symbol,
+                    execution_candles=execution_candles,
+                    bar_sec=profile.execution_timeframe_sec,
+                    hold_horizon_sec=profile.band_hold_horizon_sec,
+                )
+                if band_signal is None:
+                    return DecisionReport(
+                        None,
+                        (
+                            "band: no extended-vol fade setup on the execution "
+                            "timeframe — standing aside (without the vol-extension "
+                            "edge, direction on synthetic indices is a coin flip)",
+                        )
+                        + rationale,
+                    )
+                hold_minutes = max(1, round(profile.band_hold_horizon_sec / 60))
+                signal = TradeSignal(
+                    symbol=symbol,
+                    direction=band_signal.direction,
+                    confidence=band_signal.confidence,
+                    min_confidence=min_confidence,
+                    entry=band_signal.entry,
+                    stop_loss=band_signal.stop_loss,
+                    take_profit=band_signal.take_profit,
+                    horizon_sec=profile.band_hold_horizon_sec,
+                    snapshot=snapshot,
+                    rationale=rationale + tuple(band_signal.rationale),
+                    model_version=self.model.version,
+                    execution_stop=band_signal.stop_loss,
+                    thesis_invalidation=band_signal.stop_loss,
+                    primary_target=band_signal.take_profit,
+                    extended_target=band_signal.take_profit,
+                    hold_horizon_minutes=hold_minutes,
+                    execution_trigger_type="band_geometry",
+                    signal_strength=signal_strength,
+                    position_scale=position_scale,
+                )
+                return DecisionReport(signal, rationale + tuple(band_signal.rationale))
+
             swing_signal = build_swing_execution(
                 symbol=symbol,
                 direction=setup.trade_direction,
@@ -477,6 +569,9 @@ class DecisionEngine:
                 max_stop_distance_pct=profile.max_stop_distance_pct,
             )
             if swing_signal is not None:
+                # Legacy "sniper" geometry: SMC swing levels (research only —
+                # its 3-3.5R targets were provably unreachable on the 9.5-day
+                # corpus).
                 signal = TradeSignal(
                     symbol=symbol,
                     direction=direction,

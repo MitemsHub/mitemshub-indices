@@ -36,6 +36,10 @@ from pathlib import Path
 from typing import Any
 
 from synthetic_trader.backtest.engine import BacktestResult, load_ticks_csv
+from synthetic_trader.backtest.vol_band import (
+    VolBandConfig,
+    run_vol_band_backtest,
+)
 from synthetic_trader.backtest.vol_momentum import (
     VolMomentumConfig,
     run_vol_momentum_backtest,
@@ -65,10 +69,23 @@ MOM_TARGET_MULT = (2.0, 4.0, 1.0)      # 2.0, 3.0, 4.0
 # range must reach 120 or a plain sweep would never surface it.
 MOM_HOLD_BARS = (15, 120, 15)          # 15, 30, ..., 120
 
+# Band-geometry (vol-band) grid — the §36 live default geometry.  The
+# verified cell (z 1.0 / vol 1.3 / stop 0.35σ / target 1.0σ / 2h hold) only
+# traded 21 times on the 9.5-day corpus, so the grid sweeps the entry bar
+# DOWN (z_entry 0.5-1.5, vol ratio 1.15-1.6) to find cells that trade more
+# while keeping the geometry knobs that set the RR (stop/target σ mults) and
+# the hold short enough to resolve calls fast.
+BAND_Z_ENTRY = (0.5, 1.5, 0.25)        # 0.5, 0.75, 1.0, 1.25, 1.5
+BAND_VOL_RATIO = (1.15, 1.6, 0.15)     # 1.15, 1.3, 1.45, 1.6
+BAND_STOP_MULT = (0.2, 0.5, 0.1)       # 0.2, 0.3, 0.4, 0.5
+BAND_TARGET_MULT = (0.6, 1.4, 0.2)     # 0.6, 0.8, 1.0, 1.2, 1.4
+BAND_HOLD_SEC = (3600, 10800, 3600)    # 1h, 2h, 3h
+
 # Other knobs held at their tuned defaults (see VolReversionConfig /
 # VolMomentumConfig docstrings).
 FIXED_FADE = {"min_revert_signal": 0.02, "max_hold_bars": 30}
 FIXED_MOM = {"drift_cooldown_bars": 30}
+FIXED_BAND = {"breakeven_trail_frac": 0.3}
 
 
 def _arange(start: float, stop: float, step: float) -> list[float]:
@@ -95,6 +112,42 @@ def fade_grid() -> list[VolReversionConfig]:
         for vr in _arange(*FADE_VOL_RATIO)
         for s in _arange(*FADE_STOP_MULT)
         for t in _arange(*FADE_TARGET_MULT)
+    ]
+
+
+def band_grid(
+    *,
+    z_entries: tuple[float, float, float] | None = None,
+    vol_ratios: tuple[float, float, float] | None = None,
+    stops: tuple[float, float, float] | None = None,
+    targets: tuple[float, float, float] | None = None,
+    holds: tuple[float, float, float] | None = None,
+) -> list[VolBandConfig]:
+    """Cartesian product of the vol-band knob ranges (all overridable).
+
+    ``holds`` is in **seconds** (max_hold_sec), unlike the momentum grid's
+    bar-based holds — the band hold is a wall-clock horizon for the
+    zero-drawdown levels.
+    """
+    z_rng = z_entries or BAND_Z_ENTRY
+    vr_rng = vol_ratios or BAND_VOL_RATIO
+    s_rng = stops or BAND_STOP_MULT
+    t_rng = targets or BAND_TARGET_MULT
+    h_rng = holds or BAND_HOLD_SEC
+    return [
+        VolBandConfig(
+            z_entry=z,
+            vol_extended_ratio=vr,
+            stop_sigma_mult=s,
+            target_sigma_mult=t,
+            max_hold_sec=int(h),
+            **FIXED_BAND,
+        )
+        for z in _arange(*z_rng)
+        for vr in _arange(*vr_rng)
+        for s in _arange(*s_rng)
+        for t in _arange(*t_rng)
+        for h in _arange(*h_rng)
     ]
 
 
@@ -203,6 +256,7 @@ def run_sweep(
     gates: tuple[str, ...] = ("ratio", "absolute"),
     strategies: tuple[str, ...] = ("fade", "momentum"),
     momentum_ranges: dict[str, Any] | None = None,
+    band_ranges: dict[str, Any] | None = None,
     paper: PaperExecutionConfig | None = None,
     garch_state=None,
 ) -> list[SweepResult]:
@@ -210,10 +264,12 @@ def run_sweep(
     expectancy.  The ``min_trades`` floor is applied by
     :func:`summarize_sweep`, which builds the report.
 
-    ``strategies`` restricts which families run (``fade`` / ``momentum``) —
-    pass only ``("momentum",)`` for a focused momentum re-tune without the
-    fade grid.  ``momentum_ranges`` forwards overridable knob ranges to
-    :func:`momentum_grid` (gate-specific ranges under the ``"gate"`` key).
+    ``strategies`` restricts which families run (``fade`` / ``momentum`` /
+    ``band``) — pass only ``("momentum",)`` for a focused momentum re-tune
+    without the fade grid.  ``momentum_ranges`` forwards overridable knob
+    ranges to :func:`momentum_grid` (gate-specific ranges under the
+    ``"gate"`` key); ``band_ranges`` forwards overridable knob ranges to
+    :func:`band_grid`.
     """
     for gate in gates:
         if gate not in ("ratio", "absolute"):
@@ -221,9 +277,9 @@ def run_sweep(
                 f"sweep supports momentum gates 'ratio' and 'absolute'; got {gate!r}"
             )
     for strat in strategies:
-        if strat not in ("fade", "momentum"):
+        if strat not in ("fade", "momentum", "band"):
             raise ValueError(
-                f"sweep supports strategies 'fade' and 'momentum'; got {strat!r}"
+                f"sweep supports strategies 'fade', 'momentum', and 'band'; got {strat!r}"
             )
     config = replace(TraderConfig.default(), paper=paper or PaperExecutionConfig())
     rows: list[SweepResult] = []
@@ -254,6 +310,19 @@ def run_sweep(
                     paper=paper,
                 )
                 rows.append(SweepResult.from_backtest(f"momentum:{gate}", mc, res))
+
+    if "band" in strategies:
+        for bc in band_grid(**(band_ranges or {})):
+            res = run_vol_band_backtest(
+                ticks,
+                symbol=symbol,
+                timeframe_sec=timeframe_sec,
+                config=config,
+                strategy_config=bc,
+                garch_state=garch_state,
+                paper=paper,
+            )
+            rows.append(SweepResult.from_backtest("band", bc, res))
 
     rows.sort(key=lambda r: r.expectancy_r, reverse=True)
     return rows
@@ -314,7 +383,7 @@ def print_sweep_report(report: dict[str, Any], symbol: str, timeframe_sec: int) 
         KEYS = (
             "z_entry", "vol_extended_ratio", "vol_min_ratio", "abs_sigma_mult",
             "abs_ref_period", "mom_gate", "stop_sigma_mult", "target_sigma_mult",
-            "max_hold_bars", "min_revert_signal",
+            "max_hold_bars", "max_hold_sec", "min_revert_signal",
         )
         shown = {k: v for k, v in best["config"].items() if k in KEYS}
         print(f"  config={json.dumps(shown)}")
@@ -330,14 +399,20 @@ def run_sweep_for_csv(
     gates: tuple[str, ...] = ("ratio", "absolute"),
     strategies: tuple[str, ...] = ("fade", "momentum"),
     momentum_ranges: dict[str, Any] | None = None,
+    band_ranges: dict[str, Any] | None = None,
     artifact_output_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Load ticks, run the sweep, optionally persist the report as JSON."""
     ticks = dedupe_ticks(load_ticks_csv(csv_path, default_symbol=symbol))
+    # Realistic execution costs (matching backtest-vol §36): 0.05 absolute
+    # price units ~ 5 real V75 ticks of slippage per side; 0.10 cash fee is
+    # a realistic retail fee on synthetic indices.  The old 1.0/0.5 defaults
+    # were 100-tick slippage and a fee ~10% of a $1k stake — they collapsed
+    # every strategy and never represented a real execution.
     paper = PaperExecutionConfig(
-        entry_slippage_ticks=1.0,
-        exit_slippage_ticks=1.0,
-        execution_penalty_per_trade=0.5,
+        entry_slippage_ticks=0.05,
+        exit_slippage_ticks=0.05,
+        execution_penalty_per_trade=0.10,
     )
     from synthetic_trader.models.garch_calibration import load_calibrated_garch_state
 
@@ -350,6 +425,7 @@ def run_sweep_for_csv(
         gates=gates,
         strategies=strategies,
         momentum_ranges=momentum_ranges,
+        band_ranges=band_ranges,
         paper=paper,
         garch_state=garch_state,
     )

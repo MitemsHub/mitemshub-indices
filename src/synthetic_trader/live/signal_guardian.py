@@ -51,6 +51,15 @@ class GuardianThresholds:
     confirmed_lock_ticks: int = 60
     confirmed_lock_ticks_high: int = 90
     confirmed_lock_ticks_low: int = 30
+    # Breakeven trail (band geometry): once the position's max favorable
+    # excursion reaches this fraction of the TARGET distance, the effective
+    # stop moves to ENTRY — the trade is risk-free and only dies if price
+    # trades all the way back through the breakeven level (confirmed by a
+    # closed execution candle, matching the stop-lock grace).  0 disables.
+    # This is what made the band geometry positive-expectancy in backtest:
+    # without it, losing streaks tripped the risk engine and the strategy
+    # netted -0.84R instead of +0.65R.
+    breakeven_trail_frac: float = 0.3
 
 
 @dataclass(frozen=True)
@@ -101,6 +110,11 @@ class GuardianContext:
     # means the caller provided no candle data — treated as not confirmed
     # (conservative: intraday wicks alone never cancel a swing plan).
     stop_traded_on_closed_candle: bool | None = None
+    # True when a CLOSED execution-timeframe candle traded through the ENTRY
+    # (the breakeven level).  Only meaningful once the breakeven trail is
+    # armed — used to cancel a trailed plan without letting a wick flap it.
+    # None means no candle data (fall back to the current print).
+    entry_traded_on_closed_candle: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -398,6 +412,34 @@ def evaluate_signal_guardian(
         current_ratio = current_adverse / stop_distance
         sustained = current_ratio >= thresholds.weakening_excursion_ratio
         stop_confirmed_on_candle = bool(context.stop_traded_on_closed_candle)
+
+        # ── Breakeven trail (band geometry) ──────────────────────
+        # Once MFE reaches breakeven_trail_frac of the target distance the
+        # effective stop is ENTRY: the plan is risk-free and only dies if
+        # price trades all the way back through breakeven (confirmed by a
+        # closed execution candle — same grace as the stop-lock).
+        trail_armed = (
+            thresholds.breakeven_trail_frac > 0.0
+            and snapshot.take_profit is not None
+            and snapshot.entry is not None
+            and context.max_favorable_excursion
+            >= thresholds.breakeven_trail_frac * abs(snapshot.take_profit - snapshot.entry)
+        )
+        if trail_armed and snapshot.current_close is not None and snapshot.entry is not None:
+            entry_through_now = (
+                snapshot.current_close <= snapshot.entry
+                if snapshot.direction_bias == "buy"
+                else snapshot.current_close >= snapshot.entry
+            )
+            entry_confirmed = bool(context.entry_traded_on_closed_candle)
+            no_candle_data = context.entry_traded_on_closed_candle is None
+            if entry_through_now and (entry_confirmed or no_candle_data):
+                return GuardianEvaluation(
+                    "cancelled",
+                    "Breakeven trail hit — price traded back through the entry after "
+                    "the plan moved to breakeven; the position is closed at ~0R.",
+                )
+
         if (
             adverse_ratio >= 1.0 and stop_confirmed_on_candle
         ) or (

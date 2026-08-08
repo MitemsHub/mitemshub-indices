@@ -769,13 +769,54 @@ class TradingModePreset:
     swing_execution_timeframe_sec: int = 900
     swing_hold_horizon_minutes: int = 360
     swing_take_profit_rr: float = 3.0
+    # Live call geometry: "band" (default — zero-drawdown stop/target from
+    # the calibrated EGARCH band, 1-3h hold) or "sniper" (legacy SMC swing
+    # levels, kept as a research mode).  The SMC sniper's 3-3.5R targets were
+    # shown unreachable (9-18% moves vs ~3-5% calibrated 6h bands), so the
+    # live default is band geometry; the guardian/cancel semantics of the
+    # "sniper" trading mode itself are unchanged.
+    geometry: str = "band"
+    band_hold_horizon_sec: int = 7200
     # Override per-symbol max_stop_distance_pct when set.  None keeps
     # the symbol-level default; a float forces a mode-specific cap.
     max_stop_distance_pct: float | None = None
 
 
 TRADING_MODE_PRESETS = {
+    # Default live mode.  The trading-mode string stays "sniper" so the
+    # guardian's cancel thresholds and the engine's swing branch are
+    # unchanged, but the call GEOMETRY is now the zero-drawdown band
+    # (target/stop from the calibrated EGARCH forecast over 1-3h) instead of
+    # the SMC 3.5R levels that were provably unreachable.
     "sniper": TradingModePreset(
+        confidence_above=0.50,
+        confidence_near=0.42,
+        bias_buy_threshold=0.52,
+        bias_sell_threshold=0.48,
+        risk_min_confidence=0.42,
+        risk_min_reward_risk=2.0,
+        risk_max_volatility_z=3.0,
+        model_decision_threshold=0.50,
+        confidence_relaxation=0.10,
+        symbol_min_history_candles=20,
+        symbol_min_primary_reward_risk=2.0,
+        execution_mode="swing",
+        # Band geometry runs on the 300s execution timeframe — the scale
+        # where the fade entry + band levels were verified (21 trades,
+        # +0.65R on the 9.5-day R_75 corpus).  The 900s scale had too few
+        # bars for the vol-extension gate to fire.
+        swing_execution_timeframe_sec=300,
+        swing_hold_horizon_minutes=360,
+        swing_take_profit_rr=3.5,
+        geometry="band",
+        band_hold_horizon_sec=3600,  # §38 sweep winner: 1h hold resolves calls 2x faster
+        max_stop_distance_pct=0.06,  # wider cap for swing trades
+    ),
+    # Legacy SMC swing geometry (research only): the 3-3.5R structure
+    # targets that motivated the band rebuild.  Keep available for
+    # A/B research; do not trade it live until it proves positive
+    # expectancy at the Stage-3 gate.
+    "sniper_legacy": TradingModePreset(
         confidence_above=0.50,
         confidence_near=0.42,
         bias_buy_threshold=0.52,
@@ -791,7 +832,8 @@ TRADING_MODE_PRESETS = {
         swing_execution_timeframe_sec=900,
         swing_hold_horizon_minutes=360,
         swing_take_profit_rr=3.5,
-        max_stop_distance_pct=0.06,  # wider cap for swing trades
+        geometry="sniper",
+        max_stop_distance_pct=0.06,
     ),
 }
 
@@ -813,6 +855,8 @@ def build_mode_config(base: TraderConfig, preset: TradingModePreset) -> TraderCo
                     "intraday_hold_horizon_minutes",
                     "take_profit_rr",
                     "max_stop_distance_pct",
+                    "geometry",
+                    "band_hold_horizon_sec",
                 }
             },
             symbol=profile.symbol,
@@ -823,6 +867,8 @@ def build_mode_config(base: TraderConfig, preset: TradingModePreset) -> TraderCo
             hold_bars_setup=profile.hold_bars_bias,
             intraday_hold_horizon_minutes=preset.swing_hold_horizon_minutes,
             take_profit_rr=preset.swing_take_profit_rr,
+            geometry=preset.geometry,
+            band_hold_horizon_sec=preset.band_hold_horizon_sec,
             max_stop_distance_pct=(
                 preset.max_stop_distance_pct
                 if preset.max_stop_distance_pct is not None
@@ -1342,6 +1388,19 @@ def build_guardian_snapshot(
         timeframe_sec=execution_tf,
         since_epoch=_since,
     )
+    # Closed-candle trade-through of the ENTRY (breakeven) — used by the
+    # guardian's breakeven trail once the plan has moved to breakeven.
+    entry_on_closed_candle = (
+        _stop_traded_on_closed_candle(
+            direction_bias=signal_snapshot.direction_bias,
+            stop=signal_snapshot.entry,
+            ticks=ticks,
+            timeframe_sec=execution_tf,
+            since_epoch=_since,
+        )
+        if signal_snapshot.entry is not None
+        else None
+    )
 
     guardian = evaluate_signal_guardian(
         signal_snapshot,
@@ -1358,6 +1417,7 @@ def build_guardian_snapshot(
             trading_mode=trading_mode,
             execution_timeframe_sec=execution_tf,
             stop_traded_on_closed_candle=stop_on_closed_candle,
+            entry_traded_on_closed_candle=entry_on_closed_candle,
         ),
         thresholds,
     )
@@ -2456,6 +2516,7 @@ def analyze_live_snapshot(
         "briefing": "current movement is active but not a clean setup yet",
             "symbol": symbol,
             "trading_mode": mode,
+            "geometry": preset.geometry,
             "regime": regime,
             "regime_explanation": regime_explanation,
             "structure_summary": structure_summary,
@@ -2530,6 +2591,7 @@ def analyze_live_snapshot(
         "decision_summary": "; ".join(report.signal.rationale),
         "symbol": symbol,
         "trading_mode": mode,
+        "geometry": preset.geometry,
         "regime": snapshot_regime,
         "regime_explanation": "; ".join(report.signal.snapshot.notes) or "regime is still neutral",
         "structure_summary": _summarize_structure(dict(report.signal.snapshot.structure)),
@@ -2836,12 +2898,18 @@ async def run_live_snapshot(
 
     try:
         _t_tick = time.time()
+        # The collect budget must cover the hardened MT5 init (up to 3 full
+        # portable passes × 10s + backoff for IPC-timeout recovery) plus the
+        # tick read itself.  A 25s window was too tight: a slow-but-recovering
+        # init (terminal busy, previous subprocess wedged the IPC) would blow
+        # the whole budget and surface as "Bridge Offline" even though MT5
+        # recovered a moment later.
         ticks = await asyncio.wait_for(
             collect_live_snapshot_ticks(
                 symbol=symbol, warmup_count=warmup_count,
                 max_live_ticks=max_live_ticks, app_id=app_id,
             ),
-            timeout=25.0,
+            timeout=45.0,
         )
         _phases["tick_collect_ms"] = int((time.time() - _t_tick) * 1000)
 

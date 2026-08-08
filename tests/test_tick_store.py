@@ -4,7 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from synthetic_trader.data.tick_store import inspect_ticks, normalize_ticks, write_ticks_csv
+from synthetic_trader.data.tick_store import (
+    SCALE_GUARD_MAX_RATIO,
+    _apply_scale_guard,
+    append_ticks_csv,
+    inspect_ticks,
+    normalize_ticks,
+    write_ticks_csv,
+)
 from synthetic_trader.domain import Tick
 
 
@@ -44,6 +51,52 @@ class TickStoreTests(unittest.TestCase):
 
         self.assertIn("epoch,symbol,price", content)
         self.assertIn("R_75", content)
+
+    def test_scale_guard_rejects_wrong_venue_ticks(self) -> None:
+        """Deriv 1HZ75V ticks (~7,400) must never be appended into a
+        Blueberry SYN75 corpus (~1,770) — a 4.2x price-scale mismatch that
+        would silently poison the compounding corpus."""
+        existing = [Tick("R_75", 1_700_000_000 + i, 1770.0 + (i % 5)) for i in range(50)]
+        incoming = [
+            Tick("R_75", 1_700_000_100, 7402.47),  # Deriv scale — must drop
+            Tick("R_75", 1_700_000_101, 7388.10),  # Deriv scale — must drop
+            Tick("R_75", 1_700_000_102, 1791.55),  # correct scale — keep
+            Tick("R_75", 1_700_000_103, 1812.03),  # correct scale — keep
+        ]
+
+        kept = _apply_scale_guard(incoming, existing)
+
+        self.assertEqual([t.price for t in kept], [1791.55, 1812.03])
+        self.assertGreaterEqual(SCALE_GUARD_MAX_RATIO, 4.0)
+
+    def test_scale_guard_passes_small_corpus_through(self) -> None:
+        """A corpus too small to judge scale (<20 ticks) must not reject anything."""
+        existing = [Tick("R_75", 1_700_000_000 + i, 100.0 + i) for i in range(5)]
+        incoming = [Tick("R_75", 1_700_000_100, 7402.47)]
+
+        kept = _apply_scale_guard(incoming, existing)
+
+        self.assertEqual(len(kept), 1)
+
+    def test_append_ticks_csv_scale_guard_end_to_end(self) -> None:
+        """append_ticks_csv must refuse to merge wrong-scale ticks into an
+        existing file, and must still append correct-scale ticks."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ticks.csv"
+            base = [Tick("R_75", 1_700_000_000 + i, 1770.0 + (i % 7)) for i in range(30)]
+            write_ticks_csv(path, base)
+
+            # Wrong-scale batch: Deriv 1HZ75V ~7,400 (should be fully dropped)
+            bad = [Tick("R_75", 1_700_000_200 + i, 7400.0 + i) for i in range(10)]
+            append_ticks_csv(path, bad)
+            content = path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(content), 31)  # header + 30 base ticks, none appended
+
+            # Correct-scale batch: appends fine
+            good = [Tick("R_75", 1_700_000_300 + i, 1790.0 + i) for i in range(5)]
+            append_ticks_csv(path, good)
+            content = path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(content), 36)  # header + 30 base + 5 good
 
     def test_normalize_drops_junk_rows_from_copy_rates_range(self) -> None:
         """MT5's copy_rates_range can return uninitialised rows (epoch ~0 or

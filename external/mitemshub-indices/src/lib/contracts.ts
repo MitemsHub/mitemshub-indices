@@ -264,6 +264,11 @@ export const freshCallResponseSchema = z.object({
   // Data venue the levels came from: "mt5" (Blueberry SYN scale),
   // "deriv" (1HZ scale — NOT execution-comparable), or "csv" (local file).
   venue: z.enum(["mt5", "deriv", "csv"]).nullable().optional(),
+  // Call geometry that produced the levels: "band" (vol-band from the
+  // calibrated EGARCH forecast, live default) vs "sniper_legacy" (SMC
+  // structure levels, research only).  Lets the operator see at a glance
+  // whether a call came from the calibrated band or the legacy sniper.
+  geometry: z.enum(["band", "sniper_legacy"]).nullable().optional(),
 });
 
 export type FreshCallResponse = z.infer<typeof freshCallResponseSchema>;

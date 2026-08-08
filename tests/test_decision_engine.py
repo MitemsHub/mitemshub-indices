@@ -1,10 +1,29 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from synthetic_trader.config import TraderConfig
+
+
+def legacy_sniper_config() -> TraderConfig:
+    """Config with the legacy SMC 'sniper' geometry.
+
+    The live default geometry is now "band" (zero-drawdown levels from the
+    calibrated EGARCH band).  The tests below lock the legacy SMC swing path
+    (patched ``build_swing_execution``), so they opt into geometry="sniper"
+    explicitly; band behavior has its own dedicated tests.
+    """
+    cfg = TraderConfig.default()
+    return replace(
+        cfg,
+        symbols={
+            sym: replace(prof, geometry="sniper")
+            for sym, prof in cfg.symbols.items()
+        },
+    )
 from synthetic_trader.domain import Candle, Direction, FeatureSnapshot, Regime
 from synthetic_trader.strategy.confirmation_builder import confirm_setup
 from synthetic_trader.strategy.decision_engine import DecisionEngine, CalibrationState, MAX_CALIBRATION_SAMPLES
@@ -155,12 +174,30 @@ class CalibrationStatePruningTests(unittest.TestCase):
 
 class DecisionEngineTests(unittest.TestCase):
     def test_waits_for_enough_history(self) -> None:
-        engine = DecisionEngine(TraderConfig.default())
+        engine = DecisionEngine(legacy_sniper_config())
         report = engine.evaluate("R_75", trending_candles(count=10))
         self.assertIsNone(report.signal)
 
-    def test_creates_directional_signal(self) -> None:
+    def test_band_geometry_stands_aside_without_extended_vol_fade_setup(self) -> None:
+        # Default profile geometry is now "band" — the live call IS the
+        # verified vol-band strategy.  A steady monotonic trend has no
+        # extended-vol z_dev fade setup, so the engine must stand aside
+        # instead of emitting a direction call with unreachable SMC levels.
+        candles = trending_candles(count=120)
+        role = {
+            "execution": candles,
+            "setup": candles,
+            "confirmation": candles[-30:],
+            "bias": candles,
+        }
         engine = DecisionEngine(TraderConfig.default())
+        report = engine.evaluate("R_75", candles, role_candles=role)
+        self.assertIsNone(report.signal)
+        self.assertTrue(any("band" in r for r in report.reasons))
+        self.assertIsNone(report.signal)
+
+    def test_creates_directional_signal(self) -> None:
+        engine = DecisionEngine(legacy_sniper_config())
         with patch(
             "synthetic_trader.strategy.decision_engine.build_swing_execution",
             return_value=intraday_execution_plan(
@@ -178,7 +215,7 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertGreaterEqual(report.signal.reward_risk, 1.35)
 
     def test_uses_symbol_specific_confidence_floor_for_borderline_synthetic_trend(self) -> None:
-        engine = DecisionEngine(TraderConfig.default())
+        engine = DecisionEngine(legacy_sniper_config())
 
         for symbol in ("R_75", "R_100"):
             with self.subTest(symbol=symbol):
@@ -194,7 +231,7 @@ class DecisionEngineTests(unittest.TestCase):
                 self.assertEqual(report.signal.direction, Direction.LONG)
 
     def test_builds_structure_led_trade_plan_from_top_down_components(self) -> None:
-        config = TraderConfig.default()
+        config = legacy_sniper_config()
         engine = DecisionEngine(config)
         candles = trending_candles(symbol="R_75", count=120)
         higher_timeframe_candles = trending_candles(symbol="R_75", count=100)
@@ -250,7 +287,7 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertIn(confirmation.reason, report.reasons)
 
     def test_evaluate_prefers_named_role_candle_inputs_over_legacy_reuse(self) -> None:
-        config = TraderConfig.default()
+        config = legacy_sniper_config()
         engine = DecisionEngine(config)
         profile = config.symbols["R_75"]
         bias_candles = trending_candles(symbol="R_75", count=150)
@@ -347,7 +384,7 @@ class DecisionEngineTests(unittest.TestCase):
         )
 
     def test_r100_keeps_confirmed_top_down_setup_when_micro_model_is_neutral(self) -> None:
-        config = TraderConfig.default()
+        config = legacy_sniper_config()
         engine = DecisionEngine(config)
         profile = config.symbols["R_100"]
         bias_candles = trending_candles(symbol="R_100", count=150)
@@ -426,7 +463,7 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertEqual(report.signal.direction, Direction.LONG)
 
     def test_trade_signal_exposes_distinct_execution_and_thesis_levels(self) -> None:
-        engine = DecisionEngine(TraderConfig.default())
+        engine = DecisionEngine(legacy_sniper_config())
         with patch(
             "synthetic_trader.strategy.decision_engine.build_swing_execution",
             return_value=intraday_execution_plan(),
@@ -440,7 +477,7 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertIsNotNone(report.signal.take_profit)
 
     def test_decision_engine_accepts_clean_r100_reclaim_pattern_with_balanced_target(self) -> None:
-        config = TraderConfig.default()
+        config = legacy_sniper_config()
         engine = DecisionEngine(config)
         profile = config.symbols["R_100"]
         bias_candles = trending_candles(symbol="R_100", count=150)
@@ -521,7 +558,7 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertLess(abs(report.signal.take_profit - report.signal.entry), 20.0)
 
     def test_decision_engine_accepts_clean_r75_pattern_with_symbol_aware_target(self) -> None:
-        config = TraderConfig.default()
+        config = legacy_sniper_config()
         engine = DecisionEngine(config)
         profile = config.symbols["R_75"]
         bias_candles = trending_candles(symbol="R_75", count=150)
@@ -604,7 +641,7 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertLess(abs(report.signal.take_profit - report.signal.entry), 800.0)
 
     def test_decision_engine_preserves_shared_contract_while_symbols_differ(self) -> None:
-        config = TraderConfig.default()
+        config = legacy_sniper_config()
         cases = {
             "R_75": {
                 "entry": 55620.0,
@@ -710,7 +747,7 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertNotEqual(signals["R_75"].entry, signals["R_100"].entry)
 
     def test_decision_engine_rejects_weak_r100_pattern_even_when_top_down_thesis_is_confirmed(self) -> None:
-        config = TraderConfig.default()
+        config = legacy_sniper_config()
         engine = DecisionEngine(config)
         profile = config.symbols["R_100"]
         bias_candles = trending_candles(symbol="R_100", count=150)

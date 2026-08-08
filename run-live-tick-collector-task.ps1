@@ -170,6 +170,90 @@ function Write-ScoringSweep {
 }
 
 
+# ── Band-geometry re-validation (weekly, internal gate) ──────────────
+# Re-sweep the live band geometry around the current defaults so the live
+# calls track the freshest corpus.  The CLI's own growth/elapsed gates make
+# this CHEAP on the 6 of 7 days it skips (a JSON read + a span check); the
+# full focused sweep only fires when the corpus grew ~6+ days since the
+# last run.  Non-fatal by design: a re-validation hiccup must not fail the
+# collector task.
+function Write-BandRevalidate {
+  $python = Get-PythonRunner
+  if (-not $python) {
+    Write-TaskLog "band-revalidate skipped: python not found on PATH"
+    return $false
+  }
+  $errFile = Join-Path $verifyDir "band_revalidate_stderr.txt"
+  $prevEAP = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  $exitCode = 1
+  $out = ""
+  try {
+    $out = & $python -m synthetic_trader.cli band-revalidate `
+      --engine-root $appDir `
+      --symbols R_75,R_100 2> $errFile | Out-String
+    $exitCode = $LASTEXITCODE
+  } catch {
+    $exitCode = 1
+    $out = $_.Exception.Message
+  }
+  $ErrorActionPreference = $prevEAP
+  $oneLine = $out.Trim() -replace "\r?\n", " | "
+  if ($exitCode -eq 0) {
+    Write-TaskLog "band-revalidate ok: $oneLine"
+    return $true
+  }
+  $stderr = ""
+  if (Test-Path $errFile) {
+    $stderr = (Get-Content $errFile -Raw -ErrorAction SilentlyContinue).Trim() -replace "\r?\n", " | "
+  }
+  Write-TaskLog "band-revalidate failed (exit $exitCode): $oneLine $stderr"
+  return $false
+}
+
+
+# ── Head-to-head milestone verify (spans >= ~14d, internal gate) ──────
+# Re-runs the full band vs fade vs momentum vs sniper comparison once the
+# corpus crosses ~14 days (and again at ~18d when the band reaches 40+
+# trades), so the +0.994R cell is re-tested at sample size without a manual
+# step.  The CLI's internal span/growth gates make this a cheap skip on the
+# days before the milestone; the heavy run only fires when the corpus grew.
+# Non-fatal: a verify hiccup must not fail the collector task.
+function Write-HeadToHeadVerify {
+  $python = Get-PythonRunner
+  if (-not $python) {
+    Write-TaskLog "headtohead-verify skipped: python not found on PATH"
+    return $false
+  }
+  $errFile = Join-Path $verifyDir "headtohead_verify_stderr.txt"
+  $prevEAP = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  $exitCode = 1
+  $out = ""
+  try {
+    $out = & $python -m synthetic_trader.cli verify-headtohead `
+      --engine-root $appDir `
+      --symbol R_75 2> $errFile | Out-String
+    $exitCode = $LASTEXITCODE
+  } catch {
+    $exitCode = 1
+    $out = $_.Exception.Message
+  }
+  $ErrorActionPreference = $prevEAP
+  $oneLine = $out.Trim() -replace "\r?\n", " | "
+  if ($exitCode -eq 0) {
+    Write-TaskLog "headtohead-verify ok: $oneLine"
+    return $true
+  }
+  $stderr = ""
+  if (Test-Path $errFile) {
+    $stderr = (Get-Content $errFile -Raw -ErrorAction SilentlyContinue).Trim() -replace "\r?\n", " | "
+  }
+  Write-TaskLog "headtohead-verify failed (exit $exitCode): $oneLine $stderr"
+  return $false
+}
+
+
 # ── Verification via tick-coverage --json ──────────────────────────────
 function Write-CoverageVerification {
   param([int]$Retries = 6, [int]$DelaySec = 10)
@@ -218,6 +302,12 @@ try {
   # calibration health panel / Stage-3 gate) compounds on the same daily
   # schedule as the tick corpus.  Non-fatal - see the function comment.
   $null = Write-ScoringSweep
+  # Re-validate the band geometry weekly (internal growth/elapsed gates
+  # skip most days cheaply).  Non-fatal - see the function comment.
+  $null = Write-BandRevalidate
+  # Re-run the full head-to-head at the 14-day milestone (internal span/
+  # growth gates skip until then).  Non-fatal - see the function comment.
+  $null = Write-HeadToHeadVerify
   Write-TaskLog "task action complete"
   # Surface verification failures in Task Scheduler's Last Result so a
   # silent corpus stall is visible from the task list, not just the log.

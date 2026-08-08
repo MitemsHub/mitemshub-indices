@@ -346,6 +346,33 @@ _LOGIN_RETRY_COUNT = 1         # was 3
 _SELECT_RETRY_SLEEP = 0.5
 _SELECT_RETRY_COUNT = 1        # was 3
 
+# IPC-timeout hardening: mt5.initialize() can return (-10005, 'IPC timeout')
+# when the terminal is busy or a previous process left a half-open IPC
+# channel (a timed-out initialize keeps running in the executor thread even
+# after asyncio.wait_for gives up — the MetaTrader5 Python package allows
+# one connection per process and a zombie initialize wedges the terminal for
+# every later subprocess).  The fix: retry the whole portable(False→True)
+# pass a few times, calling mt5.shutdown() before each retry so the
+# half-open state is cleared, with a small backoff between full passes.
+_INIT_FULL_RETRY_COUNT = 3     # full portable(False→True) passes
+_INIT_FULL_RETRY_SLEEP = 1.0   # backoff between full passes (seconds)
+
+
+async def _safe_mt5_shutdown(mt5, loop) -> None:
+    """Best-effort mt5.shutdown from the executor; never raises.
+
+    Clears any half-open IPC state left by a timed-out initialize so the
+    next attempt starts from a clean slate.  Also the documented way to
+    unstick a hung initialize in the same process.
+    """
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(None, mt5.shutdown),
+            timeout=3.0,
+        )
+    except Exception:
+        pass
+
 
 class Mt5TickClient:
     """Async MT5 tick client with fast retry and connection reuse.
@@ -387,15 +414,24 @@ class Mt5TickClient:
         #    indefinitely (known issue with MetaTrader5 Python package). With
         #    the timeout, it returns cleanly with error code `(-10005, 'IPC timeout')`
         #    when the existing terminal cannot be reached.
+        # 4. IPC-timeout hardening: the whole pass is retried up to
+        #    _INIT_FULL_RETRY_COUNT times with mt5.shutdown() + backoff between
+        #    passes — a timed-out initialize keeps running in the executor
+        #    thread, and shutdown is the only way to release that half-open IPC
+        #    channel so the next subprocess doesn't inherit the timeout.
         _diag(f"initializing: {terminal_path}")
         _t0 = time.perf_counter()
         initialized = False
         init_error = None
-        for portable in (False, True):  # portable=False FIRST (connect to running terminal)
-            if portable is False and not terminal_path:
-                _diag("skipping portable=False — no terminal path resolved")
-                continue
-            for attempt in range(1):  # 1 attempt per flag — fast fail if terminal not reachable
+        for full_attempt in range(_INIT_FULL_RETRY_COUNT):
+            if full_attempt > 0:
+                # Clear any half-open IPC state left by the timed-out attempt.
+                await _safe_mt5_shutdown(mt5, loop)
+                await asyncio.sleep(_INIT_FULL_RETRY_SLEEP * full_attempt)
+            for portable in (False, True):  # portable=False FIRST (connect to running terminal)
+                if portable is False and not terminal_path:
+                    _diag("skipping portable=False — no terminal path resolved")
+                    continue
                 try:
                     initialized = await asyncio.wait_for(
                         loop.run_in_executor(
@@ -405,16 +441,16 @@ class Mt5TickClient:
                         timeout=10.0,  # Slightly longer than C-level timeout
                     )
                     if initialized:
-                        _diag(f"initialized (portable={portable})")
+                        _diag(f"initialized (portable={portable}, full_attempt={full_attempt})")
                         break
                 except (asyncio.TimeoutError, Exception) as ex:
                     init_error = ex
-                    _diag(f"initialize (portable={portable}) attempt {attempt + 1}: {ex}")
+                    _diag(f"initialize (portable={portable}) full_attempt {full_attempt}: {ex}")
                 else:
                     if not initialized:
                         err = mt5.last_error()
                         init_error = err
-                        _diag(f"initialize (portable={portable}) attempt {attempt + 1}: returned False ({err})")
+                        _diag(f"initialize (portable={portable}) full_attempt {full_attempt}: returned False ({err})")
             if initialized:
                 break
         _init_ms = (time.perf_counter() - _t0) * 1000

@@ -8,6 +8,11 @@ import pytest
 
 from synthetic_trader.domain import Tick
 from synthetic_trader.research.vol_param_sweep import (
+    BAND_HOLD_SEC,
+    BAND_STOP_MULT,
+    BAND_TARGET_MULT,
+    BAND_VOL_RATIO,
+    BAND_Z_ENTRY,
     FADE_STOP_MULT,
     FADE_TARGET_MULT,
     FADE_VOL_RATIO,
@@ -19,6 +24,7 @@ from synthetic_trader.research.vol_param_sweep import (
     MOM_VOL_RATIO,
     MOM_Z_ENTRY,
     SweepResult,
+    band_grid,
     fade_grid,
     momentum_grid,
     print_sweep_report,
@@ -106,6 +112,49 @@ class TestGrids:
         assert len(holds) == N_HOLD
         assert MOM_HOLD_BARS[0] == 15 and MOM_HOLD_BARS[1] == 120
 
+    def test_band_grid_cartesian_size(self) -> None:
+        grid = band_grid()
+        n_z = len([0.5, 0.75, 1.0, 1.25, 1.5])
+        n_vr = len([1.15, 1.3, 1.45, 1.6])
+        n_s = len([0.2, 0.3, 0.4, 0.5])
+        n_t = len([0.6, 0.8, 1.0, 1.2, 1.4])
+        n_h = len([3600, 7200, 10800])
+        assert len(grid) == n_z * n_vr * n_s * n_t * n_h == 5 * 4 * 4 * 5 * 3 == 1200
+        # Every config carries the fixed breakeven trail (verified in §36).
+        for cfg in grid[:5]:
+            assert cfg.breakeven_trail_frac == 0.3
+
+    def test_band_grid_bounds_and_hold_units(self) -> None:
+        grid = band_grid()
+        assert min(c.z_entry for c in grid) == BAND_Z_ENTRY[0]
+        assert max(c.z_entry for c in grid) == BAND_Z_ENTRY[1]
+        assert min(c.vol_extended_ratio for c in grid) == BAND_VOL_RATIO[0]
+        assert max(c.vol_extended_ratio for c in grid) == BAND_VOL_RATIO[1]
+        assert min(c.stop_sigma_mult for c in grid) == BAND_STOP_MULT[0]
+        assert max(c.stop_sigma_mult for c in grid) == BAND_STOP_MULT[1]
+        assert min(c.target_sigma_mult for c in grid) == BAND_TARGET_MULT[0]
+        assert max(c.target_sigma_mult for c in grid) == BAND_TARGET_MULT[1]
+        # Hold is in SECONDS (wall-clock horizon), not bars.
+        holds = {c.max_hold_sec for c in grid}
+        assert holds == {3600, 7200, 10800}
+        assert BAND_HOLD_SEC[0] == 3600 and BAND_HOLD_SEC[1] == 10800
+
+    def test_band_grid_overrides(self) -> None:
+        """Focused re-tune ranges override the module defaults per knob."""
+        grid = band_grid(
+            z_entries=(0.75, 1.0, 0.25),
+            vol_ratios=(1.3, 1.3, 0.1),
+            stops=(0.3, 0.4, 0.1),
+            targets=(1.0, 1.2, 0.2),
+            holds=(3600, 7200, 3600),
+        )
+        assert {c.z_entry for c in grid} == {0.75, 1.0}
+        assert {c.vol_extended_ratio for c in grid} == {1.3}
+        assert {c.stop_sigma_mult for c in grid} == {0.3, 0.4}
+        assert {c.target_sigma_mult for c in grid} == {1.0, 1.2}
+        assert {c.max_hold_sec for c in grid} == {3600, 7200}
+        assert len(grid) == 2 * 1 * 2 * 2 * 2 == 16
+
     def test_momentum_grid_overrides(self) -> None:
         """Focused re-tune ranges override the module defaults per knob."""
         grid = momentum_grid(
@@ -165,6 +214,23 @@ class TestSweep:
         )
         assert len(fade_only) == N_FADE
         assert all(r.label == "fade" for r in fade_only)
+
+        band_only = run_sweep(
+            ticks,
+            symbol="R_75",
+            timeframe_sec=60,
+            strategies=("band",),
+            gates=("absolute",),
+            band_ranges={
+                "z_entries": (0.75, 1.0, 0.25),
+                "vol_ratios": (1.3, 1.3, 0.1),
+                "stops": (0.3, 0.4, 0.1),
+                "targets": (1.0, 1.2, 0.2),
+                "holds": (3600, 7200, 3600),
+            },
+        )
+        assert len(band_only) == 16
+        assert all(r.label == "band" for r in band_only)
 
     def test_sweep_for_csv_roundtrip(self, tmp_path) -> None:
         """CLI path: run_sweep_for_csv must not choke on min_trades (the
@@ -277,6 +343,26 @@ class TestSweep:
         ticks = dedupe_ticks(_ticks())
         with pytest.raises(ValueError):
             run_sweep(ticks, symbol="R_75", timeframe_sec=60, strategies=("bogus",))
+
+    def test_band_sweep_ranks_and_labels(self) -> None:
+        ticks = dedupe_ticks(_ticks())
+        rows = run_sweep(
+            ticks,
+            symbol="R_75",
+            timeframe_sec=60,
+            strategies=("band",),
+            band_ranges={
+                "z_entries": (0.75, 1.0, 0.25),
+                "vol_ratios": (1.3, 1.3, 0.1),
+                "stops": (0.3, 0.4, 0.1),
+                "targets": (1.0, 1.2, 0.2),
+                "holds": (3600, 7200, 3600),
+            },
+        )
+        exps = [r.expectancy_r for r in rows]
+        assert exps == sorted(exps, reverse=True)
+        assert all(r.label == "band" for r in rows)
+        assert all(math.isfinite(r.expectancy_r) for r in rows)
 
     def test_sweep_deterministic(self) -> None:
         ticks = dedupe_ticks(_ticks())

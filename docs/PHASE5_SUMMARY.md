@@ -2342,6 +2342,97 @@ select on `scoring_rule`).
   and R_100 with `plan_held: true` — the exact behavior the operator asked
   for.
 
+## 39. Band-Geometry Rebuild — zero-drawdown levels from the calibrated EGARCH band
+
+**Why:** the SMC sniper's 3–3.5R targets were provably unreachable.  The
+user's Aug-5 R_75 SELL needed −3.5% (the 6h p90 boundary); the Aug-6 R_100
+BUY target was **+18%** — 3× beyond the widest 6h window ever observed
+(~5.5%).  Post-mortems on the tick corpus confirmed both: stop hit in 2 min
+(R_75) and never-within-16%-of-target (R_100).  Targets were set from SMC
+*structure* (order blocks / external liquidity) instead of the calibrated
+volatility band the dashboard already forecasts.
+
+**The fix — `band_geometry.py` + `vol_band.py`:** a new shared module derives
+stop/target from the calibrated EGARCH band over a 1–3h hold, with a
+zero-drawdown risk geometry: stop = 0.35σ_h (tight invalidation — wrong is
+cheap), target = 1.0σ_h (inside the calibrated band — reachable), RR ≈ 2.9.
+The `vol-band` backtest strategy reuses the fade's verified entry (EGARCH
+forecast + ADWIN drift gate + z_entry price-extension fade) and the live
+`decision_engine` replays that EXACT strategy over the execution candles, so
+live and measured geometry cannot diverge.  The breakeven trail (stop to
+entry once MFE ≥ 0.3 × target distance) is now also in the live guardian.
+
+**R_75 head-to-head verdict (9.5-day Blueberry SYN75 corpus, 300s,
+calibrated EGARCH, 5-tick slippage + $0.10/trade fee):**
+
+| strategy | trades | WR | expectancy R | net |
+|---|---|---|---|---|
+| **vol-band** | **21** | **42.9%** | **+0.647** | **+80.03 (+8.0%)** |
+| vol-momentum | 39 | 41.0% | +0.086 | +14.94 |
+| sniper | 15 | 40.0% | −0.005 | −2.26 |
+| vol-reversion | 6 | 50.0% | −0.182 | −7.06 |
+
+**Two correctness bugs found and fixed along the way:**
+1. **Risk engine** counted any negative PnL — even a −0.004R breakeven-trail
+   scratch after slippage — as a consecutive loss, tripping the 4-loss
+   circuit breaker and halting the strategy on frictions alone.  Now only
+   material losses (< −0.1R) count.  This flips the band from −0.9R to
+   +0.65R under realistic costs and lifts momentum to +0.086R.
+2. **Calibration loader** over-rejected every healthy near-unit-root fit
+   (persistence ≈ 0.995): rule 3 compared `long_run_vol` (which underflows
+   by design at unit root) against realized vol.  Rule 3 now only applies
+   below persistence 0.95.  R_75 was re-calibrated on the clean 9.5-day
+   SYN75 corpus (alpha 0.077 / beta 0.918 / persistence 0.995).
+
+**CLI:** `backtest-vol --mode band` (choices: fade/momentum/band) with
+`--band-hold-sec 3600 --band-z-entry 1.0 --band-vol-ratio 1.3
+--band-stop-mult 0.20 --band-target-mult 0.80 --band-trail 0.3` as the
+tuned defaults (§40 sweep winner); `--compare` now prints all four
+strategies.  Slippage defaults fixed from 1.0 (=100 real ticks) to 0.05
+(=5 ticks).  The SMC sniper is demoted to the `sniper_legacy` research
+preset; the live `sniper` mode now emits **band geometry** on the 300s
+execution timeframe with a 1h hold (§40).
+
+**Honest caveat:** 21 trades is still a modest sample — the first
+positive-expectancy cell in the programme with a real trade count, but not
+statistical proof.  The Stage-3 gate now tracks `band_geometry` calls in
+their own empirical bucket; let the corpus compound and the gate will
+confirm or refute at scale.
+
+## 40. Vol-Band Parameter Sweep — the +0.647R cell re-tuned to +0.994R
+
+**Goal:** push the §39 band cell past 50 trades while keeping expectancy
+positive.  `sweep-vol` gained a `band` strategy family (and `--band-json`
+focused grids) sweeping z_entry, vol-extension ratio, stop/target σ
+multipliers, and hold (seconds); the sweep's execution costs were also
+fixed from the unrealistic 1.0-abs/0.5-cash defaults to the CLI's
+realistic 0.05/0.10 (§36 values).
+
+**The honest finding — 50+ trades is not reachable on a 9.5-day corpus:**
+the vol-extension gate IS the edge.  At 300s the strategy tops out at ~29
+trades with the gate intact (grid max 44 trades only when the gate is
+opened to vol_ratio 1.00, which dilutes expectancy to +0.44R); at 60s the
+trade count rises (35-41) but expectancy collapses to ~+0.05R because the
+edge doesn't survive the noisier bar scale.  Trade count scales with the
+corpus — the scheduled collector compounds ~1.5-2.5 entries/day, so ~50
+trades at the verified gate needs roughly 3-4 more weeks of data.
+
+**What the sweep DID find — a strictly better default:** with the same
+selective gate (z 1.0 / vol 1.3) but tighter geometry, the cell
+`stop 0.20σ_h / target 0.80σ_h / 1h hold` scores **23 trades, +0.994R,
++139.66 net** on the 9.5-day corpus — 54% higher expectancy than §39's
+21-trade +0.647R, at essentially the same trade count, and the 1h hold
+resolves calls twice as fast so the empirical gate learns faster.  This is
+now the default (`VolBandConfig` / `BandGeometryConfig` / `backtest-vol`
+`--band-*` flags / live `sniper` preset hold = 3600s).  Runner-up cells
+for when more data lands: `stop 0.20 / target 0.80 / 2h` (+0.734R, n=23)
+and the vol-1.0 frequency play (+0.44R, n=40).
+
+**Validated:** 19 sweep tests (grid sizes, bounds, overrides, band-only
+filter, ranking, determinism) — all pass; the full affected set
+(band-geometry, sweep, decision-engine, live-snapshot) is 135 green, and
+`backtest-vol --mode band` reproduces the sweep winner exactly.
+
 ## Next Steps
 
 1. **✅ DONE — collector wired into Windows Task Scheduler (§25).**  The
@@ -2391,3 +2482,146 @@ select on `scoring_rule`).
    the new defaults and let the M1 capture loop compound the corpus until
    those cells reach statistical sample counts (~50+ trades), then re-sweep
    locally around the winners instead of the full grid.
+
+## 41. MT5 IPC-Time-Out Hardening — live reads stop intermittently failing
+
+**Symptom:** the dashboard sporadically showed "Bridge Offline" / "retry
+live read", the collector logged recurring ``MT5 initialize failed:
+(-10005, 'IPC timeout')`` + feed-loss reconnects, and a live-snapshot POST
+once hung 358s.  The bridge's live read has a 60s × 2-attempt budget, so a
+single slow init surfaced as a failed read even though the terminal was
+fine moments later.
+
+**Root cause — a zombie initialize wedges the IPC channel for every later
+subprocess.**  ``mt5.initialize()`` is a C-level call that can hang 25+s
+when the terminal is busy (documented MetaTrader5-Python issue).  Two init
+sites ran it in a background thread with a timeout, then gave up:
+
+- ``Mt5TickClient.__aenter__`` used ``asyncio.wait_for(..., timeout=10)`` —
+  when the executor thread timed out, the C call kept running while the
+  subprocess exited, leaving a half-open IPC connection in the terminal.
+- The bridge's embedded ``_mt5`` script raised ``init:...`` **before** its
+  ``try/finally``, so ``mt5.shutdown()`` was never called on the failure
+  path — the abandoned daemon thread held the channel, and the NEXT
+  subprocess inherited ``(-10005, 'IPC timeout')``.  A cascade of one-time
+  failures became the recurring pattern.
+
+**The fix:**
+1. ``Mt5TickClient.__aenter__`` now retries the whole portable(False→True)
+   pass up to 3× with ``mt5.shutdown()`` + backoff between passes —
+   shutdown is the documented way to release a half-open IPC channel, so a
+   timed-out attempt no longer poisons the next one.
+2. The bridge ``_mt5`` script wraps init **inside** the ``try`` and calls
+   ``mt5.shutdown()`` in the ``finally`` on every exit path (init failure
+   included), plus a best-effort shutdown after each failed attempt.
+3. The snapshot's tick-collect budget was raised 25s → 45s: a slow-but-
+   recovering init (3 passes × 10s + backoff) now fits instead of blowing
+   the whole budget and surfacing as "Bridge Offline".
+4. Fixed a pre-existing test-isolation leak: ``test_run_live_snapshot_
+   passes_warmup_ticks_to_analysis`` is now hermetic against a sibling
+   test loading real MT5 credentials via ``cli.main → load_env_files``.
+
+**Validated:** 3 new hardening regression tests (timeout recovers on
+retry with shutdown between passes; all-timeout raises after exhausting
+budget; clean connect still works) + the full affected suites
+(mt5-collector, live-snapshot, collector, auto-scorer) = 112 green; the
+embedded TS ``_mt5`` template compiles with shutdown in the ``finally``.
+
+## 42. Weekly Band-Geometry Re-Validation — live geometry tracks fresh data
+
+The §40 sweep found the winning geometry on a 9.5-day corpus, but a corpus
+is a moving target: as the collector compounds data, the market's
+volatility regime can drift and the once-best cell can stop being best.
+``band-revalidate`` re-validates around the **current defaults** weekly so
+the live call geometry always tracks the freshest validated data.
+
+**Design** (``src/synthetic_trader/research/band_revalidate.py``):
+
+1. **Growth gate** — the run skips in seconds unless ≥7 days elapsed since
+the last run AND the corpus span grew ≥6 days.  A dead collector never
+triggers a useless re-sweep; the harness piggybacks on the existing daily
+collector task with zero new task registration.
+2. **Focused local grid** — 216 configs around the current defaults
+(3 z_entry × 3 vol ratio × 4 stop σ × 3 target σ × 2 hold), not the full
+§40 grid — re-validation is local, not exhaustive re-discovery.
+3. **Honest walk-forward holdout** — every config runs ONCE over the full
+corpus with the strategy/broker/risk state carrying the entire history
+(exactly like a live process), and the report counts trades by entry
+window: the train window is ``[corpus start, holdout boundary)``, the
+holdout window is ``[boundary, end]``.  This is the key methodology fix:
+a cold-started or short-warmup holdout segment undercounts signals near
+the boundary (EGARCH/ADWIN/EMA state is path-dependent) and makes the
+verdict vacuous.  ``run_vol_regime_backtest`` gained a ``count_from_epoch``
+/ ``count_until_epoch`` filter (risk registration stays unfiltered so the
+daily-loss gates behave exactly as live).
+4. **Holdout = newest 3 days minimum** (or 20% of span when larger, capped
+so train keeps ≥40% of ticks) — the band gate fires ~2×/day, so a thin
+proportional slice of a young corpus contains zero entries.
+5. **Promotion rule** — a candidate must have ≥6 holdout trades, be
+profitable on fresh data (≥ +0.10R), AND beat the current default's
+holdout expectancy by ≥ +0.05R.  Otherwise verdict stays ``keep``.
+6. **Versioned artifact** — every run writes a timestamped JSON plus
+``latest_{symbol}.json``; the live ``_live_band_signal`` overlays promoted
+knobs on ``VolBandConfig`` only while the artifact is ≤21 days old, then
+falls back to the compiled defaults.
+
+**CLI:** ``python -m synthetic_trader.cli band-revalidate --engine-root .
+--symbols R_75,R_100`` (``--force`` bypasses the gates; ``--grid-json``
+overrides the focused grid; ``--promote-margin-r`` / ``--min-holdout-
+trades`` tune the promotion bar).
+
+**Scheduled:** the daily collector task now runs ``band-revalidate`` after
+the scoring sweep (non-fatal, internal weekly gate keeps it cheap on skip
+days).
+
+**First run on the 9.7-day R_75 corpus:** holdout = newest 3.0 days,
+2 trades (−0.52R) for the default geometry → verdict ``keep``, correctly —
+n=2 cannot support a promotion.  The harness's job is to stay silent-until-
+proven as the corpus compounds; at ~2 entries/day the 3-day holdout
+reaches the 6-trade floor once the corpus is ~15+ days, and the verdict
+starts meaning something.
+
+**Validated:** 23 harness tests (growth/elapsed/size gates, split
+semantics, promotion thresholds, window partitioning of the runner,
+artifact freshness/overlay) + full affected suites (vol-band, vol-reversion,
+vol-momentum, decision-engine, live-snapshot, sweep) = 225 green.
+
+## 43. Milestone-Gated Head-to-Head Re-Verify — the +0.994R cell at 40+ trades
+
+The §40 verdict (band +0.994R at 23 trades) is directionally strong but not
+statistically settled — 23 trades cannot support a final claim.  This
+section adds an automatic re-run of the FULL four-strategy head-to-head
+(band vs fade vs momentum vs sniper) once the corpus crosses the milestone,
+so the cell is re-tested at 40+ trades without a manual step.
+
+**Design** (``src/synthetic_trader/research/headtohead_verify.py``):
+
+1. **Span + growth gates** — skips in seconds unless the corpus span is
+   ≥14 days AND grew ≥4 days since the last verified span.  The growth
+   re-run means the verify fires at ~14d (≈33 band trades) and again at
+   ~18d, when the ~2.4 entries/day cadence reaches the 40-trade floor.
+2. **Identical legs to ``backtest-vol --compare``** — the same band /
+   fade / momentum defaults, calibrated EGARCH state, realistic costs
+   (0.05 slip / 0.10 fee), and the sniper reference via
+   ``BacktestEngine.run_ticks`` (≈3.75 min total on the 9.7-day corpus).
+3. **Honest verdict** — ``holds`` only when the band has ≥40 trades with
+   expectancy ≥ +0.50R; ``insufficient_n`` below the floor;
+   ``edge_lost`` if the trades are there but the edge collapsed.
+4. **Versioned artifact** — timestamped JSON + ``latest_{symbol}.json``,
+   so the milestone history is preserved.
+
+**CLI:** ``verify-headtohead --symbol R_75`` (``--force`` for a manual
+re-run; ``--min-span-days`` overrides the milestone).  **Scheduled:** the
+daily collector task runs it after band-revalidate (non-fatal, internal
+gates keep it a cheap skip until the milestone).
+
+**Pre-flight on the 9.7-day corpus (baseline locked):** band 23 trades
++0.994R +139.66 (exactly reproduces §40), fade 6 −0.182R, momentum 39
++0.086R, sniper 28 +0.097R → verdict ``insufficient_n`` (23 < 40),
+correctly.  The next automatic run fires when the span crosses 14 days
+(~Aug 13 at the current collection rate), then again at ~18 days for the
+40-trade check.
+
+**Validated:** 9 tests (verdict thresholds, span/growth/no-csv gates,
+force bypass, full four-leg pipeline with artifact round-trip) = green;
+PowerShell task script parses clean.

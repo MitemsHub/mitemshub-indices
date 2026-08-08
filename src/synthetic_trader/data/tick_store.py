@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -354,17 +355,71 @@ def _read_full_ticks(csv_path: Path, symbol: str) -> list[Tick]:
     return ticks
 
 
+# Price-scale guard: a wrong-scale venue must never pollute the compounding
+# corpus.  Synthetic indices trade on DIFFERENT numeric scales per venue:
+# Blueberry SYN75 ~1,500-2,000 vs Deriv 1HZ75V ~7,000-8,000 (R_100: SYN100
+# ~350-400 vs 1HZ100V ~1,800-1,900).  The MT5-first venue rule already forbids
+# Deriv fallback when MT5 is configured, but a process without MT5 env vars
+# (diagnostic runs, dev shells, mis-configured collectors) can still append
+# wrong-scale ticks.  We guard the append itself: any tick whose price is more
+# than SCALE_GUARD_MAX_RATIO away from the existing corpus median is dropped
+# with a loud warning instead of being merged into the corpus.
+SCALE_GUARD_MAX_RATIO = 4.0
+
+
+def _apply_scale_guard(ticks: list[Tick], existing: list[Tick]) -> list[Tick]:
+    """Drop ticks whose price deviates wildly from the existing corpus scale.
+
+    Returns the filtered list.  If the existing corpus is too small to judge
+    scale (< 20 ticks) the batch passes through unchanged.
+    """
+    if len(existing) < 20:
+        return ticks
+    prices = sorted(t.price for t in existing if t.price and t.price > 0)
+    if not prices:
+        return ticks
+    median = prices[len(prices) // 2]
+    if median <= 0:
+        return ticks
+    kept: list[Tick] = []
+    dropped = 0
+    for t in ticks:
+        if t.price <= 0:
+            kept.append(t)
+            continue
+        ratio = t.price / median
+        if ratio > SCALE_GUARD_MAX_RATIO or ratio < 1.0 / SCALE_GUARD_MAX_RATIO:
+            dropped += 1
+            continue
+        kept.append(t)
+    if dropped:
+        print(
+            f"[tick_store] WARNING: dropped {dropped} tick(s) outside the corpus price scale "
+            f"(corpus median {median:.2f}, ratio must be within 1/{SCALE_GUARD_MAX_RATIO:.0f}x-{SCALE_GUARD_MAX_RATIO:.0f}x) "
+            "— refusing to pollute the compounding corpus with wrong-scale prices",
+            file=sys.stderr,
+            flush=True,
+        )
+    return kept
+
+
 def append_ticks_csv(path: str | Path, ticks: list[Tick]) -> None:
     """Append ticks to CSV, deduplicating by (epoch, price) against existing data.
 
     New ticks are enriched with spread/direction/volume_proxy derived from
-    the last existing tick in the CSV before writing.
+    the last existing tick in the CSV before writing.  A price-scale guard
+    rejects ticks on a wildly different price scale (e.g. Deriv 1HZ75V ~7,000
+    appended into a Blueberry SYN75 corpus ~1,770) so wrong-venue data can
+    never pollute the compounding corpus.
     """
     if not ticks:
         return
     target = Path(path)
     if target.exists() and target.stat().st_size > 0:
         existing = _read_tail_ticks(target, ticks[0].symbol if ticks else '', max_count=len(ticks) * 10)
+        ticks = _apply_scale_guard(ticks, existing)
+        if not ticks:
+            return
         existing_keys: set[tuple[float, float]] = {(t.epoch, t.price) for t in existing}
         fresh = [t for t in ticks if (t.epoch, t.price) not in existing_keys]
         if not fresh:

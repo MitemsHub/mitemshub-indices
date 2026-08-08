@@ -451,28 +451,42 @@ def _mt5(tp=None, lg=None, pw=None, sv=None):
     running), falls back to portable=True (starts a new instance).
 
     Each init attempt has a 10-second timeout via _init_with_timeout.
+
+    IPC-timeout hardening: mt5.initialize() returning (-10005, 'IPC timeout')
+    is usually a half-open IPC channel left by a previous subprocess whose
+    timed-out initialize kept running in its daemon thread.  We therefore
+    call mt5.shutdown() after EVERY failed attempt (releases that channel)
+    and in a finally on every exit path — init failure included — so no
+    subprocess ever exits with a zombie initialize holding the terminal.
     """
     initialized = False
     init_error = None
-    for portable in (False, True):
-        for _ in range(2):
-            try:
-                _init_with_timeout(tp, portable, timeout=10.0)
-                initialized = True
-                break
-            except Exception as ex:
-                init_error = str(ex)
-        if initialized:
-            break
-    if not initialized:
-        raise RuntimeError(f"init:{init_error}")
     try:
+        for portable in (False, True):
+            for _ in range(2):
+                try:
+                    _init_with_timeout(tp, portable, timeout=10.0)
+                    initialized = True
+                    break
+                except Exception as ex:
+                    init_error = str(ex)
+                    try:
+                        mt5.shutdown()
+                    except Exception:
+                        pass
+            if initialized:
+                break
+        if not initialized:
+            raise RuntimeError(f"init:{init_error}")
         if lg is not None:
             if not mt5.login(int(lg), password=pw, server=sv):
                 raise RuntimeError(f"login:{mt5.last_error()}")
         yield
     finally:
-        mt5.shutdown()
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
 `;
 
 // ── Fresh call result cache (10s TTL) ────────────────────────
@@ -2080,6 +2094,7 @@ function mapLiveSnapshot(raw: Record<string, unknown>, symbol: SymbolCode): Base
     position_sizing_empirical: normalizeText(raw.position_sizing_empirical),
     stage3: normalizeStage3(raw.stage3),
     venue: normalizeVenue(raw.venue),
+    geometry: raw.geometry === "band" || raw.geometry === "sniper_legacy" ? raw.geometry : null,
   };
 
   return {

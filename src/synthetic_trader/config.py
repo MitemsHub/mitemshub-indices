@@ -53,6 +53,13 @@ class SymbolProfile:
     confirmed_setup_confidence_floor: float = 0.0
     intraday_hold_horizon_minutes: int = 60
     min_primary_reward_risk: float = 1.2
+    # Live call geometry: "band" (zero-drawdown stop/target from the
+    # calibrated EGARCH band — the default) or "sniper" (SMC swing levels,
+    # demoted to research after the 3.5R unreachable-target findings).
+    geometry: str = "band"
+    # Hold horizon for band-geometry calls (1h-3h).  Unused when geometry
+    # is "sniper".
+    band_hold_horizon_sec: int = 7200
     travel_budget_5m_bars: int = 12
     min_continuation_body_efficiency: float = 0.55
     min_close_location_strength: float = 0.70

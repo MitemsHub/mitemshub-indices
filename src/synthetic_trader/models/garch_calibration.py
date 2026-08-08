@@ -731,7 +731,13 @@ def _params_at_bounds(result: CalibrationResult) -> bool:
         return True
     if result.persistence < 0.05:
         return True
-    if result.realized_vol > 0:
+    # Rule 3 (long-run vs realized vol sanity) is only meaningful for
+    # moderate-persistence fits.  At near-unit-root persistence
+    # (>= 0.95) the theoretical long-run vol exp(omega/(1-persistence))
+    # underflows to ~0 by construction — the known unit-root issue the
+    # forecaster itself avoids by anchoring on a realized-scale EMA — so
+    # the ratio test would reject every healthy vol-clustering fit.
+    if result.realized_vol > 0 and result.persistence < 0.95:
         ratio = result.long_run_vol / result.realized_vol
         if ratio < 0.02 or ratio > 50.0:
             return True

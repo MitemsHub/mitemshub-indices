@@ -396,6 +396,8 @@ def run_vol_regime_backtest(
     artifact_output_path: str | Path | None = None,
     artifact_strategy: str = "vol-reversion",
     artifact_config: object | None = None,
+    count_from_epoch: float | None = None,
+    count_until_epoch: float | None = None,
 ) -> BacktestResult:
     """Shared runner for the vol-regime backtest modes (fade / momentum).
 
@@ -404,6 +406,14 @@ def run_vol_regime_backtest(
     apples-to-apples.  The RiskEngine is configured with regime-trade-
     appropriate gates (no confidence/R:R minimum, no extreme-vol block —
     extreme vol is the signal here).
+
+    ``count_from_epoch`` / ``count_until_epoch`` enable walk-forward window
+    measurement: the strategy, broker, and risk state run continuously over
+    the whole ``ticks`` (so the state carries full history, exactly like a
+    live process), but only signals whose candle opens inside the window
+    ``[count_from_epoch, count_until_epoch)`` and outcomes whose trade opened
+    inside it are COUNTED in the report.  Risk registration is unfiltered, so
+    the daily-loss / consecutive-loss gates behave exactly as a live run.
     """
     builders = MultiTimeframeCandleBuilder(symbol, [timeframe_sec])
     risk_config = replace(
@@ -429,19 +439,28 @@ def run_vol_regime_backtest(
     signals = 0
     rejected = 0
 
+    def _in_window(epoch: float) -> bool:
+        if count_from_epoch is not None and epoch < count_from_epoch:
+            return False
+        if count_until_epoch is not None and epoch >= count_until_epoch:
+            return False
+        return True
+
     for tick in sorted(ticks, key=lambda item: item.epoch):
         closed = builders.update(tick)
         for tf, candle in closed.items():
             if tf != timeframe_sec:
                 continue
             for outcome in broker.on_candle(candle):
-                outcomes.append(outcome)
+                if _in_window(outcome.opened_at):
+                    outcomes.append(outcome)
                 risk_engine.register_outcome(outcome)
 
             signal = strategy.on_candle(candle)
             if signal is None:
                 continue
-            signals += 1
+            if _in_window(candle.open_time):
+                signals += 1
             risk_decision = risk_engine.evaluate(signal)
             if not risk_decision.approved or risk_decision.intent is None:
                 rejected += 1
@@ -453,10 +472,12 @@ def run_vol_regime_backtest(
     final_primary = flushed.get(timeframe_sec)
     if final_primary is not None:
         for outcome in broker.on_candle(final_primary):
-            outcomes.append(outcome)
+            if _in_window(outcome.opened_at):
+                outcomes.append(outcome)
             risk_engine.register_outcome(outcome)
         for outcome in broker.close_all(final_primary):
-            outcomes.append(outcome)
+            if _in_window(outcome.opened_at):
+                outcomes.append(outcome)
             risk_engine.register_outcome(outcome)
 
     metrics = metrics_from_outcomes(outcomes)

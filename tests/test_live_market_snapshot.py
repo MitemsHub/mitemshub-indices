@@ -763,24 +763,34 @@ class LiveSnapshotDataTests(unittest.TestCase):
         def fake_analyze_live_snapshot(**kwargs: object) -> dict[str, object]:
             return {"history_len": len(kwargs["ticks"])}
 
-        with patch("synthetic_trader.live.market_snapshot.TraderConfig.default", return_value=config):
-            with patch(
-                "synthetic_trader.live.market_snapshot._load_csv_ticks",
-                return_value=None,
-            ):
+        # Hermetic: this test exercises the warmup→analysis plumbing, not the
+        # MT5 venue.  A sibling test may have loaded .env.local (real MT5
+        # credentials) into os.environ via cli.main → load_env_files, which
+        # would flip is_mt5_configured() to True and send this test down the
+        # real-terminal path.  Pin the venue to unconfigured so the test is
+        # order-independent.
+        with patch(
+            "synthetic_trader.live.market_snapshot.is_mt5_configured",
+            return_value=False,
+        ):
+            with patch("synthetic_trader.live.market_snapshot.TraderConfig.default", return_value=config):
                 with patch(
-                    "synthetic_trader.live.market_snapshot.analyze_live_snapshot",
-                    side_effect=fake_analyze_live_snapshot,
-                ) as analyze_mock:
-                    snapshot = asyncio.run(
-                        run_live_snapshot(
-                            symbol="R_75",
-                            warmup_count=5,
-                            timeframe_sec=60,
-                            higher_timeframe_sec=300,
-                            max_live_ticks=0,
+                    "synthetic_trader.live.market_snapshot._load_csv_ticks",
+                    return_value=None,
+                ):
+                    with patch(
+                        "synthetic_trader.live.market_snapshot.analyze_live_snapshot",
+                        side_effect=fake_analyze_live_snapshot,
+                    ) as analyze_mock:
+                        snapshot = asyncio.run(
+                            run_live_snapshot(
+                                symbol="R_75",
+                                warmup_count=5,
+                                timeframe_sec=60,
+                                higher_timeframe_sec=300,
+                                max_live_ticks=0,
+                            )
                         )
-                    )
 
         self.assertEqual(snapshot["history_len"], 5)
         # Temporarily skip assertion until analyze_mock call_args structure is fixed

@@ -196,7 +196,14 @@ class RiskEngine:
             self.state.open_positions -= 1
         self.state.realized_pnl += outcome.pnl
         self.state.equity += outcome.pnl
-        if outcome.pnl < 0:
+        # The consecutive-loss circuit breaker exists to halt a genuine
+        # LOSING STREAK — a near-breakeven scratch (e.g. a breakeven-trail
+        # exit that fills a tick worse and returns -0.004R) is not a loss and
+        # must not trip the breaker, or frictions alone halt strategies that
+        # are actually flatting.  Only material losses (worse than 10% of
+        # the trade's risk) count toward the streak.
+        LOSS_R_THRESHOLD = -0.10
+        if outcome.return_r < LOSS_R_THRESHOLD:
             self.state.consecutive_losses += 1
         else:
             self.state.consecutive_losses = 0

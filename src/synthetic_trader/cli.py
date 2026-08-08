@@ -142,24 +142,37 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_vol.add_argument("--timeframe", type=int, default=60, help="primary candle timeframe in seconds")
     backtest_vol.add_argument(
         "--mode",
-        choices=["fade", "momentum"],
+        choices=["fade", "momentum", "band"],
         default="fade",
         help="which vol-regime strategy to run as primary: fade (mean-reversion"
-        " on extended vol) or momentum (follow the move in a high-vol regime)",
+        " on extended vol), momentum (follow the move in a high-vol regime), or"
+        " band (same fade entry, zero-drawdown stop/target from the calibrated"
+        " EGARCH band over a 1-3h hold)",
     )
     backtest_vol.add_argument(
         "--compare",
         action="store_true",
-        help="also run the other vol-regime strategy AND the sniper strategy on"
-        " the same data and print all three (fade vs momentum vs sniper)",
+        help="also run the other vol-regime strategies AND the sniper strategy on"
+        " the same data and print all (fade vs momentum vs band vs sniper)",
     )
     backtest_vol.add_argument(
         "--artifact-output",
         help="optional path to save the primary (--mode) backtest report as JSON",
     )
-    backtest_vol.add_argument("--entry-slippage-ticks", type=float, default=1.0)
-    backtest_vol.add_argument("--exit-slippage-ticks", type=float, default=1.0)
-    backtest_vol.add_argument("--execution-penalty", type=float, default=0.5)
+    backtest_vol.add_argument(
+        "--entry-slippage-ticks",
+        type=float,
+        default=0.05,
+        help="per-side slippage in ABSOLUTE price units (V75 tick = 0.01; 0.05 ~ 5 ticks of spread+slippage)",
+    )
+    backtest_vol.add_argument("--exit-slippage-ticks", type=float, default=0.05)
+    backtest_vol.add_argument(
+        "--execution-penalty",
+        type=float,
+        default=0.10,
+        help="per-trade cash fee (old 0.5 default was ~10pct of a $1k-account stake; "
+        "0.10 is a realistic retail fee on synthetic indices)",
+    )
     backtest_vol.add_argument("--z-entry", type=float, default=1.5, help="price extension threshold in forecast sigmas")
     backtest_vol.add_argument("--vol-extended-ratio", type=float, default=1.5)
     backtest_vol.add_argument(
@@ -197,6 +210,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backtest_vol.add_argument("--mom-stop-sigma-mult", type=float, default=1.5)
     backtest_vol.add_argument("--mom-target-sigma-mult", type=float, default=3.0)
+    backtest_vol.add_argument(
+        "--band-hold-sec",
+        type=int,
+        default=3600,
+        help="band geometry hold horizon in seconds (1-3h: 3600-10800; "
+        "§38 sweep winner = 1h)",
+    )
+    backtest_vol.add_argument("--band-z-entry", type=float, default=1.0)
+    backtest_vol.add_argument("--band-vol-ratio", type=float, default=1.3)
+    backtest_vol.add_argument("--band-min-revert", type=float, default=0.02)
+    backtest_vol.add_argument("--band-stop-mult", type=float, default=0.20)
+    backtest_vol.add_argument("--band-target-mult", type=float, default=0.80)
+    backtest_vol.add_argument("--band-trail", type=float, default=0.3)
     backtest_vol.add_argument("--max-hold-bars", type=int, default=30)
     backtest_vol.add_argument(
         "--breakeven-trail-frac",
@@ -273,8 +299,9 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
     sweep_vol.add_argument(
         "--strategies",
         default="fade,momentum",
-        help="comma-separated strategy families to sweep (fade, momentum); "
-        "pass 'momentum' alone for a focused momentum-only re-tune",
+        help="comma-separated strategy families to sweep (fade, momentum, band); "
+        "pass 'band' alone for a focused vol-band geometry re-tune, "
+        "or 'momentum' alone for a focused momentum-only re-tune",
     )
     sweep_vol.add_argument(
         "--mom-json",
@@ -284,8 +311,95 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
         "\"ref_periods\":[300,1200,150],\"gate\":{\"abs_sigma_mult\":[1.2,3.0,0.2]}}",
     )
     sweep_vol.add_argument(
+        "--band-json",
+        help="optional JSON file with focused vol-band grid overrides, e.g. "
+        "{\"z_entries\":[0.5,1.5,0.25],\"vol_ratios\":[1.15,1.6,0.15],"
+        "\"stops\":[0.2,0.5,0.1],\"targets\":[0.6,1.4,0.2],"
+        "\"holds\":[3600,10800,3600]}",
+    )
+    sweep_vol.add_argument(
         "--artifact-output",
         help="optional path to save the full sweep report as JSON",
+    )
+
+    band_revalidate = subparsers.add_parser(
+        "band-revalidate",
+        help="weekly re-validation of the live band geometry: focused local sweep "
+        "around the current defaults on a train split, honest holdout verdict "
+        "(promote / keep), and a versioned artifact the live path overlays",
+    )
+    band_revalidate.add_argument(
+        "--engine-root",
+        default=".",
+        help="engine root whose data/backfill CSVs and calibration are used (default .)",
+    )
+    band_revalidate.add_argument(
+        "--symbols",
+        default="R_75,R_100",
+        help="comma-separated symbols to re-validate (default R_75,R_100)",
+    )
+    band_revalidate.add_argument(
+        "--timeframe",
+        type=int,
+        default=300,
+        help="execution timeframe in seconds (default 300 — the band strategy's scale)",
+    )
+    band_revalidate.add_argument(
+        "--force",
+        action="store_true",
+        help="bypass the growth/elapsed gates and re-sweep now",
+    )
+    band_revalidate.add_argument(
+        "--min-holdout-trades",
+        type=int,
+        default=6,
+        help="minimum holdout trades for a candidate to be promotable (default 6)",
+    )
+    band_revalidate.add_argument(
+        "--promote-margin-r",
+        type=float,
+        default=0.05,
+        help="candidate must beat the default's holdout expectancy by this many R (default 0.05)",
+    )
+    band_revalidate.add_argument(
+        "--grid-json",
+        help="optional JSON file overriding the focused grid ranges, e.g. "
+        "{\"z_entries\":[0.75,1.25,0.25],\"stops\":[0.15,0.30,0.05]}",
+    )
+
+    verify_h2h = subparsers.add_parser(
+        "verify-headtohead",
+        help="milestone-gated full head-to-head (band vs fade vs momentum vs sniper): "
+        "re-runs the §40 comparison automatically once the corpus crosses ~14 days, "
+        "so the +0.994R cell is re-tested on 40+ trades without a manual step",
+    )
+    verify_h2h.add_argument(
+        "--engine-root",
+        default=".",
+        help="engine root whose data/backfill CSVs and calibration are used (default .)",
+    )
+    verify_h2h.add_argument(
+        "--symbol",
+        default="R_75",
+        choices=["R_75", "R_100"],
+        help="symbol to verify (default R_75)",
+    )
+    verify_h2h.add_argument(
+        "--timeframe",
+        type=int,
+        default=300,
+        help="execution timeframe in seconds (default 300)",
+    )
+    verify_h2h.add_argument(
+        "--min-span-days",
+        type=float,
+        default=14.0,
+        help="corpus span needed before the verify runs (default 14.0)",
+    )
+    verify_h2h.add_argument(
+        "--force",
+        action="store_true",
+        help="bypass the span/growth gates and run the head-to-head now",
     )
 
     tune_bands = subparsers.add_parser(
@@ -875,6 +989,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "backtest-vol":
+        from synthetic_trader.backtest.vol_band import (
+            VolBandConfig,
+            run_vol_band_backtest,
+        )
         from synthetic_trader.backtest.vol_momentum import (
             VolMomentumConfig,
             run_vol_momentum_backtest,
@@ -917,6 +1035,17 @@ def main(argv: list[str] | None = None) -> int:
             dof=args.dof,
             breakeven_trail_frac=args.breakeven_trail_frac,
         )
+        band_config = VolBandConfig(
+            z_entry=args.band_z_entry,
+            vol_extended_ratio=args.band_vol_ratio,
+            min_revert_signal=args.band_min_revert,
+            stop_sigma_mult=args.band_stop_mult,
+            target_sigma_mult=args.band_target_mult,
+            max_hold_sec=args.band_hold_sec,
+            distribution=args.distribution,
+            dof=args.dof,
+            breakeven_trail_frac=args.band_trail,
+        )
         garch_state = None if args.no_calibration else load_calibrated_garch_state(args.symbol)
         if not args.no_calibration and garch_state is None:
             print(f"calibrated_garch=not_found (using default priors)")
@@ -950,6 +1079,18 @@ def main(argv: list[str] | None = None) -> int:
                 artifact_output_path=args.artifact_output,
             )
             primary_label = "vol-momentum"
+        elif args.mode == "band":
+            primary = run_vol_band_backtest(
+                ticks,
+                symbol=args.symbol,
+                timeframe_sec=args.timeframe,
+                config=config,
+                strategy_config=band_config,
+                garch_state=garch_state,
+                paper=paper,
+                artifact_output_path=args.artifact_output,
+            )
+            primary_label = "vol-band"
         else:
             primary = run_vol_reversion_backtest(
                 ticks,
@@ -966,33 +1107,59 @@ def main(argv: list[str] | None = None) -> int:
         _print_result(primary_label, primary)
 
         if args.compare:
-            # Run the OTHER vol-regime strategy too, then the sniper reference,
-            # so the operator can see fade vs momentum vs sniper on the same
-            # ticks and decide whether following or fading vol is profitable.
-            if args.mode == "momentum":
-                other = run_vol_reversion_backtest(
-                    ticks,
-                    symbol=args.symbol,
-                    timeframe_sec=args.timeframe,
-                    config=config,
-                    strategy_config=fade_config,
-                    garch_state=garch_state,
-                    paper=paper,
+            # Run the two non-primary vol-regime strategies too, then the
+            # sniper reference, so the operator sees fade vs momentum vs band
+            # vs sniper on the same ticks and can judge whether the band
+            # geometry beats both the fade's tight levels and the SMC sniper.
+            others: list[tuple[str, object]] = []
+            if args.mode != "fade":
+                others.append(
+                    (
+                        "vol-reversion",
+                        run_vol_reversion_backtest(
+                            ticks,
+                            symbol=args.symbol,
+                            timeframe_sec=args.timeframe,
+                            config=config,
+                            strategy_config=fade_config,
+                            garch_state=garch_state,
+                            paper=paper,
+                        ),
+                    )
                 )
-                other_label = "vol-reversion"
-            else:
-                other = run_vol_momentum_backtest(
-                    ticks,
-                    symbol=args.symbol,
-                    timeframe_sec=args.timeframe,
-                    config=config,
-                    strategy_config=moment_config,
-                    garch_state=garch_state,
-                    paper=paper,
+            if args.mode != "momentum":
+                others.append(
+                    (
+                        "vol-momentum",
+                        run_vol_momentum_backtest(
+                            ticks,
+                            symbol=args.symbol,
+                            timeframe_sec=args.timeframe,
+                            config=config,
+                            strategy_config=moment_config,
+                            garch_state=garch_state,
+                            paper=paper,
+                        ),
+                    )
                 )
-                other_label = "vol-momentum"
-            print(f"\n=== {other_label} ===")
-            _print_result(other_label, other)
+            if args.mode != "band":
+                others.append(
+                    (
+                        "vol-band",
+                        run_vol_band_backtest(
+                            ticks,
+                            symbol=args.symbol,
+                            timeframe_sec=args.timeframe,
+                            config=config,
+                            strategy_config=band_config,
+                            garch_state=garch_state,
+                            paper=paper,
+                        ),
+                    )
+                )
+            for other_label, other in others:
+                print(f"\n=== {other_label} ===")
+                _print_result(other_label, other)
 
             sniper = BacktestEngine(config=config)
             sniper_result = sniper.run_ticks(
@@ -1037,6 +1204,23 @@ def main(argv: list[str] | None = None) -> int:
             g.strip() for g in args.strategies.split(",") if g.strip()
         )
         momentum_ranges = None
+        band_ranges = None
+        if args.band_json:
+            import json as _json
+
+            band_json_path = Path(args.band_json)
+            if not band_json_path.exists():
+                print(f"error=band_json_not_found:{band_json_path}")
+                return 1
+            raw = _json.loads(band_json_path.read_text(encoding="utf-8"))
+            band_ranges = {}
+            grid_keys = ("z_entries", "vol_ratios", "stops", "targets", "holds")
+            for k, v in raw.items():
+                if k in grid_keys and isinstance(v, (list, tuple)) and len(v) == 3:
+                    band_ranges[k] = tuple(v)
+                else:
+                    print(f"sweep-vol: ignoring unknown band-json key {k!r} "
+                          f"(expected one of {grid_keys})")
         if args.mom_json:
             import json as _json
 
@@ -1075,9 +1259,63 @@ def main(argv: list[str] | None = None) -> int:
             gates=gates,
             strategies=strategies,
             momentum_ranges=momentum_ranges,
+            band_ranges=band_ranges,
             artifact_output_path=args.artifact_output,
         )
         print_sweep_report(report, args.symbol, args.timeframe)
+        return 0
+
+    if args.command == "band-revalidate":
+        from synthetic_trader.research.band_revalidate import (
+            print_revalidate_report,
+            revalidate_band_geometry,
+        )
+
+        grid_overrides = None
+        if args.grid_json:
+            import json as _json
+
+            grid_path = Path(args.grid_json)
+            if not grid_path.exists():
+                print(f"error=grid_json_not_found:{grid_path}")
+                return 1
+            raw = _json.loads(grid_path.read_text(encoding="utf-8"))
+            grid_overrides = {
+                k: tuple(v)
+                for k, v in raw.items()
+                if isinstance(v, (list, tuple)) and len(v) == 3
+            }
+        symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        ok = True
+        for symbol in symbols:
+            report = revalidate_band_geometry(
+                symbol=symbol,
+                engine_root=args.engine_root,
+                timeframe_sec=args.timeframe,
+                grid_overrides=grid_overrides,
+                min_holdout_trades=args.min_holdout_trades,
+                promote_margin_r=args.promote_margin_r,
+                force=args.force,
+            )
+            print_revalidate_report(report)
+            if report["verdict"] == "skipped" and "no_tick_csv" in report.get("skip_reason", ""):
+                ok = False
+        return 0 if ok else 1
+
+    if args.command == "verify-headtohead":
+        from synthetic_trader.research.headtohead_verify import (
+            print_verify_report,
+            run_headtohead_verify,
+        )
+
+        report = run_headtohead_verify(
+            symbol=args.symbol,
+            engine_root=args.engine_root,
+            timeframe_sec=args.timeframe,
+            min_span_days=args.min_span_days,
+            force=args.force,
+        )
+        print_verify_report(report)
         return 0
 
     if args.command == "tune-bands":
