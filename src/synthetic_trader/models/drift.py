@@ -25,7 +25,40 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+# ── Import-time guard against river's dead dataset payload ────────────
+# river.drift.__init__ unconditionally does `from . import datasets`, and
+# river/drift/datasets/__init__.py parses the embedded airline_passengers
+# CSV (~20-30s) on EVERY import.  The bridge runs a Python import smoke test
+# with an 8s budget before each live snapshot, so this dead import alone
+# made every dashboard call fail validation and fall back to "Live bridge
+# unavailable".  We only need ADWIN, so stub the datasets subpackage before
+# river.drift loads; the stub satisfies `from . import datasets` and nothing
+# in this codebase ever reads from it.
 try:  # pragma: no cover - river is an optional dependency
+    import sys as _sys
+    import types as _types
+
+    # Only ADWIN is used.  river.drift.__init__ also imports datasets
+    # (airline_passengers CSV parse, ~20s), kswin/page_hinkley (pull in
+    # scipy.stats, ~9s) and retrain — none of which we need.  Stub them out
+    # so the whole drift subtree imports in ~2.5s instead of ~30s.
+    def _river_stub(key: str, attrs: tuple[str, ...] = ()) -> None:
+        if key in _sys.modules:
+            return
+        _m = _types.ModuleType(key)
+        for _a in attrs:
+            setattr(_m, _a, type(_a, (), {}))
+        _sys.modules[key] = _m
+
+    _river_stub("river.drift.datasets")
+    _sys.modules["river.drift.datasets"].__path__ = []
+    _river_stub("river.drift.datasets.airline_passengers")
+    _river_stub("river.drift.kswin", ("KSWIN",))
+    _river_stub("river.drift.page_hinkley", ("PageHinkley",))
+    _river_stub("river.drift.retrain", ("DriftRetrainingClassifier",))
+    _river_stub("river.drift.dummy", ("DummyDriftDetector",))
+    _river_stub("river.drift.no_drift", ("NoDrift",))
+    _river_stub("river.drift.binary")
     from river.drift import ADWIN
 except Exception:  # pragma: no cover
     ADWIN = None

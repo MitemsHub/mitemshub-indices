@@ -254,6 +254,39 @@ function Write-HeadToHeadVerify {
 }
 
 
+# ── Collector health summary (48h window, non-fatal) ──────────────────
+# Summarizes .data/mt5_events.jsonl each morning so IPC-timeout recurrence
+# after the single-flight guard (§44) is visible in the task log without a
+# manual step.  Non-fatal: a report failure must not fail the collector task.
+function Write-CollectorHealth {
+  $python = Get-PythonRunner
+  if (-not $python) {
+    Write-TaskLog "collector-health skipped: python not found on PATH"
+    return $false
+  }
+  $prevEAP = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  $exitCode = 1
+  $out = ""
+  try {
+    $out = & $python -m synthetic_trader.cli collector-health-report `
+      --engine-root $appDir --hours 48 2>$null | Out-String
+    $exitCode = $LASTEXITCODE
+  } catch {
+    $exitCode = 1
+    $out = $_.Exception.Message
+  }
+  $ErrorActionPreference = $prevEAP
+  $oneLine = ($out.Trim() -replace "\r?\n", " | ")
+  if ($exitCode -eq 0) {
+    Write-TaskLog "collector-health ok: $oneLine"
+    return $true
+  }
+  Write-TaskLog "collector-health failed (exit $exitCode): $oneLine"
+  return $false
+}
+
+
 # ── Verification via tick-coverage --json ──────────────────────────────
 function Write-CoverageVerification {
   param([int]$Retries = 6, [int]$DelaySec = 10)
@@ -308,6 +341,8 @@ try {
   # Re-run the full head-to-head at the 14-day milestone (internal span/
   # growth gates skip until then).  Non-fatal - see the function comment.
   $null = Write-HeadToHeadVerify
+  # Log the 48h IPC-timeout recurrence verdict each morning.  Non-fatal.
+  $null = Write-CollectorHealth
   Write-TaskLog "task action complete"
   # Surface verification failures in Task Scheduler's Last Result so a
   # silent corpus stall is visible from the task list, not just the log.

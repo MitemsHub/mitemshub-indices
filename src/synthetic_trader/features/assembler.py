@@ -102,7 +102,14 @@ def build_snapshot(
     # calibration file (True) or from generic defaults (False).
     features["garch_calibrated"] = 1.0 if _garch_calibrated.get(symbol, False) else 0.0
     log_return = features.get("log_return", 0.0)
-    if log_return != 0.0 and garch.state.observations > 0:
+    if log_return != 0.0:
+        # NOTE: no `observations > 0` guard here — that guard froze the
+        # forecaster at observation 0 (the FIRST update was never allowed,
+        # so observations never grew and garch_z_score stayed 0.0 forever
+        # in every process, since caches are cleared per run).  update()
+        # handles warm-up internally (return buffer + min_observations for
+        # the arch fit), so feeding from observation 1 is safe and makes
+        # garch_z_score / garch_vol_ratio real features again.
         garch_features = garch.update(log_return)
     else:
         garch_features = garch.get_forecast()

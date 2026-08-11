@@ -152,7 +152,9 @@ describe("runFreshCall engine config", () => {
       mode: undefined,
       tradingMode: "sniper",
       warmupProfile: undefined,
-      skipApi: false,
+      // CSV-first default: the scheduled collector keeps the CSV fresh, so
+      // manual reads must NOT pay a live MT5 tick poll (20-40s + flaky).
+      skipApi: true,
       signal: undefined,
     }));
     expect(result.generated_at).toBe("2026-07-09T13:00:00Z");
@@ -272,7 +274,6 @@ describe("runFreshCall engine config", () => {
             hit_rate_floor: 0.5,
             suppression_mode: "suppress",
             suppressed_call: null,
-            proven_only: true,
             execution_allowed: false,
             note: "24 scored outcomes; target-hit rate 62% clears 50% and the horizon verdict is calibrated.",
           },
@@ -307,8 +308,7 @@ describe("runFreshCall engine config", () => {
     // Legacy raw payloads (no sizing block) normalize to full/no-scaling.
     expect(result.stage3?.sizing?.level).toBe("full");
     expect(result.stage3?.sizing?.multiplier).toBe(1);
-    // The proven-only mode flag and the resulting go/no-go survive the bridge.
-    expect(result.stage3?.proven_only).toBe(true);
+    // The collapsed gate's go/no-go survives the bridge.
     expect(result.stage3?.execution_allowed).toBe(false);
     // The gate replaces raw model confidence with the market-verified rate.
     expect(result.confidence).toBe(0.62);

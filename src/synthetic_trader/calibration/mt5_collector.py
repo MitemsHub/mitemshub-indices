@@ -123,6 +123,7 @@ def collect_ticks_from_mt5(
 
         prices: list[float] = []
         spreads: list[float] = []
+        junk_skipped = 0
         start = time.time()
         last_tick_time = 0.0
 
@@ -149,6 +150,21 @@ def collect_ticks_from_mt5(
                 if epoch <= last_tick_time:
                     time.sleep(0.005)
                     continue
+
+                # ── Price sanity guard ─────────────────────────────
+                # Intermittent MT5 read errors produce junk bid/ask (e.g.
+                # ~6950 for R_75 which trades ~1850 — a 3.7x error) that
+                # pollute the corpus and show bogus prices in the dashboard
+                # feed.  Reject a tick whose mid deviates >50% from the
+                # recent median (same rule the candle builder uses) so junk
+                # never reaches the CSV in the first place.
+                if len(prices) >= 10:
+                    window = sorted(prices[-100:])
+                    med = window[len(window) // 2]
+                    if abs(price - med) / med > 0.5:
+                        junk_skipped += 1
+                        time.sleep(0.015)
+                        continue
 
                 last_tick_time = epoch
 
@@ -186,6 +202,13 @@ def collect_ticks_from_mt5(
         duration = time.time() - start
         mean_spread = sum(spreads) / max(len(spreads), 1)
         price_range = (max(prices) - min(prices)) / min(prices) * 100 if prices else 0.0
+
+        if junk_skipped:
+            print(
+                f"[collector] {symbol}: skipped {junk_skipped} junk ticks "
+                f"(price >50% off recent median) — source-level outlier guard",
+                flush=True,
+            )
 
         return CollectedTicks(
             symbol=symbol,

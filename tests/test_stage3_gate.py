@@ -10,15 +10,13 @@ from unittest.mock import patch
 from synthetic_trader.live.stage3_gate import (
     GATE_HIT_RATE_FLOOR,
     MIN_STAGE3_SAMPLES,
+    SUPPRESSION_MODE,
     apply_stage3_gate,
     build_stage3_block,
     load_empirical_summary,
     load_horizon_verdict,
     resolve_trigger_type,
     sizing_ladder,
-    _env_mode,
-    PROVEN_ONLY_MODE,
-    _env_bool,
 )
 
 
@@ -444,9 +442,10 @@ def test_gate_suppressed_when_below_floor(tmp_path: Path) -> None:
     assert applied["stage3"]["suppressed_call"] == "buy_candidate"
 
 
-def test_suppression_mode_suppress_downgrades_explicitly(tmp_path: Path) -> None:
-    """Explicit suppression_mode='suppress' behaves like the default: the
-    below-floor call type is held back and the block records the mode.
+def test_collapsed_gate_suppresses_below_floor(tmp_path: Path) -> None:
+    """COLLAPSED GATE: below-floor call types are ALWAYS suppressed — there is
+    no annotate escape hatch anymore.  The block records the fixed
+    suppression_mode constant for payload compatibility.
     """
     outcomes = tmp_path / "outcomes.jsonl"
     _write_outcomes(
@@ -460,74 +459,19 @@ def test_suppression_mode_suppress_downgrades_explicitly(tmp_path: Path) -> None
         "execution_trigger_type": "continuation_close",
         "confidence": 0.6,
     }
-    block = build_stage3_block(
-        snapshot,
-        outcomes_path=outcomes,
-        verdict_cache_path=verdicts,
-        suppression_mode="suppress",
-    )
+    block = build_stage3_block(snapshot, outcomes_path=outcomes, verdict_cache_path=verdicts)
     assert block["state"] == "suppressed"
     assert block["evidence_status"] == "suppressed"
-    assert block["suppression_mode"] == "suppress"
+    assert block["suppression_mode"] == SUPPRESSION_MODE == "suppress"
     assert block["below_floor"] is True
     assert block["suppressed_call"] == "buy_candidate"
+    assert block["execution_allowed"] is False
 
-    applied = apply_stage3_gate(
-        dict(snapshot),
-        outcomes_path=outcomes,
-        verdict_cache_path=verdicts,
-        suppression_mode="suppress",
-    )
+    applied = apply_stage3_gate(dict(snapshot), outcomes_path=outcomes, verdict_cache_path=verdicts)
     assert applied["call"] == "stand_aside"
     assert applied["stage3"]["suppression_mode"] == "suppress"
     assert applied["stage3"]["below_floor"] is True
     assert applied["suppressed_reason"]
-
-
-def test_suppression_mode_annotate_keeps_below_floor_call(tmp_path: Path) -> None:
-    """Annotate mode: the same below-floor evidence annotates instead of acting —
-    the call is still emitted as a candidate with its honest (low) rate, and
-    evidence_status stays 'suppressed' so the dashboard can show the truth.
-    """
-    outcomes = tmp_path / "outcomes.jsonl"
-    _write_outcomes(
-        outcomes,
-        [_scored("R_75", "continuation_close", "stop_hit") for _ in range(MIN_STAGE3_SAMPLES)],
-    )
-    verdicts = _verdicts_file(tmp_path / "forecast_verdicts.jsonl")
-    snapshot = {
-        "symbol": "R_75",
-        "call": "buy_candidate",
-        "execution_trigger_type": "continuation_close",
-        "confidence": 0.6,
-    }
-    block = build_stage3_block(
-        snapshot,
-        outcomes_path=outcomes,
-        verdict_cache_path=verdicts,
-        suppression_mode="annotate",
-    )
-    assert block["state"] == "annotated"
-    assert block["evidence_status"] == "suppressed"  # truth axis unchanged
-    assert block["suppression_mode"] == "annotate"
-    assert block["below_floor"] is True  # downstream marker in both modes
-    assert block["empirical_target_hit_rate"] == 0.0
-    assert block["display_confidence"] == 0.0  # honest rate still shown
-    assert block["suppressed_call"] is None  # nothing was held back
-    assert "annotate" in block["note"]
-
-    applied = apply_stage3_gate(
-        dict(snapshot),
-        outcomes_path=outcomes,
-        verdict_cache_path=verdicts,
-        suppression_mode="annotate",
-    )
-    # The candidate is still emitted — annotate mode does not downgrade.
-    assert applied["call"] == "buy_candidate"
-    assert applied["stage3"]["state"] == "annotated"
-    assert applied["stage3"]["evidence_status"] == "suppressed"
-    assert applied["stage3"]["below_floor"] is True
-    assert "suppressed_reason" not in applied  # not held back, no stale reason
 
 
 def test_sizing_ladder_gated_full() -> None:
@@ -553,11 +497,14 @@ def test_sizing_ladder_annotated_positive_half() -> None:
     assert sizing2["multiplier"] == 0.35
 
 
-def test_sizing_ladder_below_floor_paper_only() -> None:
+def test_sizing_ladder_below_floor_stand_aside() -> None:
+    """Collapsed ladder: a below-floor call is state='suppressed' -> held back
+    entirely (stand_aside), never half/paper — the gate's one answer.
+    """
     sizing = sizing_ladder(
-        state="annotated", evidence_status="suppressed", hit_rate=0.3, hit_rate_floor=0.5
+        state="suppressed", evidence_status="suppressed", hit_rate=0.3, hit_rate_floor=0.5
     )
-    assert sizing["level"] == "paper_only"
+    assert sizing["level"] == "stand_aside"
     assert sizing["multiplier"] == 0.0
 
 
@@ -636,170 +583,51 @@ def test_gate_stamps_size_multiplier_on_alert(tmp_path: Path) -> None:
     assert empty["position_sizing_empirical"] == "paper_only"
 
 
-def test_suppression_mode_env_knob() -> None:
-    """The operator-facing env knob resolves to a valid mode with fallback."""
-    with patch.dict(os.environ, {"SYNTH_GATE_SUPPRESSION_MODE": "annotate"}):
-        assert _env_mode() == "annotate"
-    with patch.dict(os.environ, {"SYNTH_GATE_SUPPRESSION_MODE": "suppress"}):
-        assert _env_mode() == "suppress"
-    with patch.dict(os.environ, {"SYNTH_GATE_SUPPRESSION_MODE": "bogus"}):
-        assert _env_mode() == "suppress"  # invalid -> safe default
-    with patch.dict(os.environ, {}, clear=False):
-        assert _env_mode() == "suppress"  # unset -> default
-
-
-def test_proven_only_env_knob() -> None:
-    """SYNTH_GATE_PROVEN_ONLY resolves to a boolean with a safe default."""
-    assert PROVEN_ONLY_MODE is False  # module default is off
-    for raw in ("1", "true", "yes", "on", "TRUE"):
-        with patch.dict(os.environ, {"SYNTH_GATE_PROVEN_ONLY": raw}):
-            assert _env_bool("SYNTH_GATE_PROVEN_ONLY", False) is True
-    for raw in ("0", "false", "no", "off", "", "bogus"):
-        with patch.dict(os.environ, {"SYNTH_GATE_PROVEN_ONLY": raw}):
-            assert _env_bool("SYNTH_GATE_PROVEN_ONLY", False) is False
-
-
-def test_sizing_ladder_proven_only_forces_paper_only() -> None:
-    """Proven-only mode: ANY evidence_status other than 'proven' is forced to
-    paper-only (0.0) — the strictest belt, independent of the state machine.
+def test_gate_stamps_execution_allowed_by_evidence(tmp_path: Path) -> None:
+    """Collapsed gate: only a sized call (gated=full / annotated=half) may
+    execute; still_learning / suppressed / no_data are never executable.  The
+    legacy proven-only env var is ignored — there is no belt knob anymore.
     """
-    # still_learning would otherwise be paper-only anyway — but now it is
-    # forced with the explicit proven_only basis (never full/half).
-    still_learning = sizing_ladder(
-        state="insufficient_data", evidence_status="still_learning",
-        hit_rate=0.6, hit_rate_floor=0.5, proven_only=True,
-    )
-    assert still_learning["level"] == "paper_only"
-    assert still_learning["multiplier"] == 0.0
-    assert still_learning["basis"] == "proven_only"
+    with patch.dict(os.environ, {"SYNTH_GATE_PROVEN_ONLY": "1"}):
+        outcomes = tmp_path / "outcomes.jsonl"
+        verdicts = _verdicts_file(tmp_path / "forecast_verdicts.jsonl")
+        _write_outcomes(
+            outcomes,
+            [_scored("R_75", "continuation_close", "target_hit") for _ in range(3)],  # still learning
+        )
+        snapshot = {
+            "symbol": "R_75",
+            "call": "buy_candidate",
+            "execution_trigger_type": "continuation_close",
+            "confidence": 0.65,
+        }
+        block = build_stage3_block(snapshot, outcomes_path=outcomes, verdict_cache_path=verdicts)
+        assert block["evidence_status"] == "still_learning"
+        assert block["execution_allowed"] is False
+        assert block["sizing"]["level"] == "paper_only"
 
-    # suppressed: stand_aside normally — proven_only forces paper_only.
-    suppressed = sizing_ladder(
-        state="suppressed", evidence_status="suppressed",
-        hit_rate=0.2, hit_rate_floor=0.5, proven_only=True,
-    )
-    assert suppressed["level"] == "paper_only"
-    assert suppressed["multiplier"] == 0.0
+        applied = apply_stage3_gate(dict(snapshot), outcomes_path=outcomes, verdict_cache_path=verdicts)
+        assert applied["execution_allowed"] is False
+        assert applied["size_multiplier"] == 0.0
+        assert applied["position_sizing_empirical"] == "paper_only"
 
-    no_data = sizing_ladder(
-        state="insufficient_data", evidence_status="no_data",
-        hit_rate=None, hit_rate_floor=0.5, proven_only=True,
-    )
-    assert no_data["level"] == "paper_only"
-    assert no_data["multiplier"] == 0.0
-
-
-def test_sizing_ladder_proven_only_keeps_proven_sizes() -> None:
-    """Proven-only mode does NOT touch market-proven calls: gated stays full
-    and annotated-above-floor stays half — only non-proven is forced down.
-    """
-    gated = sizing_ladder(
-        state="gated", evidence_status="proven", hit_rate=0.62, hit_rate_floor=0.5,
-        proven_only=True,
-    )
-    assert gated["level"] == "full"
-    assert gated["multiplier"] == 1.0
-
-    annotated = sizing_ladder(
-        state="annotated", evidence_status="proven", hit_rate=0.62, hit_rate_floor=0.5,
-        proven_only=True,
-    )
-    assert annotated["level"] == "half"
-    assert annotated["multiplier"] == 0.5
+        # Proven evidence (enough samples above the floor): execution on.
+        rows = [
+            _scored("R_75", "continuation_close", "target_hit")
+            for _ in range(int(MIN_STAGE3_SAMPLES * GATE_HIT_RATE_FLOOR) + 1)
+        ]
+        rows += [_scored("R_75", "continuation_close", "stop_hit") for _ in range(MIN_STAGE3_SAMPLES - len(rows))]
+        _write_outcomes(outcomes, rows)
+        proven = apply_stage3_gate(dict(snapshot), outcomes_path=outcomes, verdict_cache_path=verdicts)
+        assert proven["stage3"]["evidence_status"] == "proven"
+        assert proven["execution_allowed"] is True
+        assert proven["size_multiplier"] == 1.0
 
 
-def test_proven_only_gate_stamps_execution_allowed_false(tmp_path: Path) -> None:
-    """With proven_only on, a still_learning call carries execution_allowed
-    False + paper-only sizing on the alert; a proven call stays allowed.
-    """
-    outcomes = tmp_path / "outcomes.jsonl"
-    verdicts = _verdicts_file(tmp_path / "forecast_verdicts.jsonl")
-    _write_outcomes(
-        outcomes,
-        [_scored("R_75", "continuation_close", "target_hit") for _ in range(3)],  # still learning
-    )
-    snapshot = {
-        "symbol": "R_75",
-        "call": "buy_candidate",
-        "execution_trigger_type": "continuation_close",
-        "confidence": 0.65,
-    }
-    block = build_stage3_block(
-        snapshot, outcomes_path=outcomes, verdict_cache_path=verdicts, proven_only=True
-    )
-    assert block["proven_only"] is True
-    assert block["evidence_status"] == "still_learning"
-    assert block["execution_allowed"] is False
-    assert block["sizing"]["level"] == "paper_only"
-
-    applied = apply_stage3_gate(
-        dict(snapshot), outcomes_path=outcomes, verdict_cache_path=verdicts, proven_only=True
-    )
-    assert applied["execution_allowed"] is False
-    assert applied["size_multiplier"] == 0.0
-    assert applied["position_sizing_empirical"] == "paper_only"
-
-    # Proven evidence (enough samples above the floor): execution stays on.
-    rows = [
-        _scored("R_75", "continuation_close", "target_hit")
-        for _ in range(int(MIN_STAGE3_SAMPLES * GATE_HIT_RATE_FLOOR) + 1)
-    ]
-    rows += [_scored("R_75", "continuation_close", "stop_hit") for _ in range(MIN_STAGE3_SAMPLES - len(rows))]
-    _write_outcomes(outcomes, rows)
-    proven = apply_stage3_gate(
-        dict(snapshot), outcomes_path=outcomes, verdict_cache_path=verdicts, proven_only=True
-    )
-    assert proven["stage3"]["evidence_status"] == "proven"
-    assert proven["execution_allowed"] is True
-    assert proven["size_multiplier"] == 1.0
-
-
-def test_proven_only_overrides_annotate_escape_hatch(tmp_path: Path) -> None:
-    """Proven-only is the strictest belt: even in annotate mode a below-floor
-    call is forced paper-only (the annotate escape hatch is closed).
-    """
-    outcomes = tmp_path / "outcomes.jsonl"
-    verdicts = _verdicts_file(tmp_path / "forecast_verdicts.jsonl")
-    _write_outcomes(
-        outcomes,
-        [_scored("R_75", "continuation_close", "stop_hit") for _ in range(MIN_STAGE3_SAMPLES)],
-    )
-    snapshot = {
-        "symbol": "R_75",
-        "call": "buy_candidate",
-        "execution_trigger_type": "continuation_close",
-        "confidence": 0.6,
-    }
-    block = build_stage3_block(
-        snapshot,
-        outcomes_path=outcomes,
-        verdict_cache_path=verdicts,
-        suppression_mode="annotate",
-        proven_only=True,
-    )
-    assert block["state"] == "annotated"  # still shown (annotate)
-    assert block["evidence_status"] == "suppressed"  # truth axis unchanged
-    assert block["execution_allowed"] is False  # but execution is CLOSED
-    assert block["sizing"]["level"] == "paper_only"
-    assert block["sizing"]["multiplier"] == 0.0
-
-    applied = apply_stage3_gate(
-        dict(snapshot),
-        outcomes_path=outcomes,
-        verdict_cache_path=verdicts,
-        suppression_mode="annotate",
-        proven_only=True,
-    )
-    # The call is still shown (annotate) — proven-only holds execution, not
-    # visibility — but the submit path sees execution_allowed=False.
-    assert applied["call"] == "buy_candidate"
-    assert applied["execution_allowed"] is False
-    assert applied["size_multiplier"] == 0.0
-
-
-def test_gate_backtest_proven_only_marks_paper_only(tmp_path: Path) -> None:
-    """backtest-gate --proven-only marks non-proven calls paper_only so the
-    held-vs-executed verdict measures the strict belt.
+def test_gate_backtest_no_lookahead(tmp_path: Path) -> None:
+    """The backtest walks the same collapsed rules: the first call has zero
+    PRIOR outcomes -> insufficient_data/no_data -> paper-only sizing; later
+    calls accumulate evidence with no outcome lookahead.
     """
     from synthetic_trader.research.gate_backtest import (
         CallRecord,
@@ -821,8 +649,7 @@ def test_gate_backtest_proven_only_marks_paper_only(tmp_path: Path) -> None:
         )
         for i in range(4)
     ]
-    # All outcomes resolve to target hits (above floor) — but only the LAST
-    # call has enough PRIOR evidence to be proven; the first is no_data.
+    # All outcomes resolve to target hits (above floor).
     for i in range(3):
         calls[i].outcome_label = "target_hit"
 
@@ -830,28 +657,13 @@ def test_gate_backtest_proven_only_marks_paper_only(tmp_path: Path) -> None:
         calls=calls,
         min_samples=10,
         hit_rate_floor=0.5,
-        suppression_mode="suppress",
-        proven_only=True,
     )
-    # The first call had zero prior outcomes -> no_data -> paper_only.
-    assert calls[0].gate_state == "paper_only"
-    assert calls[0].evidence_status == "no_data"
-    # None accumulated enough prior samples to be proven here (min 10) —
-    # everything stays paper-only under the strict belt.
-    assert all(c.gate_state == "paper_only" for c in calls[1:])
-
-    # Without proven_only the same calls keep the plain gate states.
-    for call in calls:
-        call.gate_state = None
-    simulate_gate_walk_forward(
-        calls=calls,
-        min_samples=10,
-        hit_rate_floor=0.5,
-        suppression_mode="suppress",
-        proven_only=False,
-    )
+    # The first call had zero prior outcomes -> insufficient_data -> paper-only
+    # sizing (the collapsed gate's answer for unverified call types).
     assert calls[0].gate_state == "insufficient_data"
     assert calls[0].evidence_status == "no_data"
+    # None accumulated enough prior samples to be proven here (min 10).
+    assert all(c.gate_state == "insufficient_data" for c in calls[1:])
 
 
 def test_gate_clears_stale_suppressed_reason_on_reuse(tmp_path: Path) -> None:
@@ -888,8 +700,10 @@ def test_gate_clears_stale_suppressed_reason_on_reuse(tmp_path: Path) -> None:
     assert "suppressed_reason" not in reapplied
 
 
-def test_gate_block_carries_suppression_mode_default(tmp_path: Path) -> None:
-    """The block always records which mode produced the decision."""
+def test_gate_block_carries_suppression_mode_constant(tmp_path: Path) -> None:
+    """The block always records the fixed suppression_mode constant for
+    payload compatibility with dashboards that read it.
+    """
     outcomes = tmp_path / "outcomes.jsonl"
     _write_outcomes(
         outcomes,
@@ -897,12 +711,8 @@ def test_gate_block_carries_suppression_mode_default(tmp_path: Path) -> None:
     )
     snapshot = {"symbol": "R_75", "execution_trigger_type": "continuation_close", "confidence": 0.71}
     block = build_stage3_block(snapshot, outcomes_path=outcomes)
-    assert block["suppression_mode"] in ("suppress", "annotate")
-    # Invalid overrides fall back to the module default rather than raising.
-    block2 = build_stage3_block(
-        snapshot, outcomes_path=outcomes, suppression_mode="nonsense"
-    )
-    assert block2["suppression_mode"] in ("suppress", "annotate")
+    assert block["suppression_mode"] == "suppress"
+    assert SUPPRESSION_MODE == "suppress"
 
 
 def test_gate_annotated_when_horizon_uncalibrated_but_rate_clears(tmp_path: Path) -> None:

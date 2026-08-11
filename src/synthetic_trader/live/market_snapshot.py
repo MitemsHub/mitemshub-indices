@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import csv
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -806,7 +807,10 @@ TRADING_MODE_PRESETS = {
         # +0.65R on the 9.5-day R_75 corpus).  The 900s scale had too few
         # bars for the vol-extension gate to fire.
         swing_execution_timeframe_sec=300,
-        swing_hold_horizon_minutes=360,
+        # Short-call horizon: the user trades 1-2h calls, not 4-6h swings.
+        # The band signal's own hold is band_hold_horizon_sec (1h); this
+        # profile field must match so no path leaks a 6h "hold" display.
+        swing_hold_horizon_minutes=60,
         swing_take_profit_rr=3.5,
         geometry="band",
         band_hold_horizon_sec=3600,  # §38 sweep winner: 1h hold resolves calls 2x faster
@@ -1495,7 +1499,7 @@ def build_guardian_snapshot(
             effective_lock_ticks = _effective_confirmed_lock_ticks(
                 thresholds, current_confidence or confidence_at_confirmation
             )
-            hold_horizon = float(snapshot.get("hold_horizon_minutes") or 360)
+            hold_horizon = float(snapshot.get("hold_horizon_minutes") or 60)
             now = time.time()
             trigger_type = str(
                 snapshot.get("execution_trigger_type") or snapshot.get("alert_type") or ""
@@ -1602,7 +1606,6 @@ def classify_alert_type(alert: dict[str, object]) -> str:
 def build_watch_alert(
     snapshot: dict[str, object],
     *,
-    proven_only: bool | None = None,
     guardian_memory_dir: str | Path | None = None,
 ) -> dict[str, object]:
     """Convert a raw snapshot dict into a JSON-serializable alert dict.
@@ -1613,10 +1616,6 @@ def build_watch_alert(
 
     Called by the engine bridge's ``executePythonSnapshot`` after
     ``run_live_snapshot`` returns.
-
-    ``proven_only`` (SYNTH_GATE_PROVEN_ONLY) is forwarded to the Stage-3
-    gate: when on, only evidence_status == "proven" calls may carry a live
-    order; everything else is forced paper-only.
     """
     alert = dict(snapshot)
     # Stage-3 gate FIRST: replace raw model confidence with the market-verified
@@ -1625,7 +1624,7 @@ def build_watch_alert(
     # raises.  Runs before alert_type/decision_summary so those derived fields
     # reflect the gated call (e.g. a suppressed candidate renders as
     # stand_aside, not setup_candidate).
-    alert = apply_stage3_gate(alert, proven_only=proven_only)
+    alert = apply_stage3_gate(alert)
     # Ensure 'why' is populated from 'briefing' for CLI renderers
     if not alert.get("why") and alert.get("briefing"):
         alert["why"] = alert["briefing"]
@@ -1644,7 +1643,153 @@ def build_watch_alert(
     # keep showing the ORIGINAL call instead of dropping the plan.  The user
     # entered on this call and expects it to stand until invalidation.
     _restore_held_plan(alert, guardian_memory_dir)
+    # ── EA handoff (opt-in): write the approved call to the MQL5 executor ──
+    # When SYNTH_EA_EMIT=1, a proven buy/sell candidate is written to the MT5
+    # Common Files folder where the SynthCallExecutor EA polls it and places
+    # the order natively.  Best-effort and never raises — the dashboard must
+    # not break because the EA folder is unreachable.
+    _maybe_emit_ea_call(alert)
     return alert
+
+
+def _maybe_emit_ea_call(alert: dict[str, object]) -> None:
+    """Write a proven call to the EA folder when SYNTH_EA_EMIT=1.
+
+    The call is emitted only when the Stage-3 gate says the call type is
+    market-proven (``evidence_status == "proven"`` and
+    ``execution_allowed``).  Volume comes from ``SYNTH_EA_VOLUME`` (default
+    0.2) scaled by the empirical ``size_multiplier`` from the gate.  The
+    venue symbol resolves through the same ``SYNTHETIC_MT5_SYMBOL_MAP`` env
+    the collector uses (R_75 -> SYN75 on Blueberry).
+    """
+    if os.getenv("SYNTH_EA_EMIT") != "1":
+        return
+    try:
+        from synthetic_trader.execution.ea_emitter import emit_call_from_alert
+
+        symbol = str(alert.get("symbol") or "")
+        if not symbol:
+            return
+        venue_symbol = _ea_venue_symbol(symbol)
+        base_volume = float(os.getenv("SYNTH_EA_VOLUME", "0.2"))
+        try:
+            base_volume *= float(alert.get("size_multiplier") or 1.0)
+        except (TypeError, ValueError):
+            pass
+        emit_call_from_alert(
+            alert,
+            symbol=symbol,
+            venue_symbol=venue_symbol,
+            volume=max(base_volume, 0.0),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.debug("[ea_emitter] live emit skipped: %s", exc)
+
+
+def _ea_venue_symbol(symbol: str) -> str:
+    """Resolve R_75/R_100 to the broker venue symbol (SYN75/SYN100)."""
+    configured = os.getenv("SYNTHETIC_MT5_SYMBOL_MAP")
+    if configured:
+        try:
+            mapping = dict(item.split(":", 1) for item in configured.split(","))
+            if symbol in mapping:
+                return mapping[symbol]
+        except Exception:
+            pass
+    return "SYN75" if symbol == "R_75" else "SYN100"
+
+
+def _band_gate_state(
+    symbol: str,
+    execution_candles: list[object],
+    hold_horizon_sec: int,
+) -> dict[str, object]:
+    """Report why the live band strategy is standing aside (operator visibility).
+
+    Mirrors ``decision_engine._live_band_signal`` exactly — same config
+    kwargs, same re-validation overlays, same calibrated GARCH state — so the
+    numbers shown are precisely what the live signal decision used.  Surfaced
+    in the operator payload as ``band_gate`` so the dashboard can show "how
+    close" the market is to a call (vol ratio, displacement, warmup) instead
+    of a bare "No trade yet".
+    """
+    try:
+        if not execution_candles or len(execution_candles) < 60:
+            return {
+                "candles": len(execution_candles) if execution_candles else 0,
+                "needed_candles": 60,
+                "warmup_ok": False,
+                "vol_ratio": None,
+                "vol_extended": False,
+                "z_dev": None,
+                "z_entry": 1.0,
+                "waiting_on": "candle history",
+            }
+        from synthetic_trader.backtest.vol_band import VolBandConfig, VolBandStrategy
+        from synthetic_trader.models.garch_calibration import load_calibrated_garch_state
+        from synthetic_trader.research.band_revalidate import load_live_band_overrides
+
+        band_kwargs: dict = {
+            "max_hold_sec": hold_horizon_sec,
+            "breakeven_trail_frac": 0.3,
+        }
+        overrides, _artifact = load_live_band_overrides(symbol)
+        band_kwargs.update(overrides)
+
+        strategy = VolBandStrategy(
+            symbol,
+            execution_candles[0].timeframe_sec,
+            config=VolBandConfig(**band_kwargs),
+            garch_state=load_calibrated_garch_state(symbol),
+        )
+        last: object | None = None
+        for candle in execution_candles:
+            emitted = strategy.on_candle(candle)
+            if emitted is not None:
+                last = emitted
+
+        import math
+        vol_ratio = None
+        z_dev = None
+        if strategy._sigma_ema and strategy._prev_sigma:
+            vol_ratio = strategy._prev_sigma / strategy._sigma_ema
+            if strategy._ema:
+                z_dev = math.log(
+                    execution_candles[-1].close / strategy._ema
+                ) / strategy._prev_sigma
+        cfg = strategy.config
+        waiting = []
+        if strategy._candles_seen < cfg.warmup_candles:
+            waiting.append("candle history")
+        if vol_ratio is not None and vol_ratio <= cfg.vol_extended_ratio:
+            waiting.append("vol spike")
+        if z_dev is not None and abs(z_dev) < cfg.z_entry:
+            waiting.append("displacement")
+        if not waiting:
+            waiting.append("drift cooldown / confirmation")
+        return {
+            "candles": strategy._candles_seen,
+            "needed_candles": cfg.warmup_candles,
+            "warmup_ok": strategy._candles_seen >= cfg.warmup_candles,
+            "vol_ratio": round(vol_ratio, 3) if vol_ratio is not None else None,
+            "vol_extended_ratio": cfg.vol_extended_ratio,
+            "vol_extended": vol_ratio is not None and vol_ratio > cfg.vol_extended_ratio,
+            "z_dev": round(z_dev, 3) if z_dev is not None else None,
+            "z_entry": cfg.z_entry,
+            "signal_emitted": last is not None,
+            "waiting_on": ", ".join(waiting),
+        }
+    except Exception:
+        # Best-effort visibility — never crash the snapshot over it.
+        return {}
+
+
+# Re-anchor a held plan's entry when the market has moved this far beyond it
+# in the call's favor (as a fraction of the stop distance).  Half a stop
+# distance is far past spread/noise — the original limit is effectively
+# unreachable, so the plan should offer an enter-at-market level instead of
+# a stale entry the operator can never fill.
+HELD_PLAN_REANCHOR_FRACTION = 0.5
 
 
 def _restore_held_plan(alert: dict[str, object], memory_dir: str | Path | None = None) -> None:
@@ -1710,7 +1855,7 @@ def _restore_held_plan(alert: dict[str, object], memory_dir: str | Path | None =
         return
     now = time.time()
     issued_at = float(memory.get("issued_at_epoch") or 0.0)
-    horizon_min = float(memory.get("hold_horizon_minutes") or 360)
+    horizon_min = float(memory.get("hold_horizon_minutes") or 60)
     if issued_at and (now - issued_at) > horizon_min * 60:
         return  # hold horizon expired — the plan is over
     # The CURRENT print is the invalidation line here (not closed-candle
@@ -1722,6 +1867,52 @@ def _restore_held_plan(alert: dict[str, object], memory_dir: str | Path | None =
         return  # stop traded through — genuinely invalidated
     if direction == "sell" and price > stop:
         return
+    # ── Re-anchor a ran-away entry (enter-at-market) ─────────────────
+    # The plan's entry is the price at emission.  When the market has moved
+    # BEYOND that entry in the call's favor by more than half a stop-distance,
+    # the original entry is no longer reachable — a sell limit at 1,865 never
+    # fills while price trades at 1,820 and keeps falling.  The direction may
+    # have been right, but the stale entry silently costs the operator the
+    # trade.  Re-anchor the plan to the CURRENT market price with identical
+    # risk geometry (same stop distance, same target distance -> same R:R), so
+    # the operator can enter at market instead of waiting for a retrace that
+    # may never come.  Guardian memory is re-written so stop-lock/breakeven
+    # invalidation tracks the levels the operator actually holds.
+    stop_distance = abs(entry - stop) if stop != entry else 0.0
+    target_distance = abs(target - entry) if target != entry else 0.0
+    target_reached = (
+        (direction == "sell" and price <= target)
+        if target_distance > 0
+        else False
+    ) or (
+        (direction == "buy" and price >= target)
+        if target_distance > 0
+        else False
+    )
+    moved_beyond_entry = (
+        (direction == "sell" and price < entry - HELD_PLAN_REANCHOR_FRACTION * stop_distance)
+        if stop_distance > 0
+        else False
+    ) or (
+        (direction == "buy" and price > entry + HELD_PLAN_REANCHOR_FRACTION * stop_distance)
+        if stop_distance > 0
+        else False
+    )
+    reanchored = (
+        moved_beyond_entry
+        and not target_reached
+        and stop_distance > 0
+        and target_distance > 0
+    )
+    original_entry = entry
+    if reanchored:
+        entry = price
+        if direction == "sell":
+            stop = entry + stop_distance
+            target = entry - target_distance
+        else:
+            stop = entry - stop_distance
+            target = entry + target_distance
     # Restore the held plan.
     alert["call"] = "buy_candidate" if direction == "buy" else "sell_candidate"
     alert["trade_status"] = "valid"
@@ -1730,12 +1921,40 @@ def _restore_held_plan(alert: dict[str, object], memory_dir: str | Path | None =
     alert["stop_loss"] = stop
     alert["take_profit"] = target
     alert["guardian_state"] = "confirmed"
-    alert["guardian_reason"] = (
-        "Standing by the original call — plan held; invalidates only on stop trade-through or horizon expiry."
-    )
     alert["alert_type"] = "setup_candidate"
     alert["plan_held"] = True
     alert["plan_issued_at"] = issued_at
+    if reanchored:
+        alert["entry_chased"] = True
+        alert["original_entry"] = original_entry
+        alert["entry_instruction"] = "market"
+        alert["guardian_reason"] = (
+            f"Market ran beyond the original entry — {original_entry:g} is now "
+            f"unreachable (price {price:g}). Entry re-anchored to the current "
+            f"price; enter at MARKET with the same risk geometry."
+        )
+        # Re-write guardian memory so invalidation watches the re-anchored
+        # levels (best-effort — a memory write failure must not crash restore).
+        try:
+            _save_guardian_memory(
+                symbol,
+                {
+                    **memory,
+                    "entry": entry,
+                    "stop": stop,
+                    "target": target,
+                    "original_entry": original_entry,
+                    "reanchored_at_epoch": now,
+                    "state": "confirmed",
+                },
+                memory_dir,
+            )
+        except Exception:
+            pass
+    else:
+        alert["guardian_reason"] = (
+            "Standing by the original call — plan held; invalidates only on stop trade-through or horizon expiry."
+        )
     if stop != entry:
         alert["reward_risk"] = round(abs(target - entry) / abs(entry - stop), 3)
     alert.update(
@@ -1835,9 +2054,15 @@ async def _collect_from_client(
             oldest_history_epoch = oldest_in_page
             history_end = int(oldest_in_page) - 1
     if max_live_ticks > 0:
+        # Live phase is a FRESHNESS check: the history page above already
+        # carries the recent ~minutes of ticks (copy_ticks_from is ~30ms for
+        # 5000), so the live subscription only needs to bridge to "now" and
+        # prove the feed is moving.  A 2s budget collects ~10-20 fresh ticks
+        # (the MT5 poll yields on every price change) — far faster than the
+        # old 5s wait that dominated every dashboard read.
         seen_live_ticks = 0
         try:
-            async for tick in client.subscribe_ticks(symbol, timeout=5.0):
+            async for tick in client.subscribe_ticks(symbol, timeout=2.0):
                 collected.append(tick)
                 seen_live_ticks += 1
                 if seen_live_ticks >= max_live_ticks:
@@ -1913,8 +2138,14 @@ _csv_tick_cache: dict[str, tuple[Path, float, tuple[list[Tick], float]]] = {}
 
 # Maximum age of CSV ticks considered valid for analysis.
 # Ticks older than this threshold are filtered out in _load_csv_ticks().
-# 6 hours = 21,600 seconds — more than enough for intraday analysis.
-MAX_TICK_AGE_SECONDS = 86_400  # 24 hours — gives 4H bias timeframe enough candle history
+# The band strategy replays the last MAX_FEATURE_HISTORY (400) execution
+# candles so its EGARCH forecaster settles to the realized scale — 400 ×
+# 300s = ~33h.  A 24h window starved it (the regime-aware stale paths shrink
+# it further), which is why live could never reproduce its own backtest and
+# calls never fired.  48h (172,800s) guarantees the full warm-up whenever
+# the merged backfill corpus has that much history; the engine trims to the
+# last 400 candles anyway.
+MAX_TICK_AGE_SECONDS = 172_800  # 48 hours — full band forecaster warm-up
 # When the most recent tick is older than this, surface a "stale data" warning
 # in the snapshot result. 5 minutes = 300 seconds.
 STALE_TICK_WARNING_SECONDS = 300
@@ -2230,7 +2461,7 @@ def _load_csv_ticks(
 
     try:
         ticks = _read_tail_ticks(csv_path, symbol, max_ticks)
-        # ── Backfill corpus merge ────────────────────────────────
+        # ── Backfill corpus merge (only when the live CSV is sparse) ──
         # The live CSV (data/{symbol}_ticks.csv) only holds bursts written
         # by on-demand live reads — it is NOT a continuous record, so on a
         # quiet morning the engine saw "need 20 candles, have 19" despite
@@ -2238,8 +2469,26 @@ def _load_csv_ticks(
         # continuous M1 corpus in (same Blueberry SYN scale — verified by
         # the price sanity check downstream) so analysis always has full
         # candle history.  The live CSV wins on epoch ties (it is fresher).
+        #
+        # Optimization: if the live CSV alone already spans the full age
+        # window, the backfill merge only re-reads ~100k duplicate rows and
+        # rebuilds a 200k-entry epoch dict for data the age filter drops
+        # anyway — ~3-4s of pure waste on every dashboard read.  Skip the
+        # merge in that case; fall back to it only when the live tail is
+        # short (recent live reads are sparse), so the quiet-morning
+        # "need 20 candles" fix still applies.
         backfill_path = Path("data/backfill") / f"{symbol}_ticks.csv"
-        if backfill_path.exists() and backfill_path.resolve() != csv_path.resolve():
+        live_span = (
+            ticks[-1].epoch - ticks[0].epoch
+            if len(ticks) > 1
+            else 0.0
+        )
+        live_covers_window = live_span >= age_limit * 0.9
+        if (
+            not live_covers_window
+            and backfill_path.exists()
+            and backfill_path.resolve() != csv_path.resolve()
+        ):
             backfill_ticks = _read_tail_ticks(backfill_path, symbol, max_ticks)
             if backfill_ticks:
                 by_epoch = {tick.epoch: tick for tick in backfill_ticks}
@@ -2546,6 +2795,18 @@ def analyze_live_snapshot(
             snapshot["price_deviation"] = price_check["price_deviation"]
             snapshot["price_warning"] = price_check["price_warning"]
             snapshot["expected_price_range"] = price_check["expected_range"]
+        # ── Band gate state (operator visibility) ───────────────
+        # Why no call?  Attach the live band strategy's gate readout so the
+        # dashboard shows vol ratio / displacement / warmup instead of a bare
+        # "No trade yet".  Mirrors decision_engine._live_band_signal exactly.
+        try:
+            snapshot["band_gate"] = _band_gate_state(
+                symbol,
+                execution_candles,
+                hold_horizon_sec=preset.band_hold_horizon_sec,
+            )
+        except Exception:
+            pass  # best-effort visibility
         # ── Record missed trade for calibration feedback ────────
         # When the engine decides not to trade (signal is None), record the
         # decision so we can check later if the market moved in the predicted
@@ -2790,7 +3051,6 @@ async def run_live_snapshot(
     trading_mode: str = "sniper",
     model_path: str | None = None,
     skip_api: bool = False,
-    proven_only: bool | None = None,
 ) -> dict[str, object]:
     # Once-per-day cleanup (best-effort, time-gated)
     _maybe_cleanup_knowledge_base()
@@ -2805,6 +3065,14 @@ async def run_live_snapshot(
             model = OnlineLogisticModel.load(model_path)
         except Exception:
             model = None
+
+    # The venue is decided ONCE, before any collection, so the corpus
+    # append below can never mix scales: Deriv 1HZ ticks (~7,000 for
+    # R_75) must NOT be appended into the Blueberry MT5 corpus (~1,850).
+    # A snapshot subprocess whose env lost the MT5 vars would otherwise
+    # silently run the Deriv path and pollute the compounding corpus
+    # with 3.7x-wrong prices.
+    snapshot_venue = _resolve_venue()
 
     if skip_api:
         _t_csv = time.time()
@@ -2892,9 +3160,12 @@ async def run_live_snapshot(
         result["phase_timing_ms"] = _phases
         return result
 
-    _t_csv = time.time()
-    csv_ticks = _load_csv_ticks(symbol)
-    _phases["csv_read_ms"] = int((time.time() - _t_csv) * 1000)
+    # NOTE: the top-level CSV load used to happen here (5s+ of the read
+    # budget) but its result is only used in the MT5-failure fallback below.
+    # In the happy path analyze_live_snapshot re-reads the CSV itself, so
+    # loading it up front wasted ~5s on every dashboard read.  It is now
+    # loaded lazily inside the fallback branch.
+    csv_ticks = None
 
     try:
         _t_tick = time.time()
@@ -2915,8 +3186,23 @@ async def run_live_snapshot(
 
         _t_append = time.time()
         try:
-            csv_path = _resolve_csv_path(symbol)
-            append_ticks_csv(csv_path, ticks)
+            # ONLY append MT5-sourced ticks to the MT5 corpus.  When this
+            # subprocess ran the Deriv path (MT5 env not visible here), the
+            # collected ticks are on the Deriv 1HZ scale (~7,000 for R_75) —
+            # appending them would corrupt the compounding Blueberry corpus
+            # with ~3.7x-wrong prices (the exact corruption seen in
+            # data/R_75_ticks.csv).  The scale guard in append_ticks_csv is
+            # defense-in-depth; the venue gate is the root fix.
+            if snapshot_venue == "mt5":
+                csv_path = _resolve_csv_path(symbol)
+                append_ticks_csv(csv_path, ticks)
+            else:
+                print(
+                    f"[market_snapshot] venue={snapshot_venue}: skipping corpus append "
+                    f"({len(ticks)} Deriv-scale ticks must not enter the MT5 corpus)",
+                    file=sys.stderr,
+                    flush=True,
+                )
         except Exception:
             pass
         _phases["append_csv_ms"] = int((time.time() - _t_append) * 1000)
@@ -2962,6 +3248,12 @@ async def run_live_snapshot(
         result["phase_timing_ms"] = _phases
         return result
 
+    # Deriv WebSocket is the explicit venue when MT5 is not configured —
+    # the lazy CSV-only analysis below is the fallback when that path
+    # failed too.  Load the corpus only now (not at the top of the
+    # function) so the happy path never pays the 5s CSV read twice.
+    if csv_ticks is None:
+        csv_ticks = _load_csv_ticks(symbol)
     if csv_ticks:
         _t_analysis = time.time()
         result = analyze_live_snapshot(
@@ -3095,7 +3387,6 @@ async def _build_watch_baseline(
     timeframe_sec: int,
     higher_timeframe_sec: int,
     app_id: str | None,
-    proven_only: bool | None = None,
 ) -> tuple[list, dict[str, object], WatchState]:
     """Collect warm-up ticks, build a snapshot, and return (ticks, alert, WatchState).
 
@@ -3111,7 +3402,7 @@ async def _build_watch_baseline(
         timeframe_sec=timeframe_sec,
         higher_timeframe_sec=higher_timeframe_sec,
     )
-    alert = build_watch_alert(snapshot, proven_only=proven_only)
+    alert = build_watch_alert(snapshot)
     alert["symbol"] = symbol
     state = build_watch_state(alert)
     return ticks, alert, state
@@ -3131,7 +3422,6 @@ async def _handle_reconnect(
     app_id: str | None,
     warmup_ticks: list,
     previous: WatchState | None,
-    proven_only: bool | None = None,
 ) -> tuple[bool, int, list, WatchState | None]:
     """Handle a transport failure: journal, sleep, rebuild baseline.
 
@@ -3157,7 +3447,6 @@ async def _handle_reconnect(
             timeframe_sec=timeframe_sec,
             higher_timeframe_sec=higher_timeframe_sec,
             app_id=app_id,
-            proven_only=proven_only,
         )
         _append_journal(journal_file, {
             "record_type": "watch_transport",
@@ -3186,7 +3475,6 @@ async def run_live_watch(
     auto_score_interval_sec: float | None = None,
     auto_score_outcomes_path: str = DEFAULT_OUTCOMES_PATH,
     auto_score_status_path: str = DEFAULT_STATUS_PATH,
-    proven_only: bool | None = None,
 ) -> list[dict[str, object]]:
     """Monitor a symbol and emit read-only operator calls on meaningful change.
 
@@ -3220,7 +3508,6 @@ async def run_live_watch(
                 timeframe_sec=timeframe_sec,
                 higher_timeframe_sec=higher_timeframe_sec,
                 app_id=app_id,
-                proven_only=proven_only,
             )
         except Exception as exc:
             _append_journal(journal_file, {
@@ -3276,7 +3563,7 @@ async def run_live_watch(
                     timeframe_sec=timeframe_sec,
                     higher_timeframe_sec=higher_timeframe_sec,
                 )
-                alert = build_watch_alert(result, proven_only=proven_only)
+                alert = build_watch_alert(result)
                 alert["symbol"] = symbol
                 current = build_watch_state(alert)
 
@@ -3320,7 +3607,6 @@ async def run_live_watch(
                     app_id=app_id,
                     warmup_ticks=warmup_ticks,
                     previous=previous,
-                    proven_only=proven_only,
                 )
                 if should_break:
                     break
@@ -3521,8 +3807,6 @@ def render_live_watch_review_text(snapshot: dict[str, object]) -> str:
 
 def build_watch_alert_from_prepared_state(
     prepared: PreparedSymbolState,
-    *,
-    proven_only: bool | None = None,
 ) -> dict[str, object]:
     """Convert a PreparedSymbolState into a watch alert dict."""
     call = prepared.call
@@ -3561,10 +3845,8 @@ def build_watch_alert_from_prepared_state(
     }
     # Stage-3 gate: same empirical gate as ``build_watch_alert`` so the
     # prepared-state path (used by live-watch emission) honors suppressed
-    # call types and honest hit-rate confidence too.  ``proven_only``
-    # (SYNTH_GATE_PROVEN_ONLY) closes live execution for anything that
-    # isn't market-proven yet.
-    return apply_stage3_gate(alert, proven_only=proven_only)
+    # call types and honest hit-rate confidence too.
+    return apply_stage3_gate(alert)
 
 
 def _auto_log_call(calls_journal: Path, alert: dict[str, object]) -> None:

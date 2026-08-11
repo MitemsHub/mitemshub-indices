@@ -116,6 +116,12 @@ const PREPARED_CALL_ACTIONABLE_MAX_AGE_MS = 60 * 1000;
 const PREPARED_CALL_TRANSIENT_MAX_AGE_MS = 30 * 1000;
 const PREPARED_CALL_NEAR_THRESHOLD_RECHECK_CONFIDENCE = 0.48;
 const DEFAULT_PREPARED_CALL_WARMUP_REFRESH_MS = 45 * 1000;
+// A journal entry younger than this makes a warmup subprocess pointless —
+// the frontend serves that exact entry.  Without this guard, the scheduled
+// collector's continuous tick appends (changing the CSV mtime every cycle)
+// forced a fresh Python subprocess per symbol every 45s, saturating the CPU
+// and starving manual live reads.
+const WARMUP_JOURNAL_FRESH_MS = 3 * 60 * 1000;
 const DEFAULT_WARMUP_TICK_SAMPLE_COUNT = 4;
 const PREPARED_CALL_WARMUP_SYMBOLS: SymbolCode[] = ["R_75", "R_100"];
 const PREPARED_CALL_WARMUP_MODES: TradingMode[] = ["sniper"];
@@ -461,7 +467,23 @@ def _mt5(tp=None, lg=None, pw=None, sv=None):
     """
     initialized = False
     init_error = None
+    _guard = None
     try:
+        # Cross-process single-flight guard: the scheduled collector and
+        # this dashboard subprocess are different processes, and two
+        # simultaneous mt5.initialize() calls race the terminal's startup
+        # handshake (one gets (-10005, 'IPC timeout')).  Acquire the same
+        # named mutex the Python engine uses, for the init+login sequence
+        # only, then release so concurrent sessions are never blocked.
+        # Best-effort: if the guard module is unreachable, proceed anyway
+        # (the shutdown hardening below still applies).
+        try:
+            from synthetic_trader.execution.mt5_guard import mt5_single_flight
+            _guard = mt5_single_flight(timeout_sec=30.0)
+            if not _guard.acquire():
+                raise RuntimeError("mt5_busy: another process is initializing the terminal")
+        except ImportError:
+            _guard = None
         for portable in (False, True):
             for _ in range(2):
                 try:
@@ -483,6 +505,11 @@ def _mt5(tp=None, lg=None, pw=None, sv=None):
                 raise RuntimeError(f"login:{mt5.last_error()}")
         yield
     finally:
+        if _guard is not None:
+            try:
+                _guard.release()
+            except Exception:
+                pass
         try:
             mt5.shutdown()
         except Exception:
@@ -978,29 +1005,47 @@ export async function getHealthMetrics(): Promise<{
  * never spawn a subprocess on subsequent calls.
  */
 async function readEngineVersion(engineRoot: string): Promise<string | null> {
-  // Cache hit â€” return immediately without spawning.
+  // The engine version is a static constant in the Python package — it must
+  // NEVER require a Python subprocess (a cold import takes 5-17s, and the
+  // health poll hits this on every cache miss, which made page loads hang
+  // for ~20s).  Read it straight from the source file instead: a fast file
+  // read + regex, cached in memory AND on disk so module reloads (which
+  // re-evaluate this module) don't re-pay anything.
   if (engineVersionCache !== undefined) {
     return engineVersionCache;
   }
 
+  const versionFile = join(engineRoot, "src", "synthetic_trader", "__init__.py");
+  const cachedFile = join(engineRoot, "data", "engine_version.json");
   try {
-    const { stdout } = await runPythonScript({
-      engineRoot,
-      pythonScript: `import json; from synthetic_trader import __version__; print(json.dumps(__version__))`,
-      timeout: 5000,
-      label: "readEngineVersion",
-    });
-    const version = JSON.parse(stdout.trim());
-    if (typeof version === "string") {
+    const raw = await readFile(versionFile, "utf8");
+    const match = /__version__\s*=\s*["']([^"']+)["']/.exec(raw);
+    const version = match ? match[1] : null;
+    if (version) {
       engineVersionCache = version;
+      // Persist so future reads are instant even across processes.
+      try {
+        await mkdir(dirname(cachedFile), { recursive: true });
+        await writeFile(cachedFile, JSON.stringify({ version }), "utf8");
+      } catch { /* cache write is best-effort */ }
       return version;
     }
   } catch {
-    // runPythonScript already logs stderr via recordPipelineStderr
+    // Source file missing — fall through to the disk cache, then default.
   }
-  // Cache the failure so we don't keep retrying.
-  engineVersionCache = null;
-  return null;
+
+  try {
+    const raw = await readFile(cachedFile, "utf8");
+    const parsed = JSON.parse(raw) as { version?: string };
+    if (typeof parsed.version === "string") {
+      engineVersionCache = parsed.version;
+      return parsed.version;
+    }
+  } catch { /* no disk cache */ }
+
+  // Deterministic fallback matching the Python package constant.
+  engineVersionCache = "0.1.0";
+  return engineVersionCache;
 }
 
 /**
@@ -1625,7 +1670,13 @@ async function readLiveSnapshotWithRetry({
   mode,
   warmupProfile,
   tradingMode,
-  skipApi = false,
+  // CSV-first by default: the scheduled collector appends ticks to the
+  // CSV continuously, so the file is seconds fresh.  Reading it is fast
+  // and deterministic (~2s of Python work vs 20-40s for a live MT5 poll
+  // at 2 ticks/sec).  skipApi=false (live MT5/Deriv tick read) is only
+  // used explicitly where the caller needs it — it makes reads slow and
+  // flaky, and it contends with the collector's own MT5 session.
+  skipApi = true,
   signal,
 }: LiveSnapshotReadOptions) {
   let lastError: unknown;
@@ -1973,7 +2024,6 @@ function normalizeStage3(raw: unknown): Stage3Block | null {
         ? r.hit_rate_floor
         : 0.5,
     suppression_mode: r.suppression_mode === "annotate" ? "annotate" : "suppress",
-    proven_only: r.proven_only === true,
     execution_allowed: r.execution_allowed !== false,
     below_floor: r.below_floor === true,
     sizing: normalizeStage3Sizing(r.sizing),
@@ -2082,6 +2132,9 @@ function mapLiveSnapshot(raw: Record<string, unknown>, symbol: SymbolCode): Base
       "Live guardian state is unavailable.",
     invalidates_if: normalizeText(raw.invalidates_if),
     call_age_seconds: normalizeCallAgeSeconds(raw.call_age_seconds),
+    entry_chased: raw.entry_chased === true,
+    original_entry: normalizeNumber(raw.original_entry),
+    entry_instruction: normalizeText(raw.entry_instruction) as FreshCallResponse["entry_instruction"] ?? null,
     generated_at: normalizeText(raw.generated_at) ?? new Date().toISOString(),
     raw_features: rawFeatures,
     snapshot_structure: snapshotStructure,
@@ -2095,6 +2148,10 @@ function mapLiveSnapshot(raw: Record<string, unknown>, symbol: SymbolCode): Base
     stage3: normalizeStage3(raw.stage3),
     venue: normalizeVenue(raw.venue),
     geometry: raw.geometry === "band" || raw.geometry === "sniper_legacy" ? raw.geometry : null,
+    band_gate:
+      typeof raw.band_gate === "object" && raw.band_gate !== null
+        ? (raw.band_gate as FreshCallResponse["band_gate"])
+        : null,
   };
 
   return {
@@ -2669,6 +2726,25 @@ export async function warmPreparedCalls(): Promise<void> {
         PREPARED_CALL_WARMUP_MODES.map(async (tradingMode) => {
         const cacheKey = `${symbol}_${tradingMode}`;
         try {
+          // ── Fresh-journal guard (fast path) ─────────────────────
+          // The scheduled collector appends ticks to the CSV continuously,
+          // so the CSV mtime ALWAYS changes and the mtime cache below never
+          // hits — every 45s warmup cycle used to spawn a Python subprocess
+          // for each symbol (5-11s of CPU each), saturating the box and
+          // starving manual reads (the "taking forever / reconnect loop"
+          // complaint).  If the journal already holds a plan under 3 minutes
+          // old for this symbol, that entry IS what the frontend serves, so
+          // re-analyzing adds nothing.  Skip the subprocess entirely.
+          const freshEntries = await readHistoryEntries(symbol, 1);
+          const newest = freshEntries[0];
+          if (
+            newest &&
+            typeof newest.generated_at === "string" &&
+            Date.now() - Date.parse(newest.generated_at) < WARMUP_JOURNAL_FRESH_MS
+          ) {
+            warmupCacheHits[symbol] = (warmupCacheHits[symbol] ?? 0) + 1;
+            return;
+          }
           // ── Check whether the CSV file has changed since last cycle ──
           // If the mtime is the same, skip the ~35s Python subprocess and
           // rely on the journal entry from the previous warmup (still fresh
@@ -2689,16 +2765,16 @@ export async function warmPreparedCalls(): Promise<void> {
             warmupCacheMisses[symbol] = (warmupCacheMisses[symbol] ?? 0) + 1;
           }
           // ── Live tick collection strategy ─────────────────────────
-          // Most warmup cycles (9 out of 10) use CSV-only mode (skipApi=true)
-          // to keep the 45-second warmup fast and avoid unnecessary subprocess
-          // timeouts. Every 10th cycle uses skipApi=false to collect fresh live
-          // ticks via Deriv WebSocket (or MT5, if configured), keeping the CSV
-          // velocity positive during idle periods.
-          //
-          // This ensures the HealthDashboard's tick velocity badge shows a
-          // non-zero value even when the user hasn't clicked "Run" manually.
-          const isLiveCycle = warmupCycleCounter % 2 === 0;
-          const effectiveSkipApi = !isLiveCycle;
+          // Warmup is ALWAYS CSV-only (skipApi=true).  The scheduled
+          // collector task (run-live-tick-collector) appends ticks to the
+          // CSV continuously, so the warmup has nothing to add — and a
+          // live MT5 read here (a) takes 20-40s per cycle, (b) contends
+          // with the manual read's MT5 session through the single-flight
+          // guard (making manual reads slow), and (c) fails and flips the
+          // bridge to "offline" when MT5 is busy.  CSV-only warmups are
+          // fast, never touch MT5, and keep the analysis fresh from the
+          // collector's data.
+          const effectiveSkipApi = true;
           const base = sanitizeUnavailableExecutionLevels(
             await readLiveSnapshotWithRetry({ engineRoot, symbol, mode: "prepared", skipApi: effectiveSkipApi, tradingMode }),
           );
@@ -2719,14 +2795,17 @@ export async function warmPreparedCalls(): Promise<void> {
         } catch (warmupError) {
           // Warmup should never interrupt the manual call path.
           // On failure, clear the mtime cache so the next warmup cycle
-          // re-attempts the live connection instead of being locked out.
+          // re-attempts instead of being locked out.
           warmupCsvTimestamps.delete(cacheKey);
-          // Surface the error in pipeline diagnostics so the UI shows
-          // WHY the warmup failed instead of silently swallowing it.
-          recordPipelineError(
-            warmupError instanceof Error
-              ? `[warmup] ${symbol}/${tradingMode}: ${warmupError.message.slice(0, 200)}`
-              : `[warmup] ${symbol}/${tradingMode}: Unknown warmup failure`,
+          // NOTE: intentionally NOT recorded via recordPipelineError — a
+          // warmup hiccup must not flip bridge_unavailable (the UI's
+          // "Bridge Offline / reconnecting" state) and trigger the
+          // auto-refresh reconnect loop the operator complained about.
+          // Warmup is background analysis; the manual call path surfaces
+          // its own failures through the normal diagnostics.
+          console.warn(
+            `[warmup] ${symbol}/${tradingMode} failed: `,
+            warmupError instanceof Error ? warmupError.message : warmupError,
           );
         }
       })
@@ -2960,11 +3039,20 @@ export async function getLatestCall(
   symbol: SymbolCode,
   tradingMode: TradingMode = "sniper",
 ) {
-  // Always run a fresh Python subprocess — never return stale journal data.
-  // The CSV-static fast path (reusePreparedCall: "eligible_only") returns
-  // the latest journal entry when the CSV hasn't changed for 5+ seconds,
-  // but that entry can be a stale "forming" result from an earlier state.
-  // The Refresh button already uses "never" and always works correctly.
+  // Journal-first: the mount-time auto-load should be an instant file read,
+  // not a Python subprocess.  Previously this spawned a full subprocess on
+  // every page load, and loadCachedCallFirst then spawned a SECOND one via
+  // POST /api/calls/run — two sequential 20-40s reads = the 60-80s "reading"
+  // state the operator saw.  The frontend already self-heals staleness: a
+  // journal entry older than 3 minutes triggers a silent background refresh,
+  // and the Refresh button always forces a fresh read via POST /api/calls/run.
+  const entries = await readHistoryEntries(symbol, 1);
+  const latest = entries[0];
+  if (latest) {
+    return latest;
+  }
+  // Empty journal (first run) — fall back to a fresh read so the mount
+  // still populates.
   return runFreshCall({
     symbol,
     accountMode: "own_account",
@@ -2978,6 +3066,24 @@ export async function getGuardianStatus(
   symbol: SymbolCode,
   tradingMode: TradingMode = "sniper",
 ): Promise<GuardianStatus> {
+  // Journal-first: the 5-second guardian poll must not spawn a Python
+  // subprocess (previously it did on every freshCallCache miss — a fresh
+  // ~10-20s read every ~10s, keeping the box saturated and making manual
+  // reads slow).  The journal is updated by every snapshot read, so the
+  // last written guardian state is the honest current truth; a fresh read
+  // (mount / stale-refresh / manual Refresh) updates it.
+  const entries = await readHistoryEntries(symbol, 1);
+  const latest = entries[0];
+  if (latest) {
+    return guardianStatusSchema.parse({
+      symbol: latest.symbol,
+      guardian_state: latest.guardian_state,
+      guardian_reason: latest.guardian_reason,
+      current_close: latest.current_close,
+      generated_at: latest.generated_at,
+    });
+  }
+
   const call = await runFreshCall({
     symbol,
     accountMode: "own_account",

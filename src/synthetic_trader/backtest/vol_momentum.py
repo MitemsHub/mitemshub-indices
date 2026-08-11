@@ -186,6 +186,29 @@ class VolMomentumStrategy:
         self._prev_close: float | None = None
         self._prev_sigma: float | None = None
         self._candles_seen = 0
+        # Data-gap detection: a multi-hour feed outage must not be misread
+        # as one gigantic bar-scale return (see _gap_reanchor).
+        self._last_bar_end: float | None = None
+        self._max_gap_sec = max(3 * timeframe_sec, 600)
+
+    def _gap_reanchor(self, candle: Candle) -> bool:
+        """Return True (and re-anchor) when the candle follows a data gap.
+
+        The candle stream is bucketed by wall-clock, so a multi-hour feed
+        outage (collector downtime, terminal disconnect) produces a candle
+        whose close sits far above the previous candle's close even though
+        the market moved normally across the outage.  Feeding that span as
+        one bar-scale return fabricates a spurious EGARCH shock (z ~ +50),
+        clipping log-variance and poisoning the sigma EMA for the rest of
+        the run.  On a gap we re-anchor the close/EMA baselines, skip the
+        forecaster update, and stand aside for that candle."""
+        if self._last_bar_end is not None and candle.open_time > self._last_bar_end + self._max_gap_sec:
+            self._prev_close = candle.close
+            self._ema = candle.close
+            self._last_bar_end = candle.open_time + candle.timeframe_sec
+            return True
+        self._last_bar_end = candle.open_time + candle.timeframe_sec
+        return False
 
     @property
     def version(self) -> str:
@@ -197,6 +220,8 @@ class VolMomentumStrategy:
         if self._prev_close is None or candle.close <= 0.0:
             self._prev_close = candle.close
             self._ema = candle.close
+            return None
+        if self._gap_reanchor(candle):
             return None
 
         log_return = math.log(candle.close / self._prev_close)

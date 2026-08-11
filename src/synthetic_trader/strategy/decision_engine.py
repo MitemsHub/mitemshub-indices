@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import mean
@@ -12,6 +13,7 @@ from synthetic_trader.features.assembler import build_snapshot
 from synthetic_trader.features.indicators import clamp, safe_div
 from synthetic_trader.features.market_structure import structural_direction
 from synthetic_trader.models.online import OnlineLogisticModel
+from synthetic_trader.strategy.band_geometry import BandGeometryConfig, BandLevels, band_levels
 from synthetic_trader.strategy.confirmation_builder import confirm_setup
 from synthetic_trader.strategy.intraday_execution_builder import build_intraday_execution
 from synthetic_trader.strategy.swing_execution_builder import build_swing_execution
@@ -31,25 +33,27 @@ class DecisionReport:
     reasons: tuple[str, ...]
 
 
-def _live_band_signal(
+def _replay_band_strategy(
     *,
     symbol: str,
     execution_candles: list[Candle],
     bar_sec: int,
     hold_horizon_sec: int,
-) -> TradeSignal | None:
+) -> tuple[object | None, TradeSignal | None]:
     """Replay the verified vol-band strategy over the execution candles.
 
     The band geometry IS the backtested strategy (EGARCH forecast + ADWIN
     drift gate + extended-vol z_entry fade, with zero-drawdown stop/target
     from the calibrated band) — replaying it here with the exact same
     machinery guarantees the live call can never diverge from what the
-    9.5-day corpus measured (+0.65R/trade on R_75 @300s with the breakeven
-    trail).  Returns None (stand aside) when there is no extended-vol fade
-    setup on the current candles.
+    corpus measured.  Returns ``(strategy, last_emitted_signal)``: the
+    strategy instance retains its final internal state (the calibrated
+    forecast sigma ``_prev_sigma`` and its EMA), so callers can derive band
+    levels even when no fade setup fired on the current candle.  Returns
+    ``(None, None)`` when there isn't enough candle history.
     """
     if not execution_candles or len(execution_candles) < 60:
-        return None
+        return None, None
     from synthetic_trader.backtest.vol_band import VolBandConfig, VolBandStrategy
     from synthetic_trader.models.garch_calibration import load_calibrated_garch_state
     from synthetic_trader.research.band_revalidate import load_live_band_overrides
@@ -75,7 +79,47 @@ def _live_band_signal(
         emitted = strategy.on_candle(candle)
         if emitted is not None:
             last = emitted
-    return last
+    return strategy, last
+
+
+def _structure_band_levels(
+    *,
+    strategy: object,
+    execution_candles: list[Candle],
+    bar_sec: int,
+    hold_horizon_sec: int,
+    direction: Direction,
+) -> BandLevels | None:
+    """Zero-drawdown band levels for a structural (quiet-trend) thesis call.
+
+    Uses the replayed strategy's final calibrated forecast sigma to place
+    stop/target via the shared :func:`band_levels` — the exact geometry the
+    vol-spike fade uses.  Returns ``None`` when the sigma is missing or
+    degenerate, or the geometry fails the RR / stop-cap guards.
+    """
+    prev_sigma = getattr(strategy, "_prev_sigma", None)
+    if prev_sigma is None or prev_sigma <= 1e-12:
+        return None
+    cfg = strategy.config
+    entry = execution_candles[-1].close
+    # Use the strategy's effective hold (the re-validation artifact can
+    # promote a different max_hold_sec than the profile default) so the
+    # fallback levels match the fade's geometry exactly.
+    hold = int(getattr(cfg, "max_hold_sec", 0) or hold_horizon_sec)
+    return band_levels(
+        entry=entry,
+        direction="buy" if direction is Direction.LONG else "sell",
+        sigma_per_bar=prev_sigma,
+        bar_sec=bar_sec,
+        hold_horizon_sec=hold,
+        config=BandGeometryConfig(
+            stop_sigma_mult=cfg.stop_sigma_mult,
+            target_sigma_mult=cfg.target_sigma_mult,
+            min_target_rr=cfg.min_target_rr,
+            max_stop_pct=cfg.max_stop_pct,
+            hold_horizon_sec=hold,
+        ),
+    )
 
 
 MAX_CALIBRATION_SAMPLES = 500
@@ -520,45 +564,159 @@ class DecisionEngine:
             # band levels — replayed over the execution candles, so live
             # entry/levels can never diverge from what the backtest measured.
             if profile.geometry == "band":
-                band_signal = _live_band_signal(
+                strategy, band_signal = _replay_band_strategy(
                     symbol=symbol,
                     execution_candles=execution_candles,
                     bar_sec=profile.execution_timeframe_sec,
                     hold_horizon_sec=profile.band_hold_horizon_sec,
                 )
-                if band_signal is None:
+                if band_signal is not None:
+                    # The strategy's own hold (re-validation artifact can
+                    # promote a different max_hold_sec than the profile) —
+                    # never show a horizon the levels weren't built for.
+                    fade_hold_sec = int(getattr(band_signal, "horizon_sec", 0) or profile.band_hold_horizon_sec)
+                    hold_minutes = max(1, round(fade_hold_sec / 60))
+                    signal = TradeSignal(
+                        symbol=symbol,
+                        direction=band_signal.direction,
+                        confidence=band_signal.confidence,
+                        min_confidence=min_confidence,
+                        entry=band_signal.entry,
+                        stop_loss=band_signal.stop_loss,
+                        take_profit=band_signal.take_profit,
+                        horizon_sec=fade_hold_sec,
+                        snapshot=snapshot,
+                        rationale=rationale + tuple(band_signal.rationale),
+                        model_version=self.model.version,
+                        execution_stop=band_signal.stop_loss,
+                        thesis_invalidation=band_signal.stop_loss,
+                        primary_target=band_signal.take_profit,
+                        extended_target=band_signal.take_profit,
+                        hold_horizon_minutes=hold_minutes,
+                        execution_trigger_type="band_geometry",
+                        signal_strength=signal_strength,
+                        position_scale=position_scale,
+                    )
+                    return DecisionReport(signal, rationale + tuple(band_signal.rationale))
+
+                # ── Vol-dynamics fallback (quiet trend) ────────────
+                # No vol-spike fade setup on this candle, but the
+                # volatility-dynamics direction (regime + EGARCH + flow
+                # scores, computed above) may still hold conviction.  Emit
+                # it with the same calibrated zero-drawdown band levels
+                # instead of standing aside.  Direction comes ONLY from the
+                # vol-dynamics scores — the pattern/SMC thesis is demoted to
+                # research and never drives a call.  ``band_structure`` is a
+                # NEW trigger type, so Stage-3 starts it at still_learning
+                # (paper-only) until its own scored outcomes prove it.
+                band_dir = (
+                    Direction.LONG if long_score >= short_score else Direction.SHORT
+                )
+                band_conf = long_score if band_dir is Direction.LONG else short_score
+                # ── Higher-timeframe alignment guard ───────────────────
+                # The MTF panel speaks the SMC structure view (research, so it
+                # can legitimately differ from the vol-dynamics call).  When
+                # the vol-dynamics direction fires AGAINST a meaningful 4H
+                # structure bias (|bias| >= 0.3), a near-coin-flip call would
+                # silently contradict the alignment the operator sees on the
+                # dashboard.  Raise the confidence bar (0.52 -> 0.62) so only
+                # genuine vol-dynamics conviction can override structure, and
+                # say so in the rationale.  Aligned or neutral HTF keeps the
+                # normal 0.52 bar.
+                htf_bias = features.get("bias_structure_bias", 0.0) or 0.0
+                counter_htf = (
+                    (band_dir is Direction.LONG and htf_bias <= -0.3)
+                    or (band_dir is Direction.SHORT and htf_bias >= 0.3)
+                )
+                fallback_min_conf = 0.62 if counter_htf else 0.52
+                if band_conf >= fallback_min_conf and strategy is not None:
+                    levels = _structure_band_levels(
+                        strategy=strategy,
+                        execution_candles=execution_candles,
+                        bar_sec=profile.execution_timeframe_sec,
+                        hold_horizon_sec=profile.band_hold_horizon_sec,
+                        direction=band_dir,
+                    )
+                    if levels is None:
+                        # Conviction exists but the geometry is untradeable at
+                        # current volatility (stop would breach the safety
+                        # cap / RR guard).  Say so — never claim there is no
+                        # direction when there is one.
+                        return DecisionReport(
+                            None,
+                            (
+                                f"band: {band_dir.value} vol-dynamics direction holds "
+                                "but no tradeable band geometry at current "
+                                "volatility (stop exceeds the 1.5% safety cap) "
+                                "— standing aside until vol settles",
+                            )
+                            + rationale,
+                        )
+                    if levels is not None:
+                        hold_sec = int(levels.hold_horizon_sec or profile.band_hold_horizon_sec)
+                        hold_minutes = max(1, round(hold_sec / 60))
+                        structure_rationale = (
+                            f"band_structure: no vol-spike fade, but the "
+                            f"{band_dir.value} vol-dynamics direction holds "
+                            f"(regime/EGARCH/flow conf {band_conf:.2f}) — calibrated "
+                            f"band levels: stop {levels.stop_loss:.4g}, target "
+                            f"{levels.take_profit:.4g}, RR {levels.reward_risk:.1f}, "
+                            f"{hold_minutes}m hold"
+                        )
+                        if counter_htf:
+                            structure_rationale += (
+                                f" — fires counter to the "
+                                f"{'bullish' if htf_bias > 0 else 'bearish'} "
+                                f"4H structure bias (alignment bar raised to "
+                                f"{fallback_min_conf:.2f})"
+                            )
+                        signal = TradeSignal(
+                            symbol=symbol,
+                            direction=band_dir,
+                            confidence=band_conf,
+                            min_confidence=min_confidence,
+                            entry=execution_candles[-1].close,
+                            stop_loss=levels.stop_loss,
+                            take_profit=levels.take_profit,
+                            horizon_sec=hold_sec,
+                            snapshot=snapshot,
+                            rationale=rationale + (structure_rationale,),
+                            model_version=self.model.version,
+                            execution_stop=levels.stop_loss,
+                            thesis_invalidation=levels.stop_loss,
+                            primary_target=levels.take_profit,
+                            extended_target=levels.take_profit,
+                            hold_horizon_minutes=hold_minutes,
+                            execution_trigger_type="band_structure",
+                            signal_strength=signal_strength,
+                            position_scale=position_scale,
+                        )
+                        return DecisionReport(signal, rationale + (structure_rationale,))
+
+                if counter_htf:
+                    # Direction exists but is counter to the 4H structure at
+                    # only moderate confidence — held back with the honest
+                    # reason instead of a bare "no direction".
                     return DecisionReport(
                         None,
                         (
-                            "band: no extended-vol fade setup on the execution "
-                            "timeframe — standing aside (without the vol-extension "
-                            "edge, direction on synthetic indices is a coin flip)",
+                            f"band: {band_dir.value} vol-dynamics direction is "
+                            f"counter to the {'bullish' if htf_bias > 0 else 'bearish'} "
+                            f"4H structure bias and confidence {band_conf:.2f} is below "
+                            f"the raised {fallback_min_conf:.2f} bar — standing aside",
                         )
                         + rationale,
                     )
-                hold_minutes = max(1, round(profile.band_hold_horizon_sec / 60))
-                signal = TradeSignal(
-                    symbol=symbol,
-                    direction=band_signal.direction,
-                    confidence=band_signal.confidence,
-                    min_confidence=min_confidence,
-                    entry=band_signal.entry,
-                    stop_loss=band_signal.stop_loss,
-                    take_profit=band_signal.take_profit,
-                    horizon_sec=profile.band_hold_horizon_sec,
-                    snapshot=snapshot,
-                    rationale=rationale + tuple(band_signal.rationale),
-                    model_version=self.model.version,
-                    execution_stop=band_signal.stop_loss,
-                    thesis_invalidation=band_signal.stop_loss,
-                    primary_target=band_signal.take_profit,
-                    extended_target=band_signal.take_profit,
-                    hold_horizon_minutes=hold_minutes,
-                    execution_trigger_type="band_geometry",
-                    signal_strength=signal_strength,
-                    position_scale=position_scale,
+
+                return DecisionReport(
+                    None,
+                    (
+                        "band: no extended-vol fade setup and no vol-dynamics "
+                        "conviction (conf below 0.52) — standing aside until "
+                        "the volatility dynamics produce a clear direction",
+                    )
+                    + rationale,
                 )
-                return DecisionReport(signal, rationale + tuple(band_signal.rationale))
 
             swing_signal = build_swing_execution(
                 symbol=symbol,
@@ -816,50 +974,36 @@ class DecisionEngine:
         smc_bos_component = self._smc_bos_component(direction, features)
         smc_choch_component = self._smc_choch_component(direction, features)
 
-        # ── Rebalanced weights ──────────────────────────────────────
-        # Statistical components (exploitable on synthetic indices):
-        #   regime 0.22, tick_flow 0.10, volatility 0.08, garch 0.08
-        # Pattern-based components (noise on random data):
-        #   structure 0.06, displacement 0.02, momentum 0.02, confluence 0.03
-        # Institutional SMC components (structural confirmation):
-        #   smc_fvg 0.06, smc_ob 0.06, smc_bos 0.05, smc_choch 0.04
-        # Statistical features dominate (0.58), SMC adds institutional
-        # confirmation (0.21), pattern features stay minimal (0.13).
+        # ── Vol-dynamics-only weights (pattern/SMC demoted to research) ──
+        # Synthetic indices are CSPRNG-generated processes: the generator has
+        # no memory of candles, so pattern/SMC "structure" (FVG, order
+        # blocks, BOS/CHoCH, liquidity sweeps, multi-TF confluence) is noise
+        # — the old weights still gave it 0.34 of the score and let a
+        # "confirmed setup" emit calls on nothing but noise.  The call path
+        # now scores ONLY the volatility-dynamics primitives that are real on
+        # these markets: regime clustering, EGARCH forecast, mean reversion,
+        # tick microstructure, and the (deliberately small) online model.
+        # The pattern/SMC components are still computed (research visibility)
+        # but carry zero weight in the live direction/confidence decision.
         weights = {
-            "model": 0.12,          # reduced — learns from noise, not signal
-            "structure": 0.06,      # halved — patterns are noise on synthetic indices
-            "regime": 0.22,         # largest weight — regime clustering IS real
-            "mean_reversion": 0.04, # reduced — less reliable without GARCH context
-            "displacement": 0.02,   # halved — random on synthetic indices
-            "momentum": 0.02,       # halved — random on synthetic indices
-            "volatility": 0.08,     # increased — volatility clustering is exploitable
-            "confluence": 0.03,     # halved — multi-TF structure is noise
-            "tick_flow": 0.10,      # increased — microstructure is real
-            "garch": 0.08,          # variance forecast from EGARCH(1,1)
-            "garch_mr": 0.02,       # mean-reversion signal from GARCH
-            "smc_fvg": 0.06,        # institutional FVG imbalance zones
-            "smc_ob": 0.06,         # institutional order block supply/demand
-            "smc_bos": 0.05,        # break of structure continuation
-            "smc_choch": 0.04,      # change of character reversal
+            "model": 0.12,          # online logistic — kept small (learns from noise)
+            "regime": 0.30,         # regime clustering IS the exploitable property
+            "mean_reversion": 0.08, # vol mean-reversion after spikes
+            "volatility": 0.14,     # volatility clustering
+            "tick_flow": 0.16,      # microstructure flow
+            "garch": 0.14,          # EGARCH(1,1) variance forecast
+            "garch_mr": 0.06,       # GARCH mean-reversion signal
         }
-        # Total = 1.00 — statistical (0.58) + SMC institutional (0.21) + pattern (0.13) + model (0.08)
+        # Total = 1.00 — all volatility-dynamics + small model.
 
         confidence = (
             weights["model"] * model_component
-            + weights["structure"] * structure_component
             + weights["regime"] * regime_component
             + weights["mean_reversion"] * mean_reversion_component
-            + weights["displacement"] * displacement_component
-            + weights["momentum"] * momentum_component
             + weights["volatility"] * volatility_component
-            + weights["confluence"] * confluence_component
             + weights["tick_flow"] * tick_flow_component
             + weights["garch"] * garch_component
             + weights["garch_mr"] * garch_mr_component
-            + weights["smc_fvg"] * smc_fvg_component
-            + weights["smc_ob"] * smc_ob_component
-            + weights["smc_bos"] * smc_bos_component
-            + weights["smc_choch"] * smc_choch_component
         )
         return clamp(confidence, 0.0, 1.0)
 

@@ -131,6 +131,8 @@ class ArchGarchForecaster:
     def _try_fit_arch(self) -> None:
         """Attempt to fit an arch model on the return buffer."""
         try:
+            import warnings as _warnings
+
             from arch import arch_model
 
             returns_pct = [r * 100 for r in self.state._return_buffer]  # arch expects pct
@@ -138,7 +140,13 @@ class ArchGarchForecaster:
                 return
 
             am = arch_model(returns_pct, vol="Garch", p=1, q=1, dist="normal")
-            result = am.fit(disp="off", show_warning=False)
+            # The M5 log-returns (×100 for arch) land below arch's preferred
+            # 1–1000 scale, so every periodic fit emits a DataScaleWarning.
+            # This fit is optional diagnostics (persistence/long-run updates)
+            # — the online EWMA path is primary — so suppress the warning.
+            with _warnings.catch_warnings():
+                _warnings.filterwarnings("ignore", message=".*poorly scaled.*")
+                result = am.fit(disp="off", show_warning=False)
 
             if result is not None and hasattr(result, "params"):
                 params = result.params

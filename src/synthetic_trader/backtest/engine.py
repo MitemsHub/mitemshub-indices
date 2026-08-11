@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from synthetic_trader.config import MAX_FEATURE_HISTORY, TraderConfig
 from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
+from synthetic_trader.features.assembler import clear_assembler_caches
 from synthetic_trader.domain import Candle, Tick, TradeOutcome
 from synthetic_trader.execution.paper import PaperBroker
 from synthetic_trader.journal.trade_journal import (
@@ -61,6 +62,19 @@ class BacktestEngine:
         if symbol not in self.config.symbols:
             raise ValueError(f"unsupported symbol {symbol!r}")
 
+        # Hermetic-run contract: the assembler's module-level EGARCH /
+        # session-filter / fingerprint caches (features/assembler.py) are
+        # per-run warm-up state, NOT process state.  Without this clear, a
+        # sequential run in the same process inherits the previous run's
+        # warm-up (e.g. fingerprint_observations 1 -> 599) and its features —
+        # and therefore its signals and trades — silently diverge (observed:
+        # the real-corpus sniper leg diverged by 19 of 178 trades).  Clearing
+        # here makes every run_ticks call start hermetic, so WFO folds,
+        # walk-forward train/test pairs and repeated head-to-head runs are
+        # reproducible by construction.  Guarded by
+        # tests/test_backtest.py::test_run_ticks_starts_each_run_with_cold_caches.
+        clear_assembler_caches()
+
         base_profile = self.config.symbols[symbol]
         timeframe = timeframe_sec or base_profile.default_timeframe_sec
         higher_timeframe = higher_timeframe_sec or max(base_profile.higher_timeframe_sec, timeframe * 5)
@@ -83,8 +97,16 @@ class BacktestEngine:
         outcomes: list[TradeOutcome] = []
         signals = 0
         rejected = 0
+        session_resets = 0
 
         for tick in sorted(ticks, key=lambda item: item.epoch):
+            # Daily session-day sync — mirrors the live paper_runner.  Without
+            # this, the first 4-loss streak or daily-loss trip halts the risk
+            # engine for the ENTIRE rest of the corpus (no trade can open to
+            # win and reset the streak), so backtests understated trade counts
+            # and post-trip walk-forward halves came back empty.
+            if risk_engine.sync_session_day(int(tick.epoch // 86400)):
+                session_resets += 1
             closed = builders.update(tick)
             for tf, candle in closed.items():
                 if tf != timeframe:
@@ -154,7 +176,7 @@ class BacktestEngine:
             signals=signals,
             rejected_signals=rejected,
             shutdown_closed_trades=0,
-            session_resets=0,
+            session_resets=session_resets,
         )
         result = BacktestResult(
             metrics=metrics,

@@ -265,18 +265,6 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
         "must clear ~30%% instead of an unreachable flat bar. Pass a number to force one "
         "fixed bar for every trigger (e.g. 0.5 for the legacy behavior)",
     )
-    backtest_gate.add_argument(
-        "--suppression-mode",
-        choices=["suppress", "annotate"],
-        default="suppress",
-        help="'suppress' holds below-floor call types back; 'annotate' keeps emitting them with the honest rate",
-    )
-    backtest_gate.add_argument(
-        "--proven-only",
-        action="store_true",
-        help="only evidence_status == 'proven' calls may execute; everything else is forced paper-only",
-    )
-
     sweep_vol = subparsers.add_parser(
         "sweep-vol",
         help="systematic parameter sweep over fade + momentum vol-targeting configs",
@@ -320,6 +308,20 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
     sweep_vol.add_argument(
         "--artifact-output",
         help="optional path to save the full sweep report as JSON",
+    )
+    sweep_vol.add_argument(
+        "--max-daily-loss-frac",
+        type=float,
+        default=None,
+        help="override the risk engine's daily-loss halt fraction (default 0.02). "
+        "§47: the 0.02/4 halt is what silently kills relaxed-gate cells — "
+        "set e.g. 0.05 to measure the gate dimension honestly",
+    )
+    sweep_vol.add_argument(
+        "--max-consecutive-losses",
+        type=int,
+        default=None,
+        help="override the risk engine's consecutive-loss halt (default 4)",
     )
 
     band_revalidate = subparsers.add_parser(
@@ -367,6 +369,24 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
         "{\"z_entries\":[0.75,1.25,0.25],\"stops\":[0.15,0.30,0.05]}",
     )
 
+    collector_health = subparsers.add_parser(
+        "collector-health-report",
+        help="windowed MT5 event summary from .data/mt5_events.jsonl with an "
+        "IPC-timeout recurrence verdict (ok / attention / needs_re_tune) — "
+        "run after the 48h guard observation window",
+    )
+    collector_health.add_argument(
+        "--engine-root",
+        default=".",
+        help="engine root whose .data/mt5_events.jsonl and tick CSVs are used (default .)",
+    )
+    collector_health.add_argument(
+        "--hours",
+        type=float,
+        default=48.0,
+        help="observation window in hours (default 48)",
+    )
+
     verify_h2h = subparsers.add_parser(
         "verify-headtohead",
         help="milestone-gated full head-to-head (band vs fade vs momentum vs sniper): "
@@ -400,6 +420,46 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
         "--force",
         action="store_true",
         help="bypass the span/growth gates and run the head-to-head now",
+    )
+
+    combine_regime = subparsers.add_parser(
+        "combine-regime",
+        help="A/B a two-leg strategy pair on one candle stream with separate "
+        "sub-accounts and overlap attribution (productionized _probe_combined)",
+    )
+    combine_regime.add_argument(
+        "--csv",
+        required=True,
+        help="tick CSV to replay (e.g. data/backfill/R_75_ticks.csv)",
+    )
+    combine_regime.add_argument(
+        "--symbol",
+        default="R_75",
+        choices=["R_75", "R_100"],
+        help="symbol the CSV belongs to (default R_75)",
+    )
+    combine_regime.add_argument(
+        "--timeframe",
+        type=int,
+        default=300,
+        help="execution timeframe in seconds (default 300)",
+    )
+    combine_regime.add_argument(
+        "--leg-a",
+        default="band",
+        choices=["band", "fade", "momentum"],
+        help="first leg strategy (default band)",
+    )
+    combine_regime.add_argument(
+        "--leg-b",
+        default="momentum",
+        choices=["band", "fade", "momentum"],
+        help="second leg strategy (default momentum)",
+    )
+    combine_regime.add_argument(
+        "--output",
+        default=None,
+        help="optional JSON artifact path for the full report",
     )
 
     tune_bands = subparsers.add_parser(
@@ -506,11 +566,27 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
     live_snapshot.add_argument("--higher-timeframe", type=int, default=300)
     live_snapshot.add_argument("--max-live-ticks", type=int, default=90)
     live_snapshot.add_argument("--app-id", help="Deriv app id; defaults to 116450 or DERIV_APP_ID")
-    live_snapshot.add_argument(
-        "--proven-only",
+
+    emit_ea = subparsers.add_parser(
+        "emit-ea-call",
+        help="run a live snapshot and write the approved call to the MQL5 SynthCallExecutor EA folder",
+    )
+    emit_ea.add_argument("--symbol", default="R_75", choices=["R_75", "R_100"])
+    emit_ea.add_argument("--warmup-count", type=int, default=5000)
+    emit_ea.add_argument("--timeframe", type=int, default=60)
+    emit_ea.add_argument("--higher-timeframe", type=int, default=300)
+    emit_ea.add_argument("--max-live-ticks", type=int, default=90)
+    emit_ea.add_argument("--app-id", help="Deriv app id; defaults to 116450 or DERIV_APP_ID")
+    emit_ea.add_argument("--volume", type=float, default=None, help="volume to pass to the EA (default: SYNTH_EA_VOLUME or 0.2)")
+    emit_ea.add_argument(
+        "--allow-unproven",
         action="store_true",
-        help="only evidence_status == 'proven' calls may carry a live order; "
-        "everything else is forced paper-only (SYNTH_GATE_PROVEN_ONLY)",
+        help="emit even when evidence_status is not proven (paper/harness runs only)",
+    )
+    emit_ea.add_argument(
+        "--files-dir",
+        default=None,
+        help="MT5 Common Files folder override (default: %%APPDATA%%\\MetaQuotes\\Terminal\\Common\\Files)",
     )
 
     live_watch = subparsers.add_parser(
@@ -537,12 +613,6 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
     live_watch.add_argument("--max-reconnects", type=int, default=5)
     live_watch.add_argument("--reconnect-backoff-sec", type=int, default=1)
     live_watch.add_argument("--app-id", help="Deriv app id; defaults to 116450 or DERIV_APP_ID")
-    live_watch.add_argument(
-        "--proven-only",
-        action="store_true",
-        help="only evidence_status == 'proven' calls may carry a live order; "
-        "everything else is forced paper-only (SYNTH_GATE_PROVEN_ONLY)",
-    )
     live_watch.add_argument(
         "--auto-score",
         type=float,
@@ -1187,8 +1257,6 @@ def main(argv: list[str] | None = None) -> int:
             # None (the default) means the per-trigger-type break-even floor;
             # an explicit --hit-rate-floor forces the legacy flat bar.
             hit_rate_floor=args.hit_rate_floor,
-            suppression_mode=args.suppression_mode,
-            proven_only=args.proven_only,
         )
         print_gate_backtest_report(result)
         return 0
@@ -1261,6 +1329,8 @@ def main(argv: list[str] | None = None) -> int:
             momentum_ranges=momentum_ranges,
             band_ranges=band_ranges,
             artifact_output_path=args.artifact_output,
+            max_daily_loss_fraction=args.max_daily_loss_frac,
+            max_consecutive_losses=args.max_consecutive_losses,
         )
         print_sweep_report(report, args.symbol, args.timeframe)
         return 0
@@ -1302,6 +1372,25 @@ def main(argv: list[str] | None = None) -> int:
                 ok = False
         return 0 if ok else 1
 
+    if args.command == "collector-health-report":
+        from synthetic_trader.scripts.collector_health import (
+            print_collector_health,
+            run_collector_health,
+        )
+
+        report = run_collector_health(
+            engine_root=args.engine_root, hours=args.hours
+        )
+        print_collector_health(report)
+        # Machine-readable summary for the scheduled task log.
+        print(f"verdict={report['verdict']} ipc_timeouts={report['events']['ipc_timeouts']}")
+        # A venue leak is a data-integrity failure: exit non-zero so the
+        # morning task logs "collector-health failed (...)" instead of
+        # "collector-health ok (...)" — the leak must fail loudly.
+        if report["verdict"] == "venue_leak":
+            return 1
+        return 0
+
     if args.command == "verify-headtohead":
         from synthetic_trader.research.headtohead_verify import (
             print_verify_report,
@@ -1316,6 +1405,24 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force,
         )
         print_verify_report(report)
+        return 0
+
+    if args.command == "combine-regime":
+        from synthetic_trader.research.combined_regime import (
+            LegSpec,
+            print_combined_report,
+            run_combined_pair,
+        )
+
+        report = run_combined_pair(
+            csv_path=args.csv,
+            symbol=args.symbol,
+            timeframe_sec=args.timeframe,
+            leg_a=LegSpec(args.leg_a),
+            leg_b=LegSpec(args.leg_b),
+            artifact_output_path=args.output,
+        )
+        print_combined_report(report)
         return 0
 
     if args.command == "tune-bands":
@@ -1966,10 +2073,69 @@ def main(argv: list[str] | None = None) -> int:
                 higher_timeframe_sec=args.higher_timeframe,
                 max_live_ticks=args.max_live_ticks,
                 app_id=args.app_id,
-                proven_only=args.proven_only,
             )
         )
         print(render_live_snapshot_text(snapshot))
+        return 0
+
+    if args.command == "emit-ea-call":
+        from synthetic_trader.execution.ea_emitter import (
+            emit_call_from_alert,
+            read_ea_state,
+        )
+        from synthetic_trader.live.market_snapshot import _ea_venue_symbol
+
+        snapshot = asyncio.run(
+            run_live_snapshot(
+                symbol=args.symbol,
+                warmup_count=args.warmup_count,
+                timeframe_sec=args.timeframe,
+                higher_timeframe_sec=args.higher_timeframe,
+                max_live_ticks=args.max_live_ticks,
+                app_id=args.app_id,
+            )
+        )
+        # Re-run the gate + held-plan logic so the emitted record matches what
+        # the dashboard would show (build_watch_alert is the live entry point).
+        from synthetic_trader.live.market_snapshot import build_watch_alert
+
+        alert = build_watch_alert(snapshot)
+        volume = (
+            args.volume
+            if args.volume is not None
+            else float(os.getenv("SYNTH_EA_VOLUME", "0.2"))
+        )
+        try:
+            volume *= float(alert.get("size_multiplier") or 1.0)
+        except (TypeError, ValueError):
+            pass
+        record = emit_call_from_alert(
+            alert,
+            symbol=args.symbol,
+            venue_symbol=_ea_venue_symbol(args.symbol),
+            volume=max(float(volume), 0.0),
+            files_dir=args.files_dir,
+            require_proven=not args.allow_unproven,
+        )
+        if record is None:
+            print(
+                f"[emit-ea-call] {args.symbol}: no call emitted — "
+                f"call={alert.get('call')!r} evidence={alert.get('stage3', {}).get('evidence_status') if isinstance(alert.get('stage3'), dict) else None} "
+                f"(use --allow-unproven only for paper/harness runs)"
+            )
+            if not args.allow_unproven:
+                state = read_ea_state(args.symbol, files_dir=args.files_dir)
+                if state:
+                    print(f"[emit-ea-call] EA state: {state}")
+            return 1
+        # NOTE: the call file is left in place for the EA to poll — deleting it
+        # here would race the executor's read.  It is replaced atomically on the
+        # next emit, and the EA dedupes by call_id.
+        print(f"[emit-ea-call] wrote {record['call_id']} -> {record['venue_symbol']}")
+        print(
+            f"  {record['direction']} entry={record['entry']} sl={record['stop_loss']} "
+            f"tp={record['take_profit']} vol={record['volume']} expiry_epoch={record['expiry_epoch']}"
+        )
         return 0
 
     if args.command == "live-watch":
@@ -1989,7 +2155,6 @@ def main(argv: list[str] | None = None) -> int:
                 app_id=args.app_id,
                 auto_score_interval_sec=args.auto_score,
                 auto_score_status_path=args.auto_score_status_path,
-                proven_only=args.proven_only,
             )
         )
         for alert in alerts:

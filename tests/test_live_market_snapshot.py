@@ -914,6 +914,53 @@ class LiveSnapshotDataTests(unittest.TestCase):
                                 )
         self.assertEqual(snapshot.get("venue"), "mt5")
 
+    def test_run_live_snapshot_deriv_path_never_appends_to_mt5_corpus(self) -> None:
+        """When a snapshot subprocess runs the Deriv path (MT5 env not
+        visible), its ~7,000-scale ticks must NEVER be appended into the
+        Blueberry MT5 corpus — the venue gate is the root fix for the
+        3.7x-wrong prices seen in data/R_75_ticks.csv."""
+        ticks = [
+            Tick(symbol="R_75", epoch=epoch, price=6900.0 + epoch)
+            for epoch in range(1, 37)
+        ]
+
+        def fake_analyze(**kwargs: object) -> dict[str, object]:
+            return {"history_len": len(kwargs["ticks"])}
+
+        async def fake_collect(**kwargs: object) -> list[Tick]:
+            return ticks
+
+        with patch(
+            "synthetic_trader.live.market_snapshot.is_mt5_configured",
+            return_value=False,
+        ):
+            with patch(
+                "synthetic_trader.live.market_snapshot._load_csv_ticks",
+                return_value=None,
+            ):
+                with patch(
+                    "synthetic_trader.live.market_snapshot.append_ticks_csv",
+                ) as append_mock:
+                    with patch(
+                        "synthetic_trader.live.market_snapshot.collect_live_snapshot_ticks",
+                        side_effect=fake_collect,
+                    ):
+                        with patch(
+                            "synthetic_trader.live.market_snapshot.analyze_live_snapshot",
+                            side_effect=fake_analyze,
+                        ):
+                            snapshot = asyncio.run(
+                                run_live_snapshot(
+                                    symbol="R_75",
+                                    warmup_count=5,
+                                    timeframe_sec=60,
+                                    higher_timeframe_sec=300,
+                                    max_live_ticks=0,
+                                )
+                            )
+        self.assertEqual(snapshot.get("venue"), "deriv")
+        append_mock.assert_not_called()
+
     def test_build_guardian_snapshot_preserves_armed_reason_for_weak_persistence(self) -> None:
         ticks = [
             Tick(symbol="R_100", epoch=1, price=459.58),
@@ -3114,6 +3161,123 @@ class GuardianMemoryTests(unittest.TestCase):
         self.assertTrue(alert.get("plan_held"))
         self.assertEqual(alert["alert_type"], "setup_candidate")
 
+    def _seed_sell_memory(self, mem_dir: Path, *, entry: float = 1865.0) -> None:
+        from synthetic_trader.live.guardian_memory import save_guardian_memory
+
+        save_guardian_memory(
+            "R_100",
+            {
+                "symbol": "R_100",
+                "direction": "sell",
+                "entry": entry,
+                "stop": entry + 6.4,
+                "target": entry - 14.2,
+                "call": "sell_candidate",
+                "state": "confirmed",
+                "issued_at_epoch": time.time() - 300,
+                "hold_horizon_minutes": 360,
+            },
+            mem_dir,
+        )
+
+    def test_restore_reanchors_ran_away_sell_entry(self) -> None:
+        """A sell plan whose market ran beyond the entry must offer an
+        enter-at-market level, not a stale limit that can never fill.
+
+        Original plan: sell @ 1865 (stop 1871.4, target 1850.8).  Market now
+        trades at 1858 — 7 points below the entry, more than half the
+        6.4-point stop distance, and still above the target.  The entry is
+        re-anchored to 1858 with IDENTICAL geometry (same 6.4 stop distance,
+        same 14.2 target distance), flagged as a chased entry.
+        """
+        mem_dir = self._mem_dir()
+        self._seed_sell_memory(mem_dir)
+        alert = build_watch_alert(
+            self._stand_aside_alert(current_close=1858.0),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(alert["call"], "sell_candidate")
+        self.assertEqual(alert["entry"], 1858.0)
+        self.assertAlmostEqual(alert["stop_loss"], 1858.0 + 6.4, places=6)
+        self.assertAlmostEqual(alert["take_profit"], 1858.0 - 14.2, places=6)
+        self.assertTrue(alert.get("entry_chased"))
+        self.assertEqual(alert["original_entry"], 1865.0)
+        self.assertEqual(alert["entry_instruction"], "market")
+        self.assertIn("enter at MARKET", str(alert["guardian_reason"]))
+        # Same R:R as the original plan (geometry preserved).
+        self.assertAlmostEqual(float(alert["reward_risk"]), 14.2 / 6.4, places=3)
+        # Guardian memory follows the re-anchored levels so invalidation
+        # (stop trade-through / breakeven trail) watches what the operator
+        # actually holds.
+        from synthetic_trader.live.guardian_memory import load_guardian_memory
+
+        mem = load_guardian_memory("R_100", mem_dir)
+        self.assertEqual(mem["entry"], 1858.0)
+        self.assertEqual(mem["original_entry"], 1865.0)
+        self.assertEqual(mem["state"], "confirmed")
+
+    def test_restore_keeps_original_entry_when_price_near_entry(self) -> None:
+        """Within half a stop-distance of the entry the original plan stands
+        unchanged — a one-point dip must not re-anchor a sell @ 1865."""
+        mem_dir = self._mem_dir()
+        self._seed_sell_memory(mem_dir)
+        alert = build_watch_alert(
+            self._stand_aside_alert(current_close=1864.0),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(alert["call"], "sell_candidate")
+        self.assertEqual(alert["entry"], 1865.0)
+        self.assertEqual(alert["stop_loss"], 1871.4)
+        self.assertEqual(alert["take_profit"], 1850.8)
+        self.assertNotIn("entry_chased", alert)
+        self.assertIn("Standing by the original call", str(alert["guardian_reason"]))
+
+    def test_restore_does_not_reanchor_after_target_reached(self) -> None:
+        """Once price has already reached the target zone in the call's favor
+        (sell target 1850.8, price 1849), the plan is done — re-anchoring to a
+        level below the target would manufacture a nonsense geometry."""
+        mem_dir = self._mem_dir()
+        self._seed_sell_memory(mem_dir)
+        alert = build_watch_alert(
+            self._stand_aside_alert(current_close=1849.0),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(alert["entry"], 1865.0)
+        self.assertEqual(alert["stop_loss"], 1871.4)
+        self.assertEqual(alert["take_profit"], 1850.8)
+        self.assertNotIn("entry_chased", alert)
+
+    def test_restore_reanchors_ran_away_buy_entry(self) -> None:
+        """Buy mirror: entry 100 (stop 98, target 104), market at 102 — re-
+        anchored to 102 with the same 2.0 stop / 4.0 target distances."""
+        mem_dir = self._mem_dir()
+        from synthetic_trader.live.guardian_memory import save_guardian_memory
+
+        save_guardian_memory(
+            "R_100",
+            {
+                "symbol": "R_100",
+                "direction": "buy",
+                "entry": 100.0,
+                "stop": 98.0,
+                "target": 104.0,
+                "call": "buy_candidate",
+                "state": "confirmed",
+                "issued_at_epoch": time.time() - 300,
+                "hold_horizon_minutes": 360,
+            },
+            mem_dir,
+        )
+        alert = build_watch_alert(
+            self._stand_aside_alert(current_close=102.0),
+            guardian_memory_dir=mem_dir,
+        )
+        self.assertEqual(alert["entry"], 102.0)
+        self.assertAlmostEqual(alert["stop_loss"], 100.0, places=6)
+        self.assertAlmostEqual(alert["take_profit"], 106.0, places=6)
+        self.assertTrue(alert.get("entry_chased"))
+        self.assertEqual(alert["original_entry"], 100.0)
+
     def test_build_watch_alert_does_not_restore_when_stop_traded_through(self) -> None:
         mem_dir = self._mem_dir()
         self._seed_confirmed_memory(mem_dir)
@@ -3251,6 +3415,113 @@ class GuardianMemoryTests(unittest.TestCase):
             guardian_memory_dir=mem_dir,
         )
         self.assertIsNone(load_guardian_memory("R_100", mem_dir))
+
+
+class LiveSnapshotEaEmitTests(unittest.TestCase):
+    """The opt-in EA handoff hook (_maybe_emit_ea_call) inside build_watch_alert.
+
+    The Stage-3 gate recomputes evidence from the real outcomes journal, so the
+    hook itself is tested by mocking the emitter — the emitter's own gating
+    logic is covered end-to-end in tests/test_ea_emitter.py.
+    """
+
+    def _snapshot(self, **overrides: object) -> dict[str, object]:
+        snap: dict[str, object] = {
+            "call": "buy_candidate",
+            "trade_status": "valid",
+            "direction_bias": "buy",
+            "symbol": "R_75",
+            "entry": 1820.5,
+            "stop_loss": 1818.0,
+            "take_profit": 1826.0,
+            "execution_stop": 1818.0,
+            "primary_target": 1826.0,
+            "hold_horizon_minutes": 60,
+            "generated_at": "2026-08-11T10:30:00",
+            "reward_risk": 4.0,
+            "current_close": 1820.5,
+        }
+        snap.update(overrides)
+        return snap
+
+    def test_ea_emit_hook_calls_emitter_when_enabled(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from synthetic_trader.live.market_snapshot import build_watch_alert
+
+        with tempfile.TemporaryDirectory() as tmp:
+            files_dir = Path(tmp)
+            old_emit = os.environ.get("SYNTH_EA_EMIT")
+            os.environ["SYNTH_EA_EMIT"] = "1"
+            try:
+                with patch(
+                    "synthetic_trader.execution.ea_emitter.emit_call_from_alert",
+                    return_value={"call_id": "x"},
+                ) as mock_emit:
+                    build_watch_alert(self._snapshot())
+                    mock_emit.assert_called_once()
+                    kwargs = mock_emit.call_args.kwargs
+                    self.assertEqual(kwargs["symbol"], "R_75")
+                    self.assertEqual(kwargs["venue_symbol"], "SYN75")
+                    self.assertGreater(kwargs["volume"], 0.0)
+            finally:
+                if old_emit is None:
+                    os.environ.pop("SYNTH_EA_EMIT", None)
+                else:
+                    os.environ["SYNTH_EA_EMIT"] = old_emit
+
+    def test_ea_emit_hook_noop_when_disabled(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from synthetic_trader.live.market_snapshot import build_watch_alert
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp)  # keep tmp dir for symmetry
+            old_emit = os.environ.pop("SYNTH_EA_EMIT", None)
+            try:
+                with patch(
+                    "synthetic_trader.execution.ea_emitter.emit_call_from_alert",
+                ) as mock_emit:
+                    build_watch_alert(self._snapshot())
+                    mock_emit.assert_not_called()
+            finally:
+                if old_emit is not None:
+                    os.environ["SYNTH_EA_EMIT"] = old_emit
+
+    def test_ea_emit_hook_uses_env_volume_and_multiplier(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from synthetic_trader.live.market_snapshot import build_watch_alert
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp)
+            old_emit = os.environ.get("SYNTH_EA_EMIT")
+            old_vol = os.environ.get("SYNTH_EA_VOLUME")
+            os.environ["SYNTH_EA_EMIT"] = "1"
+            os.environ["SYNTH_EA_VOLUME"] = "0.5"
+            try:
+                with patch(
+                    "synthetic_trader.execution.ea_emitter.emit_call_from_alert",
+                    return_value={"call_id": "x"},
+                ) as mock_emit:
+                    build_watch_alert(self._snapshot())
+                    kwargs = mock_emit.call_args.kwargs
+                    self.assertAlmostEqual(kwargs["volume"], 0.5)
+            finally:
+                if old_emit is None:
+                    os.environ.pop("SYNTH_EA_EMIT", None)
+                else:
+                    os.environ["SYNTH_EA_EMIT"] = old_emit
+                if old_vol is None:
+                    os.environ.pop("SYNTH_EA_VOLUME", None)
+                else:
+                    os.environ["SYNTH_EA_VOLUME"] = old_vol
 
 
 if __name__ == "__main__":

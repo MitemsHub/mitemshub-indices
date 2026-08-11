@@ -154,13 +154,14 @@ class TestDecidePromotion:
 class TestFocusedGrid:
     def test_default_grid_size(self) -> None:
         grid = focused_band_grid()
-        # 3 z x 3 vol x 4 stop x 3 target x 2 hold = 216? No — 3*3*4*3*2 = 216? 3*3=9, *4=36, *3=108, *2=216.
-        n_z = len([0.75, 1.0, 1.25])
-        n_vr = len([1.15, 1.3, 1.45])
+        # §50: the vol-gate range now starts at 0.75 (step 0.1) so the calm
+        # 0.86-vol regime is measurable — the old 1.15 floor skipped it.
+        n_z = len([0.25, 0.5, 0.75, 1.0, 1.25])
+        n_vr = len([0.75, 0.85, 0.95, 1.05, 1.15, 1.25, 1.35, 1.45])
         n_s = len([0.15, 0.2, 0.25, 0.3])
         n_t = len([0.6, 0.8, 1.0])
         n_h = len([3600, 7200])
-        assert len(grid) == n_z * n_vr * n_s * n_t * n_h == 3 * 3 * 4 * 3 * 2 == 216
+        assert len(grid) == n_z * n_vr * n_s * n_t * n_h == 5 * 8 * 4 * 3 * 2 == 960
         # Every config keeps the fixed breakeven trail.
         assert all(c.breakeven_trail_frac == 0.3 for c in grid)
 
@@ -168,7 +169,7 @@ class TestFocusedGrid:
         grid = focused_band_grid({"z_entries": (0.75, 1.25, 0.5)})
         # _arange(0.75, 1.25, 0.5) -> [0.75, 1.25]
         assert {c.z_entry for c in grid} == {0.75, 1.25}
-        assert len(grid) == 2 * 3 * 4 * 3 * 2  # other dims at defaults
+        assert len(grid) == 2 * 8 * 4 * 3 * 2  # other dims at defaults
 
 
 class TestGates:
@@ -381,3 +382,185 @@ class TestLiveLoader:
         self._write_artifact(tmp_path, "R_75", "keep", time.time())
         overrides, _artifact = load_live_band_overrides("R_75", tmp_path)
         assert overrides == {}
+
+
+class TestGapGuard:
+    """A multi-hour feed gap must not be misread as one giant candle."""
+
+    @staticmethod
+    def _quiet_ticks(n_bars: int = 400, base: float = 100.0, start: float = 0.0) -> list[Tick]:
+        """Realistic quiet data: ~0.1% per-bar returns (like the live corpus),
+        so one big gap jump is a genuine outlier rather than background."""
+        import random
+
+        rng = random.Random(42)
+        ticks = []
+        price = base
+        for i in range(n_bars):
+            price *= math.exp(rng.gauss(0.0, 0.001))
+            ticks.append(Tick(symbol="R_75", epoch=start + float(i * 60), price=price))
+        return ticks
+
+    def test_gap_candle_does_not_poison_sigma(self) -> None:
+        from synthetic_trader.backtest.vol_band import (
+            VolBandConfig,
+            VolBandStrategy,
+        )
+        from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
+
+        # Quiet 400-bar block, then a 10-hour gap and a second block at a
+        # +5% price level (collector downtime with the market drifting
+        # across the outage).  Without the guard the 10h gap is misread as
+        # one gigantic return (z ~ +50) that slams the EGARCH log-variance
+        # clip (sigma ~ e^2.5 = 12).
+        block1 = self._quiet_ticks(n_bars=400, base=100.0)
+        gap_epoch = block1[-1].epoch + 10 * 3600.0
+        block2 = self._quiet_ticks(n_bars=400, base=105.0, start=gap_epoch)
+        builder = MultiTimeframeCandleBuilder("R_75", [60])
+        candles = []
+        for t in block1 + block2:
+            for tf, c in (builder.update(t) or {}).items():
+                if tf == 60:
+                    candles.append(c)
+
+        strat = VolBandStrategy("R_75", 60, config=VolBandConfig())
+        max_sigma = 0.0
+        for c in candles:
+            strat.on_candle(c)
+            if strat._prev_sigma is not None:
+                max_sigma = max(max_sigma, strat._prev_sigma)
+        # Quiet background sigma is ~0.001; the guard keeps the gap from
+        # inflating it to the clip (~12).
+        assert max_sigma < 1.0, f"gap poisoned sigma to {max_sigma:.3f}"
+
+    def test_gap_guard_reanchors_and_does_not_suppress_post_gap(self) -> None:
+        from synthetic_trader.backtest.vol_band import (
+            VolBandConfig,
+            VolBandStrategy,
+        )
+        from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
+
+        # Quiet block, then a 10-hour gap at a +5% price level, then a
+        # second quiet block.  Assert the guard's mechanism precisely:
+        # (1) the gap candle re-anchors _prev_close to its own close (so
+        # the following return is the normal post-gap return, not the
+        # 5%-gap span), and (2) post-gap candles still flow through the
+        # strategy (sigma stays in the quiet range, not pinned at the
+        # clip that would suppress every later signal).
+        block1 = self._quiet_ticks(n_bars=200, base=100.0)
+        gap_epoch = block1[-1].epoch + 10 * 3600.0
+        block2 = self._quiet_ticks(n_bars=200, base=105.0, start=gap_epoch)
+        builder = MultiTimeframeCandleBuilder("R_75", [60])
+        candles = []
+        for t in block1 + block2:
+            for tf, c in (builder.update(t) or {}).items():
+                if tf == 60:
+                    candles.append(c)
+
+        strat = VolBandStrategy("R_75", 60, config=VolBandConfig())
+        gap_seen = False
+        first_after_gap_sigma: float | None = None
+        for c in candles:
+            strat.on_candle(c)
+            if gap_seen and first_after_gap_sigma is None and strat._prev_sigma is not None:
+                first_after_gap_sigma = strat._prev_sigma
+            # The gap candle is the first whose open_time jumps beyond
+            # one max-gap interval from the previous candle's end.
+            if not gap_seen and c.open_time >= gap_epoch:
+                gap_seen = True
+        # The re-anchor sets _prev_close to the gap candle's close, so the
+        # first post-gap candle computes a normal (quiet-scale) return and
+        # the GARCH sigma stays quiet — it must NOT be pinned at the clip.
+        assert gap_seen
+        assert first_after_gap_sigma is not None and first_after_gap_sigma < 0.1, (
+            f"post-gap sigma {first_after_gap_sigma:.4f} — gap return poisoned the forecaster"
+        )
+
+
+class TestSessionDaySync:
+    """Backtest runners must reset daily limits like the live path."""
+
+    def test_loss_streak_resets_across_days(self) -> None:
+        from synthetic_trader.backtest.vol_reversion import run_vol_regime_backtest
+        from synthetic_trader.config import PaperExecutionConfig, RiskConfig, TraderConfig
+        from synthetic_trader.domain import Direction, FeatureSnapshot, TradeSignal
+
+        # A deterministic strategy that emits a signal on every candle — the
+        # trade pipeline (RiskEngine + broker) is what we're testing here,
+        # not the band gate (which needs real vol transitions).  Day 1's
+        # trades all lose (tripping the 2-loss breaker); day 2's trades must
+        # still open because the runner resets daily limits at the day
+        # boundary exactly like the live paper_runner.
+        class AlwaysFire:
+            version = "stub"
+
+            def __init__(self) -> None:
+                self.config = type("C", (), {"breakeven_trail_frac": 0.0})()
+
+            def on_candle(self, candle) -> TradeSignal:
+                from synthetic_trader.domain import Regime
+
+                return TradeSignal(
+                    symbol="R_75",
+                    direction=Direction.SHORT,
+                    confidence=0.9,
+                    min_confidence=0.0,
+                    entry=candle.close,
+                    stop_loss=candle.close * 1.02,
+                    take_profit=candle.close * 0.98,
+                    horizon_sec=3600,
+                    snapshot=FeatureSnapshot(
+                        symbol="R_75",
+                        epoch=candle.open_time + candle.timeframe_sec,
+                        timeframe_sec=candle.timeframe_sec,
+                        features={},
+                        regime=Regime.RANGE,
+                        structure={},
+                    ),
+                    rationale=("stub",),
+                )
+
+        # Day 1 RISES (the stub's shorts all lose → 2-loss breaker trips);
+        # day 2 FALLS (shorts win — but only if the breaker reset at the
+        # day boundary).  Without the session-day sync the account stays
+        # halted forever and day 2 never trades.
+        def _block(day: int, price: float, rising: bool) -> list[Tick]:
+            start = day * 86400.0
+            step = 0.05 if rising else -0.05
+            return [
+                Tick(symbol="R_75", epoch=start + float(i * 60), price=price + step * i)
+                for i in range(40)
+            ]
+
+        ticks = _block(5, 100.0, rising=True) + _block(6, 101.5, rising=False)
+        from dataclasses import replace
+
+        paper = PaperExecutionConfig(
+            entry_slippage_ticks=0.05,
+            exit_slippage_ticks=0.05,
+            execution_penalty_per_trade=0.10,
+        )
+        risk = RiskConfig(
+            max_consecutive_losses=2,
+            max_daily_loss_fraction=0.10,
+            min_confidence=0.0,
+            min_reward_risk=0.0,
+            max_open_positions=1,
+        )
+        config = replace(TraderConfig.default(), paper=paper, risk=risk)
+        res = run_vol_regime_backtest(
+            AlwaysFire(),
+            ticks,
+            symbol="R_75",
+            timeframe_sec=60,
+            config=config,
+            paper=paper,
+        )
+        # Day 2 must contribute trades: the breaker tripped on day 1 (2
+        # consecutive losses) but the day boundary must reset it.  Without
+        # the sync, day-2 signals are all rejected and trades == 0 (the
+        # account stays halted forever).  With the fix we see day-1's loss
+        # AND day-2's win — trades >= 2 with at least one winner.
+        assert res.metrics.trades >= 2, f"expected day-2 trading, got {res.metrics.trades} trades"
+        assert res.metrics.win_rate >= 0.5, "day-2's winning trade must have opened after the reset"
+        assert res.diagnostics.get("session_resets", 0) >= 1

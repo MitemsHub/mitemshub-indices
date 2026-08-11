@@ -237,6 +237,29 @@ class VolReversionStrategy:
         self._prev_close: float | None = None
         self._prev_sigma: float | None = None
         self._candles_seen = 0
+        # Data-gap detection: a multi-hour feed outage must not be misread
+        # as one gigantic bar-scale return (see _gap_reanchor).
+        self._last_bar_end: float | None = None
+        self._max_gap_sec = max(3 * timeframe_sec, 600)
+
+    def _gap_reanchor(self, candle: Candle) -> bool:
+        """Return True (and re-anchor) when the candle follows a data gap.
+
+        The candle stream is bucketed by wall-clock, so a multi-hour feed
+        outage (collector downtime, terminal disconnect) produces a candle
+        whose close sits far above the previous candle's close even though
+        the market moved normally across the outage.  Feeding that span as
+        one bar-scale return fabricates a spurious EGARCH shock (z ~ +50),
+        clipping log-variance and poisoning the sigma EMA for the rest of
+        the run.  On a gap we re-anchor the close/EMA baselines, skip the
+        forecaster update, and stand aside for that candle."""
+        if self._last_bar_end is not None and candle.open_time > self._last_bar_end + self._max_gap_sec:
+            self._prev_close = candle.close
+            self._ema = candle.close
+            self._last_bar_end = candle.open_time + candle.timeframe_sec
+            return True
+        self._last_bar_end = candle.open_time + candle.timeframe_sec
+        return False
 
     @property
     def version(self) -> str:
@@ -248,6 +271,8 @@ class VolReversionStrategy:
         if self._prev_close is None or candle.close <= 0.0:
             self._prev_close = candle.close
             self._ema = candle.close
+            return None
+        if self._gap_reanchor(candle):
             return None
 
         log_return = math.log(candle.close / self._prev_close)
@@ -438,6 +463,7 @@ def run_vol_regime_backtest(
     outcomes: list[TradeOutcome] = []
     signals = 0
     rejected = 0
+    session_resets = 0
 
     def _in_window(epoch: float) -> bool:
         if count_from_epoch is not None and epoch < count_from_epoch:
@@ -447,6 +473,13 @@ def run_vol_regime_backtest(
         return True
 
     for tick in sorted(ticks, key=lambda item: item.epoch):
+        # Daily session-day sync — mirrors the live paper_runner.  Without
+        # this, the first 4-loss streak or daily-loss trip halts the risk
+        # engine for the ENTIRE rest of the corpus (no trade can open to
+        # win and reset the streak), so every backtest understated trade
+        # counts and walk-forward halves after the trip came back empty.
+        if risk_engine.sync_session_day(int(tick.epoch // 86400)):
+            session_resets += 1
         closed = builders.update(tick)
         for tf, candle in closed.items():
             if tf != timeframe_sec:
@@ -486,7 +519,7 @@ def run_vol_regime_backtest(
         signals=signals,
         rejected_signals=rejected,
         shutdown_closed_trades=0,
-        session_resets=0,
+        session_resets=session_resets,
     )
     result = BacktestResult(
         metrics=metrics,

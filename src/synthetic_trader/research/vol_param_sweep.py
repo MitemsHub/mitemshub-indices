@@ -75,8 +75,14 @@ MOM_HOLD_BARS = (15, 120, 15)          # 15, 30, ..., 120
 # DOWN (z_entry 0.5-1.5, vol ratio 1.15-1.6) to find cells that trade more
 # while keeping the geometry knobs that set the RR (stop/target σ mults) and
 # the hold short enough to resolve calls fast.
-BAND_Z_ENTRY = (0.5, 1.5, 0.25)        # 0.5, 0.75, 1.0, 1.25, 1.5
-BAND_VOL_RATIO = (1.15, 1.6, 0.15)     # 1.15, 1.3, 1.45, 1.6
+BAND_Z_ENTRY = (0.25, 1.5, 0.25)       # 0.25, 0.5, 0.75, 1.0, 1.25, 1.5
+# Vol gate range starts at 0.75 so the sweep can find the relaxed-gate cells
+# (§47: gate 1.05-1.1 with the breakeven trail keeps +0.99R at ~4 trades/day
+# while the old 1.15 floor skipped that entire region; §50 pushes below 1.0
+# so the calm 0.86-vol regime is measurable at all).  Endpoint is 1.55, not
+# 1.6: with a 0.1 step from a 0.75 base the sequence lands on 1.55 then 1.65,
+# so a 1.6 endpoint would never be sampled (off-by-one in _arange's tolerance).
+BAND_VOL_RATIO = (0.75, 1.55, 0.1)     # 0.75, 0.85, ..., 1.55
 BAND_STOP_MULT = (0.2, 0.5, 0.1)       # 0.2, 0.3, 0.4, 0.5
 BAND_TARGET_MULT = (0.6, 1.4, 0.2)     # 0.6, 0.8, 1.0, 1.2, 1.4
 BAND_HOLD_SEC = (3600, 10800, 3600)    # 1h, 2h, 3h
@@ -259,6 +265,8 @@ def run_sweep(
     band_ranges: dict[str, Any] | None = None,
     paper: PaperExecutionConfig | None = None,
     garch_state=None,
+    max_daily_loss_fraction: float | None = None,
+    max_consecutive_losses: int | None = None,
 ) -> list[SweepResult]:
     """Run the full grid and return every config's metrics, ranked by
     expectancy.  The ``min_trades`` floor is applied by
@@ -281,7 +289,17 @@ def run_sweep(
             raise ValueError(
                 f"sweep supports strategies 'fade', 'momentum', and 'band'; got {strat!r}"
             )
-    config = replace(TraderConfig.default(), paper=paper or PaperExecutionConfig())
+    base_config = TraderConfig.default()
+    risk_overrides: dict[str, Any] = {}
+    if max_daily_loss_fraction is not None:
+        risk_overrides["max_daily_loss_fraction"] = max_daily_loss_fraction
+    if max_consecutive_losses is not None:
+        risk_overrides["max_consecutive_losses"] = max_consecutive_losses
+    config = replace(
+        base_config,
+        paper=paper or PaperExecutionConfig(),
+        risk=replace(base_config.risk, **risk_overrides) if risk_overrides else base_config.risk,
+    )
     rows: list[SweepResult] = []
 
     if "fade" in strategies:
@@ -401,6 +419,8 @@ def run_sweep_for_csv(
     momentum_ranges: dict[str, Any] | None = None,
     band_ranges: dict[str, Any] | None = None,
     artifact_output_path: str | Path | None = None,
+    max_daily_loss_fraction: float | None = None,
+    max_consecutive_losses: int | None = None,
 ) -> dict[str, Any]:
     """Load ticks, run the sweep, optionally persist the report as JSON."""
     ticks = dedupe_ticks(load_ticks_csv(csv_path, default_symbol=symbol))
@@ -428,6 +448,8 @@ def run_sweep_for_csv(
         band_ranges=band_ranges,
         paper=paper,
         garch_state=garch_state,
+        max_daily_loss_fraction=max_daily_loss_fraction,
+        max_consecutive_losses=max_consecutive_losses,
     )
     report = summarize_sweep(rows, min_trades=min_trades, top_n=top_n)
     report["elapsed_sec"] = round(time.time() - t0, 1)

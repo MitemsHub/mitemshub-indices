@@ -8,7 +8,7 @@ export async function POST(request: Request) {
       trading_mode?: string;
     };
 
-    const symbol = body.symbol === "R_75" || body.symbol === "R_100" ? body.symbol : "R_100";
+    const symbol = body.symbol === "R_75" || body.symbol === "R_100" ? body.symbol : "R_75";
     const tradingMode = "sniper";
 
     cancelLiveSnapshot(symbol, tradingMode);

@@ -134,22 +134,18 @@ class MultiTimeframeCandleBuilder:
         self._smallest_tf = sorted_tfs[0] if sorted_tfs else None
 
     def update(self, tick: Tick) -> dict[int, Candle]:
-        # ── Early-bail gating ─────────────────────────────────────
-        # The smallest (fastest-closing) timeframe is the canary: if
-        # the tick falls within its current bucket, it also falls within
-        # the current bucket of every larger timeframe, so no candle
-        # will close on ANY timeframe. Skip all builder updates.
-        #
-        # Most ticks are mid-bucket across all timeframes (e.g. ~59 out
-        # of 60 ticks in a 1m timeline), so this single O(1) check
-        # eliminates ~50% of the 250K tick×timeframe CandleBuilder calls.
-        if self._smallest_tf is not None:
-            sb = self.builders[self._smallest_tf]
-            if sb.current is not None:
-                _bucket = int(tick.epoch // sb.timeframe_sec) * sb.timeframe_sec
-                if _bucket == sb.current.open_time:
-                    return {}
-
+        # NOTE: no early-bail here.  The old "canary bucket" fast path
+        # skipped mid-bucket ticks for EVERY timeframe, so every candle
+        # froze at the FIRST tick of its bucket (tick_count == 1, close =
+        # bucket-open price) instead of true OHLC.  That point-sampled
+        # series silently replaced real candle closes everywhere this
+        # wrapper is used (all backtests + the live warmup), and the 300s
+        # candles differed depending on which other timeframes were
+        # requested — so live could not reproduce its own backtest.  The
+        # measured effect on the band strategy: 58 trades/+379R on the
+        # staled series vs 8 trades/-25R on true OHLC.  Every tick must
+        # reach every builder; the per-builder update is the single source
+        # of truth.
         closed: dict[int, Candle] = {}
         for timeframe, builder in self.builders.items():
             candle = builder.update(tick)

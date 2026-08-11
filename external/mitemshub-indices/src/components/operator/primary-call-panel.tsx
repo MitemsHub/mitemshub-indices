@@ -65,54 +65,44 @@ function VenueBadge({ venue }: { venue: NonNullable<FreshCallResponse["venue"]> 
 }
 
 function Stage3Verification({ block }: { block: NonNullable<FreshCallResponse["stage3"]> }) {
-  // suppress mode actually holds the call type back (downgraded to stand_aside).
+  // Collapsed gate: below-floor call types are always suppressed (held back),
+  // so there is no annotate-escape state to render anymore.
   const suppressed = block.state === "suppressed";
-  // annotate mode: the evidence is below the floor (evidence_status=suppressed)
-  // but the call is still emitted with its honest rate — the operator chose to
-  // watch the failing type rather than hold it back.
-  const belowFloorAnnotated =
-    block.state === "annotated" && block.evidence_status === "suppressed";
   const gated = block.state === "gated";
-  const annotated = block.state === "annotated" && !belowFloorAnnotated;
+  const annotated = block.state === "annotated";
   const stillLearning = block.evidence_status === "still_learning";
   const noData = block.evidence_status === "no_data";
   const stateClass = suppressed
     ? "bg-[var(--accent-danger)]/10 text-[var(--accent-danger)] border border-[var(--accent-danger)]/25"
-    : belowFloorAnnotated
-      ? "bg-[var(--accent-warn)]/10 text-[var(--accent-warn)] border border-[var(--accent-warn)]/25"
-      : gated
-        ? "bg-[var(--accent-positive)]/10 text-[var(--accent-positive)] border border-[var(--accent-positive)]/25"
-        : stillLearning
-          ? "bg-[var(--accent-info)]/10 text-[var(--accent-info)] border border-[var(--accent-info)]/25"
-          : annotated
-            ? "bg-[var(--accent-warn)]/10 text-[var(--accent-warn)] border border-[var(--accent-warn)]/25"
-            : noData
-              ? "bg-[var(--line-subtle)]/40 text-[var(--text-muted)] border border-[var(--line-subtle)]"
-              : "bg-[var(--accent-warn)]/10 text-[var(--accent-warn)] border border-[var(--accent-warn)]/25";
+    : gated
+      ? "bg-[var(--accent-positive)]/10 text-[var(--accent-positive)] border border-[var(--accent-positive)]/25"
+      : stillLearning
+        ? "bg-[var(--accent-info)]/10 text-[var(--accent-info)] border border-[var(--accent-info)]/25"
+        : annotated
+          ? "bg-[var(--accent-warn)]/10 text-[var(--accent-warn)] border border-[var(--accent-warn)]/25"
+          : noData
+            ? "bg-[var(--line-subtle)]/40 text-[var(--text-muted)] border border-[var(--line-subtle)]"
+            : "bg-[var(--accent-warn)]/10 text-[var(--accent-warn)] border border-[var(--accent-warn)]/25";
   const stateLabel = suppressed
     ? "Suppressed"
-    : belowFloorAnnotated
-      ? "Below verified floor"
-      : gated
-        ? "Proven"
-        : stillLearning
-          ? "Still learning"
-          : annotated
-            ? "Proven — horizon pending"
-            : noData
-              ? "Unverified"
-              : "Empirical";
+    : gated
+      ? "Proven"
+      : stillLearning
+        ? "Still learning"
+        : annotated
+          ? "Proven — horizon pending"
+          : noData
+            ? "Unverified"
+            : "Empirical";
   const stateDot = suppressed
     ? "bg-[var(--accent-danger)]"
-    : belowFloorAnnotated
-      ? "bg-[var(--accent-warn)]"
-      : gated
-        ? "bg-[var(--accent-positive)]"
-        : stillLearning
-          ? "bg-[var(--accent-info)]"
-          : annotated
-            ? "bg-[var(--accent-warn)]"
-            : "bg-[var(--text-muted)]";
+    : gated
+      ? "bg-[var(--accent-positive)]"
+      : stillLearning
+        ? "bg-[var(--accent-info)]"
+        : annotated
+          ? "bg-[var(--accent-warn)]"
+          : "bg-[var(--text-muted)]";
   const sampleCopy =
     block.empirical_sample_count > 0 && stillLearning
       ? `${block.empirical_sample_count}/${block.min_samples ?? 10} scored`
@@ -121,7 +111,7 @@ function Stage3Verification({ block }: { block: NonNullable<FreshCallResponse["s
         : "no outcomes yet";
 
   return (
-    <div className={`mt-3 rounded-lg border px-3 py-2.5 ${suppressed ? "border-[var(--accent-danger)]/30 bg-[var(--accent-danger)]/5" : belowFloorAnnotated ? "border-[var(--accent-warn)]/30 bg-[var(--accent-warn)]/5" : "border-[var(--line-subtle)] bg-[var(--bg-panel-muted)]"}`}>
+    <div className={`mt-3 rounded-lg border px-3 py-2.5 ${suppressed ? "border-[var(--accent-danger)]/30 bg-[var(--accent-danger)]/5" : "border-[var(--line-subtle)] bg-[var(--bg-panel-muted)]"}`}>
       <div className="flex flex-wrap items-center gap-2">
         <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${stateClass}`}>
           <span className={`inline-block w-1.5 h-1.5 rounded-full ${stateDot}`} aria-hidden="true" />
@@ -139,23 +129,6 @@ function Stage3Verification({ block }: { block: NonNullable<FreshCallResponse["s
         <span className="text-[11px] font-mono text-[var(--text-muted)]">{block.trigger_type}</span>
         {block.hit_rate_floor !== undefined && block.hit_rate_floor > 0 && (
           <span className="text-[11px] text-[var(--text-muted)]">floor {formatConfidence(block.hit_rate_floor)}</span>
-        )}
-        {block.suppression_mode !== undefined && (
-          <span className="text-[11px] font-mono text-[var(--text-muted)]">
-            mode: {block.suppression_mode === "annotate" ? "annotate" : "suppress"}
-          </span>
-        )}
-        {block.proven_only === true && (
-          <span
-            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-              block.execution_allowed === false
-                ? "bg-[var(--accent-info)]/10 text-[var(--accent-info)] border border-[var(--accent-info)]/25"
-                : "bg-[var(--accent-positive)]/10 text-[var(--accent-positive)] border border-[var(--accent-positive)]/25"
-            }`}
-            title="SYNTH_GATE_PROVEN_ONLY — only market-proven call types may execute live"
-          >
-            proven-only {block.execution_allowed === false ? "· held paper" : "· ok"}
-          </span>
         )}
         {block.horizon_verdict && (
           <span className={`text-[11px] font-medium ${block.horizon_verdict === "calibrated" ? "text-[var(--accent-positive)]" : "text-[var(--accent-warn)]"}`}>
@@ -192,11 +165,6 @@ function Stage3Verification({ block }: { block: NonNullable<FreshCallResponse["s
       {suppressed && block.suppressed_call ? (
         <p className="mt-1.5 text-[11px] leading-5 text-[var(--accent-danger)]">
           {block.suppressed_call} calls are held back — this setup type is below the verified floor.
-        </p>
-      ) : null}
-      {belowFloorAnnotated ? (
-        <p className="mt-1.5 text-[11px] leading-5 text-[var(--accent-warn)]">
-          Below the verified floor — suppression mode is {block.suppression_mode === "annotate" ? "annotate, so this type is still shown" : "suppress"}. Set SYNTH_GATE_SUPPRESSION_MODE=suppress to hold it back.
         </p>
       ) : null}
       {block.sizing ? (
@@ -354,6 +322,37 @@ export function PrimaryCallPanel({
               <p className="mt-2 text-xs leading-5 text-[var(--text-body)]">
                 {formatGuardianReason(guardianReason)}
               </p>
+              {call.band_gate && !call.band_gate.signal_emitted && (
+                <div className="mt-3 rounded-lg border border-[var(--line-subtle)] bg-[var(--surface-raised)] px-3 py-2.5">
+                  <p className="utility-copy text-[10px] uppercase tracking-[0.18em] text-[var(--text-label)]">
+                    Why no call yet
+                  </p>
+                  <p className="mt-1.5 text-xs leading-5 text-[var(--text-body)]">
+                    {call.band_gate.warmup_ok === false ? (
+                      <>
+                        Building candle history — {call.band_gate.candles ?? 0}/
+                        {call.band_gate.needed_candles ?? 60} bars warmed up.
+                      </>
+                    ) : (
+                      <>
+                        Waiting on{" "}
+                        {call.band_gate.vol_extended
+                          ? "price displacement"
+                          : "a volatility spike"}
+                        : vol {call.band_gate.vol_ratio != null ? `${call.band_gate.vol_ratio.toFixed(2)}/${call.band_gate.vol_extended_ratio?.toFixed(2) ?? "1.30"}` : "—"}
+                        {call.band_gate.z_dev != null
+                          ? ` · displacement ${Math.abs(call.band_gate.z_dev).toFixed(2)}/${call.band_gate.z_entry?.toFixed(1) ?? "1.0"}σ`
+                          : ""}
+                      </>
+                    )}
+                  </p>
+                  {call.band_gate.waiting_on ? (
+                    <p className="mt-1 text-[10px] text-[var(--text-muted)]">
+                      {call.band_gate.waiting_on}
+                    </p>
+                  ) : null}
+                </div>
+              )}
               {(guardianState === "unavailable" || guardianState === "forming") && onRetry && (
                 <div className="mt-3 pt-3 border-t border-[var(--line-subtle)]">
                   <button
@@ -383,7 +382,9 @@ export function PrimaryCallPanel({
           {guardianState !== "failing" && guardianState !== "cancelled" && call.entry !== null && call.stop_loss !== null && call.take_profit !== null && (
             <div className="mt-4 grid gap-3 grid-cols-3">
               <div className="info-card rounded-xl px-3.5 py-2.5 text-center">
-                <p className="utility-copy text-[10px] uppercase tracking-[0.2em] text-[var(--text-label)]">Entry</p>
+                <p className="utility-copy text-[10px] uppercase tracking-[0.2em] text-[var(--text-label)]">
+                  {call.entry_chased ? "Entry (market)" : "Entry"}
+                </p>
                 <p className="mt-1 text-base font-semibold tabular-nums text-[var(--accent-ink)]">
                   {formatPrice(call.entry)}
                 </p>
@@ -402,6 +403,19 @@ export function PrimaryCallPanel({
               </div>
             </div>
           )}
+          {call.entry_chased && (
+            <div className="mt-2 rounded-lg border border-[var(--line-subtle)] bg-[var(--surface-raised)] px-3 py-2.5">
+              <p className="text-xs leading-5 text-[var(--text-body)]">
+                <span className="font-semibold text-[var(--accent-ink)]">
+                  Entry re-anchored
+                </span>
+                {" "}— the market moved past the original entry
+                {call.original_entry != null ? ` (${formatPrice(call.original_entry)})` : ""}.
+                {" "}Enter at <span className="font-semibold">market</span>:{" "}
+                <span className="font-semibold tabular-nums">{formatPrice(call.entry)}</span>.
+              </p>
+            </div>
+          )}
         </>
       ) : loading ? (
         <div className="mt-6 flex flex-col items-center gap-4 py-10 text-center">
@@ -415,8 +429,8 @@ export function PrimaryCallPanel({
               Analyzing the market — building your trade plan…
             </p>
             <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
-              Reading live MT5 ticks, running the strategy engines, and calibrating the
-              4–6 hour volatility horizon. This takes a few seconds.
+              Reading the latest market data, running the strategy engines, and calibrating the
+              1-hour volatility band for the call's stop and target. This takes a few seconds.
             </p>
           </div>
         </div>

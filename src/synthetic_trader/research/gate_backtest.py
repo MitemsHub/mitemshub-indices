@@ -73,8 +73,6 @@ class GateBacktestConfig:
     # reward:risk is known at emission, the outcome is not).  A flat number
     # forces the legacy fixed bar for every trigger.
     hit_rate_floor: float | None = None
-    suppression_mode: str = "suppress"
-    proven_only: bool = False
 
 
 @dataclass
@@ -133,18 +131,14 @@ class GateBacktestResult:
     @property
     def kept_calls(self) -> list[CallRecord]:
         # "Kept" = everything the gate did NOT hold back (gated, annotated, or
-        # insufficient_data when proven_only is off).  These are the calls the
-        # operator actually sees and trades.  The report separately splits out
-        # how many were kept only because no verdict existed yet.  In
-        # proven-only mode a ``paper_only`` call is held too (never executed),
-        # so it is NOT kept.
-        return [c for c in self.scored_calls if c.gate_state not in ("suppressed", "paper_only")]
+        # insufficient_data — the paper-only learning calls).  These are the
+        # calls the operator actually sees and paper-trades.
+        return [c for c in self.scored_calls if c.gate_state != "suppressed"]
 
     @property
     def suppressed_calls(self) -> list[CallRecord]:
-        # Held back from execution: below-floor suppressed calls AND (in
-        # proven-only mode) anything not yet market-proven.
-        return [c for c in self.scored_calls if c.gate_state in ("suppressed", "paper_only")]
+        # Held back entirely: below-floor call types (collapsed gate).
+        return [c for c in self.scored_calls if c.gate_state == "suppressed"]
 
     def _hit_rate(self, calls: list[CallRecord]) -> float | None:
         if not calls:
@@ -402,8 +396,6 @@ def simulate_gate_walk_forward(
     calls: list[CallRecord],
     min_samples: int,
     hit_rate_floor: float | None = None,
-    suppression_mode: str,
-    proven_only: bool = False,
     horizon_verdict: str | None = "calibrated",
 ) -> None:
     """Walk emissions forward applying the gate with no lookahead.
@@ -421,12 +413,6 @@ def simulate_gate_walk_forward(
     ``horizon_verdict`` defaults to ``calibrated`` so the backtest isolates
     the *empirical-hit-rate* axis of the gate (the suppression decision does
     not depend on the horizon verdict; that is a separate calibration check).
-
-    ``proven_only`` (SYNTH_GATE_PROVEN_ONLY) additionally marks every call
-    whose evidence isn't ``proven`` as paper-only (``gate_state ==
-    "paper_only"``) - the operator's strictest belt.  The verdict then
-    measures what execution would actually look like when only
-    market-proven call types can trade.
     """
     outcomes_by_key: dict[tuple[str, str], list[dict[str, object]]] = {}
     # Running reward:risk per (symbol, trigger) for break-even floors.  RR is
@@ -494,17 +480,11 @@ def simulate_gate_walk_forward(
             verdict_label=horizon_verdict,
             min_samples=min_samples,
             hit_rate_floor=floor,
-            suppression_mode=suppression_mode,
         )
         call.gate_state = state
         call.evidence_status = evidence_status
         call.hit_rate_at_emission = hit_rate
         call.samples_at_emission = count
-
-        # Proven-only belt: anything not market-proven is paper-only, even if
-        # the gate's suppression state machine would have kept it visible.
-        if proven_only and evidence_status != "proven":
-            call.gate_state = "paper_only"
 
 
 def _aggregate(result: GateBacktestResult) -> None:
@@ -515,7 +495,7 @@ def _aggregate(result: GateBacktestResult) -> None:
         if call.outcome_label is None:
             continue
         stats.scored += 1
-        if call.gate_state in ("suppressed", "paper_only"):
+        if call.gate_state == "suppressed":
             stats.suppressed += 1
             if call.outcome_label == "target_hit":
                 stats.target_hits_suppressed += 1
@@ -547,7 +527,7 @@ def _aggregate(result: GateBacktestResult) -> None:
         kept_calls = [
             c for c in result.calls
             if c.trigger_type == stats.trigger_type
-            and c.gate_state not in ("suppressed", "paper_only")
+            and c.gate_state != "suppressed"
             and c.outcome_label is not None
         ]
         if kept_calls:
@@ -584,8 +564,6 @@ def run_gate_backtest(
     higher_timeframe_sec: int = 300,
     min_samples: int = MIN_STAGE3_SAMPLES,
     hit_rate_floor: float | None = None,
-    suppression_mode: str = "suppress",
-    proven_only: bool = False,
     model: OnlineLogisticModel | None = None,
 ) -> GateBacktestResult:
     """Full pipeline: emit → score → walk-forward gate → aggregate.
@@ -599,8 +577,6 @@ def run_gate_backtest(
         higher_timeframe_sec=higher_timeframe_sec,
         min_samples=min_samples,
         hit_rate_floor=hit_rate_floor,
-        suppression_mode=suppression_mode,
-        proven_only=proven_only,
     )
     calls = emit_calls_from_ticks(
         ticks=ticks,
@@ -614,8 +590,6 @@ def run_gate_backtest(
         calls=calls,
         min_samples=min_samples,
         hit_rate_floor=hit_rate_floor,
-        suppression_mode=suppression_mode,
-        proven_only=proven_only,
     )
     result = GateBacktestResult(
         symbol=symbol,
@@ -640,7 +614,6 @@ def print_gate_backtest_report(result: GateBacktestResult) -> None:
     suppressed_exp = result._expectancy_r(suppressed)
     config_floor = result.config.hit_rate_floor if result.config else None
     min_samples = result.config.min_samples if result.config else MIN_STAGE3_SAMPLES
-    proven_only = bool(result.config.proven_only) if result.config else False
 
     print(f"=== Stage-3 Gate Backtest: {result.symbol} @ {result.timeframe_sec}s ===")
     print(f"emitted calls: {len(result.calls)}  scored: {len(scored)}  "
@@ -649,12 +622,7 @@ def print_gate_backtest_report(result: GateBacktestResult) -> None:
         floor_desc = "auto (per-trigger break-even: 1/(1+RR) + margin)"
     else:
         floor_desc = f"{config_floor:.0%} (fixed)"
-    print(f"gate: min_samples={min_samples} floor={floor_desc} "
-          f"mode={result.config.suppression_mode if result.config else 'suppress'} "
-          f"proven_only={'on' if proven_only else 'off'}")
-    if proven_only:
-        print("proven-only: only evidence_status == 'proven' calls may execute; "
-              "still_learning / no_data / suppressed calls are held as paper-only")
+    print(f"gate: min_samples={min_samples} floor={floor_desc} (collapsed: full/half/paper)")
     print()
 
     header = (f"{'trigger':<28} {'emit':>4} {'score':>5} {'kept':>4} {'suppr':>5} "
@@ -782,8 +750,6 @@ def backtest_gate_from_csv(
     higher_timeframe_sec: int = 300,
     min_samples: int = MIN_STAGE3_SAMPLES,
     hit_rate_floor: float | None = None,
-    suppression_mode: str = "suppress",
-    proven_only: bool = False,
 ) -> GateBacktestResult:
     ticks = load_ticks_csv(csv_path, default_symbol=symbol)
     return run_gate_backtest(
@@ -793,6 +759,4 @@ def backtest_gate_from_csv(
         higher_timeframe_sec=higher_timeframe_sec,
         min_samples=min_samples,
         hit_rate_floor=hit_rate_floor,
-        suppression_mode=suppression_mode,
-        proven_only=proven_only,
     )

@@ -117,6 +117,53 @@ class Mt5ClientHardeningTests(unittest.TestCase):
         self.assertIsNotNone(connected)
         self.assertEqual(fake.initialize.call_count, 1)
 
+    def test_ticks_history_rejects_time_msc_zero_structs(self) -> None:
+        """A partially-initialized MqlTick (time_msc == 0) must be dropped at
+        the API boundary, not silently converted into a plausible
+        whole-second-epoch tick via the ``time`` fallback — that fallback is
+        exactly how garbage structs masked themselves as Deriv-style ticks."""
+        fake = _fake_mt5([True])
+        # numpy-void-like rows accessed via dict-style keys, as the code does.
+        good = {"time": 1_700_000_000, "time_msc": 1_700_000_000_123, "bid": 1830.5, "ask": 1831.5}
+        bad = {"time": 1_700_000_001, "time_msc": 0, "bid": 6917.3, "ask": 6918.4}
+        bad_price = {"time": 1_700_000_002, "time_msc": 1_700_000_002_000, "bid": 0.0, "ask": 0.0}
+        fake.copy_ticks_from = MagicMock(return_value=(good, bad, bad_price))
+        fake.COPY_TICKS_ALL = 3
+        fake.symbol_info = MagicMock(return_value=object())
+        with patch.dict(sys.modules, {"MetaTrader5": fake}):
+            client = Mt5TickClient()
+
+            async def _run():
+                await client.__aenter__()
+                return await client.ticks_history("R_75", count=10)
+
+            result = asyncio.run(_run())
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].epoch, 1_700_000_000.123)
+        self.assertEqual(result[0].price, 1830.5)
+
+    def test_terminal_path_cache_is_env_aware(self) -> None:
+        """The module-global terminal-path cache must not leak a resolution
+        from a different env: a sibling test that resolved with no server and
+        cached None must not poison this test's configured path (cross-file
+        test-order isolation)."""
+        from synthetic_trader.execution import mt5_data as md
+
+        # 1) Resolve with NO env -> caches None (fingerprint A).
+        with patch.dict(os.environ, {"SYNTHETIC_MT5_TERMINAL_PATH": "", "SYNTHETIC_MT5_SERVER": ""}, clear=False):
+            first = md._resolve_mt5_terminal_path()
+        self.assertIsNone(first)
+
+        # 2) Env changes to this test's configured path (fingerprint B) ->
+        #    the cache must be invalidated and the configured path returned.
+        resolved = md._resolve_mt5_terminal_path()
+        self.assertEqual(str(resolved), self._env_terminal_path)
+
+    @property
+    def _env_terminal_path(self) -> str:
+        return os.environ["SYNTHETIC_MT5_TERMINAL_PATH"]
+
 
 if __name__ == "__main__":
     unittest.main()

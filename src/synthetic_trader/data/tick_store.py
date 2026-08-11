@@ -364,7 +364,15 @@ def _read_full_ticks(csv_path: Path, symbol: str) -> list[Tick]:
 # wrong-scale ticks.  We guard the append itself: any tick whose price is more
 # than SCALE_GUARD_MAX_RATIO away from the existing corpus median is dropped
 # with a loud warning instead of being merged into the corpus.
-SCALE_GUARD_MAX_RATIO = 4.0
+# Deriv's 1HZ synthetic indices are quoted ~3.7-4.0x the Blueberry MT5
+# SYN scale for the same underlying (e.g. Deriv R_75 ~6,900-7,400 vs
+# Blueberry SYN75 ~1,800-1,980).  A 4.0 threshold was TOO LOOSE: it let
+# the exact pollution it was built to stop (6920/1855 = 3.73x) sail
+# through.  Real SYN75/SYN100 never deviate more than ~1.4x from the
+# corpus median even across a multi-day backfill, so 2.5x catches every
+# wrong-venue batch with a wide safety margin while never rejecting
+# genuine ticks.
+SCALE_GUARD_MAX_RATIO = 2.5
 
 
 def _apply_scale_guard(ticks: list[Tick], existing: list[Tick]) -> list[Tick]:

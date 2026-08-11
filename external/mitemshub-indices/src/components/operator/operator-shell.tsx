@@ -508,11 +508,9 @@ export function OperatorShell() {
                 trackedPosition={workspace.trackedPosition}
                 executing={workspace.executing}
                 executionMode={workspace.executionMode}
-                provenOnly={workspace.provenOnly}
                 onExecute={() => workspace.submitTradeOrder()}
                 onClose={() => workspace.closeTrackedPosition()}
                 onSetExecutionMode={workspace.setExecutionMode}
-                onSetProvenOnly={workspace.setProvenOnly}
               />
             </div>
           )}
@@ -671,11 +669,9 @@ export function OperatorShell() {
         trackedPosition={workspace.trackedPosition}
         executing={workspace.executing}
         executionMode={workspace.executionMode}
-        provenOnly={workspace.provenOnly}
         onSubmitTrade={workspace.submitTradeOrder}
         onCloseTrade={workspace.closeTrackedPosition}
         onSetExecutionMode={workspace.setExecutionMode}
-        onSetProvenOnly={workspace.setProvenOnly}
         onClose={() => setBottomSheetOpen(false)}
       />
 

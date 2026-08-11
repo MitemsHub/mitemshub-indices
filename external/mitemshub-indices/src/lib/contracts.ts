@@ -188,15 +188,13 @@ export const stage3BlockSchema = z.object({
   display_confidence: z.number().nullable(),
   min_samples: z.number(),
   hit_rate_floor: z.number(),
-  // Defaulted so stale/legacy payloads (written before the mode existed) still
-  // parse — the bridge normalizer applies the same default.
+  // Collapsed gate: the engine always emits "suppress" (below-floor call
+  // types are always held back — the annotate mode was removed).  The enum
+  // still accepts the legacy value so stale payloads parse.
   suppression_mode: z.enum(["suppress", "annotate"]).default("suppress"),
-  // Proven-only execution mode (SYNTH_GATE_PROVEN_ONLY): when true, ONLY
-  // evidence_status == "proven" calls may trigger live orders; everything
-  // else is forced paper-only.  execution_allowed is the resulting go/no-go
-  // for this specific call (false = the submit path must refuse a live
-  // order, even in annotate mode).  Both defaulted so legacy payloads parse.
-  proven_only: z.boolean().default(false),
+  // go/no-go for this specific call — false = the submit path must refuse a
+  // live order (unverified call types are paper-only).  Defaulted so legacy
+  // payloads parse.
   execution_allowed: z.boolean().default(true),
   // True whenever the empirical evidence is below the floor, in both modes —
   // downstream consumers can tell a below-floor call from a genuine one.
@@ -245,6 +243,13 @@ export const freshCallResponseSchema = z.object({
   guardian_reason: z.string(),
   invalidates_if: z.string().nullable().optional(),
   call_age_seconds: z.number().int().nonnegative().nullable().optional(),
+  // A held plan whose market ran beyond the original entry: the entry is
+  // re-anchored to the current price ("market" — enter at market) so the
+  // operator can actually get in; `original_entry` is the level the plan
+  // was issued at.
+  entry_chased: z.boolean().nullable().optional(),
+  original_entry: z.number().nullable().optional(),
+  entry_instruction: z.enum(["market", "limit"]).nullable().optional(),
   generated_at: z.string(),
   raw_features: z.record(z.string(), z.number()).nullable().optional(),
   snapshot_structure: z.record(z.string(), z.number()).nullable().optional(),
@@ -269,6 +274,25 @@ export const freshCallResponseSchema = z.object({
   // structure levels, research only).  Lets the operator see at a glance
   // whether a call came from the calibrated band or the legacy sniper.
   geometry: z.enum(["band", "sniper_legacy"]).nullable().optional(),
+  // Why the band strategy is standing aside: vol ratio vs its 1.3x spike
+  // gate, price displacement (z) vs its 1.0 entry gate, and warmup status.
+  // Lets the operator see "how close" the market is to a call instead of a
+  // bare "No trade yet".
+  band_gate: z
+    .object({
+      candles: z.number().nullable().optional(),
+      needed_candles: z.number().nullable().optional(),
+      warmup_ok: z.boolean().nullable().optional(),
+      vol_ratio: z.number().nullable().optional(),
+      vol_extended_ratio: z.number().nullable().optional(),
+      vol_extended: z.boolean().nullable().optional(),
+      z_dev: z.number().nullable().optional(),
+      z_entry: z.number().nullable().optional(),
+      signal_emitted: z.boolean().nullable().optional(),
+      waiting_on: z.string().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
 });
 
 export type FreshCallResponse = z.infer<typeof freshCallResponseSchema>;

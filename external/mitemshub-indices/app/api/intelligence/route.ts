@@ -41,7 +41,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const call = body.call;
     const rawHistory = Array.isArray(body.history) ? body.history : [];
-    const symbol = (body.symbol ?? call?.symbol ?? "R_100") as "R_75" | "R_100";
+    const symbol = (body.symbol ?? call?.symbol ?? "R_75") as "R_75" | "R_100";
     const history = rawHistory.filter((entry: any) => entry?.symbol === symbol);
 
     if (!call || isCallUnavailable(call)) {
@@ -79,7 +79,7 @@ export async function POST(request: Request) {
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const symbol = (searchParams.get("symbol") ?? "R_100") as "R_75" | "R_100";
+  const symbol = (searchParams.get("symbol") ?? "R_75") as "R_75" | "R_100";
   const includeHistory = searchParams.get("history") === "true";
   const tradingMode = "sniper";
 

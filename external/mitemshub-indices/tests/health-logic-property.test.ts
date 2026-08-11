@@ -53,6 +53,9 @@ const arbHealthMetrics: fc.Arbitrary<HealthMetrics> = fc
     mt5_server: configured ? "prop-server" : null,
     mt5_error: null,
     mt5_timing: timing,
+    mt5_process_running: configured,
+    mt5_last_connected_at: null,
+    mt5_last_test: null,
     csv_size_bytes: csvSize,
     csv_ticks: csvTicks,
     health_history: [],
@@ -63,6 +66,7 @@ const arbHealthMetrics: fc.Arbitrary<HealthMetrics> = fc
     warmup_cache_misses: { R_75: 0, R_100: 0 },
     csv_cache_hit_ratio: 0.5,
     last_warmup_at: new Date().toISOString(),
+    bridge_unavailable: false,
     pipeline_diagnostics: {
       lastGuardianReason: null,
       lastStderr: null,
@@ -116,7 +120,7 @@ function predictStatus(
 describe("evaluateHealth — property-based invariants", () => {
   it(
     "never returns more than 3 alerts and no duplicate types",
-    fc.assert(
+    () => fc.assert(
       fc.property(
         arbHealthMetrics,
         arbVelocity,
@@ -139,7 +143,7 @@ describe("evaluateHealth — property-based invariants", () => {
 
   it(
     "aggregate status matches severity of individual alerts",
-    fc.assert(
+    () => fc.assert(
       fc.property(
         arbHealthMetrics,
         arbVelocity,
@@ -161,7 +165,7 @@ describe("evaluateHealth — property-based invariants", () => {
 
   it(
     "no mt5_latency alert when mt5_timing is null",
-    fc.assert(
+    () => fc.assert(
       fc.property(
         arbHealthMetrics,
         arbVelocity,
@@ -185,7 +189,7 @@ describe("evaluateHealth — property-based invariants", () => {
 
   it(
     "no csv_velocity alert when velocity is null",
-    fc.assert(
+    () => fc.assert(
       fc.property(
         arbHealthMetrics,
         arbFlatPolls,
@@ -202,7 +206,7 @@ describe("evaluateHealth — property-based invariants", () => {
 
   it(
     "no ticks_stalled alert when flatPolls is 0",
-    fc.assert(
+    () => fc.assert(
       fc.property(
         arbHealthMetrics,
         arbVelocity,
@@ -219,7 +223,7 @@ describe("evaluateHealth — property-based invariants", () => {
 
   it(
     "calling with custom thresholds respects both warn and crit boundaries",
-    fc.assert(
+    () => fc.assert(
       fc.property(
         arbHealthMetrics,
         arbThresholds,
@@ -260,7 +264,7 @@ describe("evaluateHealth — property-based invariants", () => {
 
   it(
     "status is 'green' when all dimensions are within thresholds",
-    fc.assert(
+    () => fc.assert(
       fc.property(
         nonNeg,
         positive,
@@ -276,6 +280,10 @@ describe("evaluateHealth — property-based invariants", () => {
               total_ms: initMs + 100,
               timestamp: Date.now(),
             },
+            mt5_process_running: true,
+            mt5_last_connected_at: null,
+            mt5_last_test: null,
+            bridge_unavailable: false,
             csv_size_bytes: 1000,
             csv_ticks: { R_75: 100, R_100: 200 },
             health_history: [],

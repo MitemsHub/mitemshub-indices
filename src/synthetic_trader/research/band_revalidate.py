@@ -84,12 +84,18 @@ TOP_N_CANDIDATES = 5
 
 # ── Focused grid around the current defaults (overridable) ─────────────
 # Small deltas around the §38 winner so re-validation is local, not an
-# exhaustive re-discovery.  3×3×3×3×2 = 162 configs per symbol.
+# exhaustive re-discovery.  §50 extended the ranges DOWN so the relaxed-gate
+# region is reachable: the old floor of 1.15 meant a market sitting at
+# 0.86× its sigma baseline (the calm regime the operator reported) could
+# never be measured, and re-validation could never promote a gate that
+# fires there.  With the floor at 0.75 and z_entry down to 0.25, a weekly
+# re-sweep can discover (and promote) cells that trade the current regime.
+# 8×5×4×3×2 = 960 configs per symbol.
 DEFAULT_GRID = {
-    # z_entry: 0.75, 1.0, 1.25
-    "z_entries": (0.75, 1.25, 0.25),
-    # vol_extended_ratio: 1.15, 1.3, 1.45
-    "vol_ratios": (1.15, 1.45, 0.15),
+    # z_entry: 0.25, 0.5, 0.75, 1.0, 1.25
+    "z_entries": (0.25, 1.25, 0.25),
+    # vol_extended_ratio: 0.75 .. 1.45
+    "vol_ratios": (0.75, 1.45, 0.10),
     # stop_sigma_mult: 0.15, 0.20, 0.25, 0.30
     "stops": (0.15, 0.30, 0.05),
     # target_sigma_mult: 0.60, 0.80, 1.00

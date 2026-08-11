@@ -1177,7 +1177,7 @@ describe("OperatorShell", () => {
     expect(screen.getByRole("button", { name: /r_75/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /r_100/i })).toBeDisabled();
     expect(
-      screen.getByText(/fetching the latest local market reading and trade plan/i),
+      screen.getByText(/analyzing the market/i),
     ).toBeInTheDocument();
 
     expect(screen.getByRole("main")).toHaveAttribute("aria-busy", "true");
@@ -1191,7 +1191,7 @@ describe("OperatorShell", () => {
     ).toBeInTheDocument();
     await waitFor(() =>
       expect(
-        screen.queryByText(/fetching the latest local market reading and trade plan/i),
+        screen.queryByText(/analyzing the market/i),
       ).not.toBeInTheDocument(),
     );
   });

@@ -7,36 +7,48 @@ const TEST_SCRIPT = "print('hello')";
 
 type ExecFileCb = (...args: unknown[]) => void;
 
+/** A promisified execFile mock: callable AND carrying promisify.custom. */
+type ExecFileLike = ExecFileCb & { [k: symbol]: unknown };
+
+/** execFile options actually read by the tests (timeout / signal / env). */
+type ExecFileOptions = {
+  env?: Record<string, string>;
+  timeout?: number;
+  signal?: AbortSignal;
+};
+
+/** Mock execFile: (file, args, options) — typed so mock.calls indexes type-check. */
+function makePromisifiedMock(
+  impl: (file: string, args: string[], options?: ExecFileOptions) => Promise<{ stdout: string; stderr: string }>,
+) {
+  const promisified = vi.fn(impl);
+  const callback = vi.fn() as unknown as ExecFileLike;
+  (callback as Record<symbol, unknown>)[promisify.custom] = promisified;
+  return { callback, promisified };
+}
+
 /**
  * Create a mock execFile where the promisified version returns
  * a fixed stdout/stderr payload on every call.
  */
 function makePassingExecFileMock(stdout: string, stderr = "") {
-  const promisified = vi.fn(async () => ({ stdout, stderr }));
-  const callback = vi.fn() as unknown as { [k: symbol]: unknown };
-  (callback as Record<symbol, unknown>)[promisify.custom] = promisified;
-  return { callback, promisified };
+  return makePromisifiedMock(async () => ({ stdout, stderr }));
 }
 
 /**
  * Create a mock execFile where every call throws the given error.
  */
 function makeFailingExecFileMock(error: Error) {
-  const promisified = vi.fn(async () => {
+  return makePromisifiedMock(async () => {
     throw error;
   });
-  const callback = vi.fn() as unknown as { [k: symbol]: unknown };
-  (callback as Record<symbol, unknown>)[promisify.custom] = promisified;
-  return { callback, promisified };
 }
 
 /**
  * Import engine-bridge with a mocked node:child_process so that
  * runPythonScript uses our execFile mock instead of real I/O.
  */
-async function importBridgeWithMock(
-  execFileMock: { [k: symbol]: unknown } & ((...args: unknown[]) => void),
-) {
+async function importBridgeWithMock(execFileMock: ExecFileLike) {
   vi.doMock("node:child_process", () => ({
     execFile: execFileMock,
     default: { execFile: execFileMock },
@@ -143,7 +155,7 @@ describe("runPythonScript", () => {
       // Second call (py -3) succeeds
       return { stdout: "OK", stderr: "" };
     });
-    const callback = vi.fn() as unknown as { [k: symbol]: unknown };
+    const callback = vi.fn() as unknown as ExecFileLike;
     (callback as Record<symbol, unknown>)[promisify.custom] = promisified;
 
     const bridge = await importBridgeWithMock(callback);
@@ -190,7 +202,7 @@ describe("runPythonScript", () => {
     const promisified = vi.fn(async () => {
       throw new Error("last_error_detail");
     });
-    const callback = vi.fn() as unknown as { [k: symbol]: unknown };
+    const callback = vi.fn() as unknown as ExecFileLike;
     (callback as Record<symbol, unknown>)[promisify.custom] = promisified;
 
     const bridge = await importBridgeWithMock(callback);
@@ -257,7 +269,7 @@ describe("runPythonScript", () => {
       },
     });
 
-    const env = promisified.mock.calls[0][2].env as Record<string, string>;
+    const env = (promisified.mock.calls[0][2]?.env ?? {}) as Record<string, string>;
 
     // PYTHONPATH should be set from engineRoot
     expect(env.PYTHONPATH).toBe(join(ENGINE_ROOT, "src"));
@@ -278,7 +290,7 @@ describe("runPythonScript", () => {
       timeout: 5000,
     });
 
-    const env = promisified.mock.calls[0][2].env as Record<string, string>;
+    const env = (promisified.mock.calls[0][2]?.env ?? {}) as Record<string, string>;
 
     // Default vars are present
     expect(env.PYTHONPATH).toBe(join(ENGINE_ROOT, "src"));
@@ -308,14 +320,16 @@ describe("runPythonScript", () => {
 
   it("runs the main script when validatePythonImport check passes", async () => {
     let callIdx = 0;
-    const promisified = vi.fn(async () => {
-      callIdx += 1;
-      // First call: import check
-      if (callIdx === 1) return { stdout: "OK\n", stderr: "" };
-      // Second call: main script
-      return { stdout: "done", stderr: "" };
-    });
-    const callback = vi.fn() as unknown as { [k: symbol]: unknown };
+    const promisified = vi.fn(
+      async (_file: string, _args: string[], _options?: ExecFileOptions) => {
+        callIdx += 1;
+        // First call: import check
+        if (callIdx === 1) return { stdout: "OK\n", stderr: "" };
+        // Second call: main script
+        return { stdout: "done", stderr: "" };
+      },
+    );
+    const callback = vi.fn() as unknown as ExecFileLike;
     (callback as Record<symbol, unknown>)[promisify.custom] = promisified;
 
     const bridge = await importBridgeWithMock(callback);
@@ -331,8 +345,8 @@ describe("runPythonScript", () => {
     // First call validates import, second runs the main script
     expect(promisified).toHaveBeenCalledTimes(2);
     // The script string is the last element in the args array
-    const importScript = (promisified.mock.calls[0][1] as string[]).at(-1) ?? "";
-    const mainScript = (promisified.mock.calls[1][1] as string[]).at(-1) ?? "";
+    const importScript = promisified.mock.calls[0][1].at(-1) ?? "";
+    const mainScript = promisified.mock.calls[1][1].at(-1) ?? "";
     expect(importScript).toContain("import MyClass");
     expect(mainScript).toContain("print('main')");
   });
@@ -349,7 +363,7 @@ describe("runPythonScript", () => {
       timeout: 5000,
     });
 
-    const env = promisified.mock.calls[0][2].env as Record<string, string>;
+    const env = (promisified.mock.calls[0][2]?.env ?? {}) as Record<string, string>;
 
     // Approved vars are present
     expect(env.PATH).toBeDefined();

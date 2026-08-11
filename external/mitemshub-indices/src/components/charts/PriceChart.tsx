@@ -66,6 +66,20 @@ function mergeTicks(
   }
 
   const sorted = Array.from(map.values()).sort((a, b) => a.epoch - b.epoch);
+
+  // Carry forward each symbol's last known price so a quieter symbol stays
+  // visible when the other symbol's ticks dominate the tail window (with a
+  // 100-point window, a burst of R_100 ticks pushes all R_75 points out and
+  // the header collapses to "V75: —" even though the feed streams both).
+  let lastV75: number | null = null;
+  let lastV100: number | null = null;
+  for (const point of sorted) {
+    if (point.V75 !== null) lastV75 = point.V75;
+    if (point.V100 !== null) lastV100 = point.V100;
+    point.V75 = point.V75 ?? lastV75;
+    point.V100 = point.V100 ?? lastV100;
+  }
+
   return sorted.slice(-limit);
 }
 

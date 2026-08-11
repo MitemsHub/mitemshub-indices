@@ -54,6 +54,33 @@ def trending_candles(symbol: str = "R_75", count: int = 100) -> list[Candle]:
     return candles
 
 
+def choppy_candles(symbol: str = "R_75", count: int = 120) -> list[Candle]:
+    """Deterministic pseudo-random noise — zero drift, no directional thesis."""
+    import random as _random
+
+    rng = _random.Random(42)
+    candles: list[Candle] = []
+    price = 100.0
+    for index in range(count):
+        open_price = price
+        drift = rng.uniform(-0.04, 0.04)
+        close = open_price + drift
+        candles.append(
+            Candle(
+                symbol=symbol,
+                timeframe_sec=60,
+                open_time=index * 60,
+                open=open_price,
+                high=max(open_price, close) + abs(drift) * 0.4,
+                low=min(open_price, close) - abs(drift) * 0.4,
+                close=close,
+                tick_count=5,
+            )
+        )
+        price = close
+    return candles
+
+
 def borderline_trending_candles(symbol: str = "R_75", count: int = 100) -> list[Candle]:
     candles: list[Candle] = []
     price = 100.0
@@ -178,12 +205,14 @@ class DecisionEngineTests(unittest.TestCase):
         report = engine.evaluate("R_75", trending_candles(count=10))
         self.assertIsNone(report.signal)
 
-    def test_band_geometry_stands_aside_without_extended_vol_fade_setup(self) -> None:
-        # Default profile geometry is now "band" — the live call IS the
-        # verified vol-band strategy.  A steady monotonic trend has no
-        # extended-vol z_dev fade setup, so the engine must stand aside
-        # instead of emitting a direction call with unreachable SMC levels.
-        candles = trending_candles(count=120)
+    def test_band_geometry_emits_structure_call_when_no_fade_setup_but_thesis_holds(self) -> None:
+        # A steady monotonic trend has no extended-vol z_dev fade setup, but
+        # the structural thesis (bias→setup→confirmation) is fully aligned —
+        # the engine must emit that direction with calibrated band levels
+        # instead of throwing the thesis away.  (500 candles so the band
+        # forecaster's online updates settle to the realized scale; the live
+        # path replays 400.)
+        candles = trending_candles(count=500)
         role = {
             "execution": candles,
             "setup": candles,
@@ -192,9 +221,121 @@ class DecisionEngineTests(unittest.TestCase):
         }
         engine = DecisionEngine(TraderConfig.default())
         report = engine.evaluate("R_75", candles, role_candles=role)
+        self.assertIsNotNone(report.signal)
+        assert report.signal is not None
+        self.assertEqual(report.signal.execution_trigger_type, "band_structure")
+        self.assertEqual(report.signal.direction, Direction.LONG)
+        # Zero-drawdown band geometry on a LONG thesis: stop below entry,
+        # target above, reward:risk >= the band geometry minimum.
+        self.assertLess(report.signal.stop_loss, report.signal.entry)
+        self.assertGreater(report.signal.take_profit, report.signal.entry)
+        self.assertGreaterEqual(report.signal.reward_risk, 2.0)
+        self.assertTrue(any("band_structure" in r for r in report.reasons))
+
+    def _evaluate_with_htf_bias(
+        self,
+        htf_bias: float,
+        scores: list[float],
+    ) -> DecisionReport:
+        """Run evaluate() with a controlled 4H structure bias injected into the
+        feature snapshot and controlled vol-dynamics scores (LONG, SHORT).
+        """
+        from synthetic_trader.strategy import decision_engine as de_module
+
+        candles = trending_candles(count=500)
+        role = {
+            "execution": candles,
+            "setup": candles,
+            "confirmation": candles[-30:],
+            "bias": candles,
+        }
+        real_build = de_module.build_snapshot
+
+        def _patched_build(**kwargs):
+            snap = real_build(**kwargs)
+            snap.features["bias_structure_bias"] = htf_bias
+            return snap
+
+        engine = DecisionEngine(TraderConfig.default())
+        with patch.object(engine, "_score_direction", side_effect=scores):
+            with patch.object(de_module, "build_snapshot", side_effect=_patched_build):
+                return engine.evaluate("R_75", candles, role_candles=role)
+
+    def test_band_structure_counter_htf_moderate_conviction_stands_aside(self) -> None:
+        """The MTF panel shows a bullish 4H structure bias while the
+        vol-dynamics scores are mildly bearish (0.55) — firing a SHORT call
+        would silently contradict the alignment the operator sees.  The
+        counter-HTF guard raises the bar to 0.62, so the engine stands aside
+        with the honest reason.
+        """
+        report = self._evaluate_with_htf_bias(htf_bias=0.5, scores=[0.45, 0.55])
+        self.assertIsNone(report.signal)
+        self.assertTrue(
+            any("counter to the bullish 4H structure bias" in r for r in report.reasons)
+        )
+
+    def test_band_structure_counter_htf_strong_conviction_fires_with_note(self) -> None:
+        """Genuine vol-dynamics conviction (0.70) is allowed to override the
+        bullish 4H structure — the call fires SHORT but the rationale says
+        it is counter to the HTF bias and why.
+        """
+        report = self._evaluate_with_htf_bias(htf_bias=0.5, scores=[0.30, 0.70])
+        self.assertIsNotNone(report.signal)
+        assert report.signal is not None
+        self.assertEqual(report.signal.execution_trigger_type, "band_structure")
+        self.assertEqual(report.signal.direction, Direction.SHORT)
+        self.assertTrue(
+            any("counter to the bullish 4H structure bias" in r for r in report.reasons)
+        )
+
+    def test_band_structure_aligned_htf_keeps_normal_bar(self) -> None:
+        """Vol-dynamics direction WITH the 4H structure keeps the normal 0.52
+        bar — a bullish HTF + mildly bullish vol-dynamics (0.55) fires LONG.
+        """
+        report = self._evaluate_with_htf_bias(htf_bias=0.5, scores=[0.55, 0.45])
+        self.assertIsNotNone(report.signal)
+        assert report.signal is not None
+        self.assertEqual(report.signal.execution_trigger_type, "band_structure")
+        self.assertEqual(report.signal.direction, Direction.LONG)
+        self.assertFalse(
+            any("counter to the" in r for r in report.reasons)
+        )
+
+    def test_band_geometry_stands_aside_without_extended_vol_fade_setup_or_thesis(self) -> None:
+        # No vol-spike fade setup AND no structural thesis → the engine must
+        # stand aside honestly rather than invent a call.  Force the no-thesis
+        # state: setup state "none", confirmation not confirmed/actionable,
+        # and low directional scores — so the structural fallback's guard
+        # (thesis_ok) keeps the engine honest.
+        candles = trending_candles(count=500)
+        role = {
+            "execution": candles,
+            "setup": candles,
+            "confirmation": candles[-30:],
+            "bias": candles,
+        }
+        engine = DecisionEngine(TraderConfig.default())
+        with patch.object(engine, "_score_direction", side_effect=[0.45, 0.43]):
+            with patch(
+                "synthetic_trader.strategy.decision_engine.classify_setup",
+                return_value=SimpleNamespace(
+                    state="none",
+                    trade_direction="buy",
+                    trigger_zone_low=None,
+                    trigger_zone_high=None,
+                    reason="no setup forming",
+                ),
+            ):
+                with patch(
+                    "synthetic_trader.strategy.decision_engine.confirm_setup",
+                    return_value=SimpleNamespace(
+                        state="pending",
+                        reason="no confirmation yet",
+                    ),
+                ):
+                    report = engine.evaluate("R_75", candles, role_candles=role)
         self.assertIsNone(report.signal)
         self.assertTrue(any("band" in r for r in report.reasons))
-        self.assertIsNone(report.signal)
 
     def test_creates_directional_signal(self) -> None:
         engine = DecisionEngine(legacy_sniper_config())

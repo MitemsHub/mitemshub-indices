@@ -79,6 +79,36 @@ MAX_RECONNECTS = 50  # give up after ~50 reconnect attempts (terminal closed)
 STATUS_PATH = "data/live_tick_collector.json"
 STATUS_INTERVAL_SEC = 10.0
 
+# Persistent MT5 event log (JSONL): every reconnect/init-failure/feed-loss
+# is appended here with a timestamp so the 48h health analysis (and the
+# IPC-timeout recurrence verdict) has a full history instead of the last few
+# errors in the status file.  cwd-relative like the status path.
+MT5_EVENTS_PATH = Path(".data") / "mt5_events.jsonl"
+
+
+# ── MT5 event telemetry ─────────────────────────────────────────────────
+def _classify_mt5_event(message: str) -> str:
+    """Bucket a reconnect error into a measurable kind."""
+    low = message.lower()
+    if "initialize failed" in low or "ipc timeout" in low or "connection failed" in low:
+        return "init_failed"
+    if "feed lost" in low:
+        return "feed_lost"
+    if "consecutive read errors" in low:
+        return "read_errors"
+    return "reconnect"
+
+
+def _append_mt5_event(kind: str, message: str) -> None:
+    """Append one timestamped event line; best-effort (never crash the
+    collector over logging)."""
+    try:
+        MT5_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with MT5_EVENTS_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.time(), "kind": kind, "message": message}) + "\n")
+    except Exception:
+        pass
+
 DEFAULT_OUTPUT_DIR = "data/backfill"
 
 
@@ -426,6 +456,7 @@ async def collect_live_ticks(
                 raise
             except RuntimeError as exc:
                 reconnect_attempts += 1
+                _append_mt5_event(_classify_mt5_event(str(exc)), str(exc))
                 for collector in collectors.values():
                     collector.stats.reconnect_attempts = reconnect_attempts
                     collector.stats.errors.append(str(exc))

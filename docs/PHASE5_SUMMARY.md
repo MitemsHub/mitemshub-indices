@@ -1523,8 +1523,9 @@ behaviour was in force.
 **What shipped.**
 
 1. **`SYNTH_GATE_SUPPRESSION_MODE=suppress|annotate`** (default `suppress`,
-   per-call override supported) in `stage3_gate.py`.  The mode only changes
-   the *action*, never the *truth*:
+   per-call override supported) in `stage3_gate.py`.  **REMOVED in §48** —
+   below-floor call types are always suppressed now; this section is kept
+   for history.  The mode only changed the *action*, never the *truth*:
    - `suppress` (default) — below-floor + enough samples → `state=suppressed`,
      call downgraded to `stand_aside`, intent preserved in
      `stage3.suppressed_call`, `suppressed_reason` stamped.
@@ -1611,12 +1612,12 @@ re-deriving the evidence.
 2. **Live MT5 (the real-money gate)** — `use-operator-workspace` blocks
    `executeTradeOrder` for `live_mt5` when `size_multiplier <= 0`, with a
    clear error telling the operator to paper-trade the type (that generates
-   the outcomes the gate needs).  The one deliberate escape hatch:
-   `SYNTH_GATE_SUPPRESSION_MODE=annotate` lifts the block (the operator
-   explicitly chose to keep unverified types actionable); the scaled volume
-   still applies.  The lot is scaled `max(0.01, 0.01 × multiplier)` — note
-   the broker floor means half-sizing only bites when the base lot exceeds
-   0.01; at the default lot the enforcement is effectively block-vs-0.01.
+   the outcomes the gate needs).  **The annotate escape hatch was removed in
+   §48** — the submit path now also requires stage-3 authorization and
+   fails closed on missing evidence.  The lot is scaled
+   `max(0.01, 0.01 × multiplier)` — note the broker floor means half-sizing
+   only bites when the base lot exceeds 0.01; at the default lot the
+   enforcement is effectively block-vs-0.01.
 3. **Dashboard** — the primary call panel shows a sizing badge (Full size /
    Half size / Paper only / Held back) with the reason next to the Stage-3
    evidence, and the bridge normalizes `sizing` (legacy payloads without it
@@ -1763,8 +1764,8 @@ call types.  The backtest command makes that experiment one flag away:
 `--hit-rate-floor 0.25`.
 
 Flags: `--csv --symbol --timeframe --higher-timeframe --min-samples
---hit-rate-floor --suppression-mode`.  Runtime ≈ 2-3 min per symbol at the
-default 300s primary cadence.
+--hit-rate-floor`.  (`--suppression-mode` was removed in §48.)  Runtime
+≈ 2-3 min per symbol at the default 300s primary cadence.
 
 ## 31. Realized-RR Investigation + Faster Mean-Reversion Exit (`breakeven-trail`)
 
@@ -1891,9 +1892,12 @@ multipliers + bands) and `tests/contracts.test.ts` +1 (schema accepts the
 carrying stage3 block).  Full Python suite 809 passed, 3 skipped; TS 193
 passed; `tsc --noEmit` adds zero new errors (44 pre-existing untouched).
 
-## 33. Proven-Only Execution Mode (`SYNTH_GATE_PROVEN_ONLY` / `--proven-only`)
+## 33. Proven-Only Execution Mode (`SYNTH_GATE_PROVEN_ONLY` / `--proven-only`) — REMOVED in §48
 
-**The strictest belt on the Stage-3 gate:** the gate already *annotated* calls
+**The strictest belt on the Stage-3 gate** (historical — the knob, the CLI
+flag, and the dashboard toggle were removed in §48 because the collapsed
+ladder already forces everything unproven to paper-only): the gate already
+*annotated* calls
 with empirical hit rates and *suppressed* below-floor call types; this round
 adds a mode where **only `evidence_status == "proven"` calls may carry a live
 order at all** — `still_learning`, `suppressed`, and `no_data` calls are forced
@@ -2625,3 +2629,402 @@ correctly.  The next automatic run fires when the span crosses 14 days
 **Validated:** 9 tests (verdict thresholds, span/growth/no-csv gates,
 force bypass, full four-leg pipeline with artifact round-trip) = green;
 PowerShell task script parses clean.
+
+## 44. Single-Flight MT5 Init Guard — collector and dashboard never race
+
+§41 hardened recovery from IPC timeouts but left one race open: the
+scheduled collector and the dashboard warmup cycle are **separate
+processes**, and two simultaneous ``mt5.initialize()`` calls race the
+terminal's startup handshake — one gets ``(-10005, 'IPC timeout')``.  A
+``threading.Lock`` cannot serialize across processes, so this section adds
+a cross-process guard.
+
+**Mechanism** (``src/synthetic_trader/execution/mt5_guard.py``): a
+**Windows named mutex** (ctypes ``CreateMutexW`` / ``WaitForSingleObject``
+/ ``ReleaseMutex``) shared by every MT5-using process:
+
+- **Cross-process** — the collector, the bridge's live reads, and manual
+  CLI runs all contend on the same kernel object, so two processes can
+  never initialize at the same instant.
+- **Abandoned-safe** — a crash mid-init leaves ``WAIT_ABANDONED``, which
+  the next process treats as acquired; no stale lock file (the kernel
+  object dies with its last handle).
+- **Timeout** — a waiter that can't get the slot within 20–30s fails fast
+  with a clear "terminal busy" error instead of piling onto the handshake.
+- **Thread-consistent ownership** — kernel mutex ownership is per-THREAD
+  and ``ReleaseMutex`` must run on the owning thread, so each lock owns a
+  dedicated worker thread and routes both acquire and release through it
+  (event-loop callers can't trip ``ERROR_NOT_OWNER``).
+
+Scope is the **init+login sequence only**: once connected, the lock is
+released so concurrent sessions (the terminal supports multiple IPC
+clients) and the long-lived collector are never blocked afterwards.
+
+**Wiring:** ``Mt5TickClient.__aenter__`` (the single choke point for the
+collector's reconnects and the snapshot path) acquires the guard for its
+init+login and releases in a ``finally``; the TS bridge's embedded ``_mt5``
+helper does the same with a best-effort import (falls back to the §41
+shutdown hardening if the module is unreachable).
+
+**Bonus fix found while testing:** the terminal-path module cache was not
+env-aware — a sibling test that resolved with no server cached ``None``
+and poisoned later tests' configured path (cross-file test-order failure).
+``_resolve_mt5_terminal_path`` now caches keyed on a fingerprint of
+``SYNTHETIC_MT5_TERMINAL_PATH``/``SYNTHETIC_MT5_SERVER``, so a changed env
+invalidates the cache.
+
+**Validated:** 6 guard tests (two-process exclusion, crash-abandoned
+recovery, timeout, lifecycle, busy-raise) + 1 env-cache regression test +
+full affected suites (mt5-collector, hardening, live-snapshot, collector,
+continuous-collector, m1-capture, auto-scorer) = 127 green; the embedded
+bridge ``_mt5`` template parses and the engine-bridge vitest suites pass
+45/45.
+
+## 45. 48h IPC-Timeout Observation Window — measuring the guard
+
+§44's guard can only be trusted if IPC timeouts actually stop recurring in
+production, so this section instruments the measurement and starts the
+clock.
+
+**The problem it solves:** the collector's status file only keeps the last
+few errors — useless for a 48h recurrence measurement.  The collector now
+appends every reconnect/init-failure/feed-loss to a persistent JSONL event
+log (``.data/mt5_events.jsonl``, best-effort write, cwd-relative like the
+status path) at the single reconnect funnel, bucketed by kind
+(``init_failed`` / ``feed_lost`` / ``read_errors`` / ``reconnect``).
+
+**The report** (``collector-health-report --hours 48``, also logged each
+morning by the daily task):
+
+- ``venue_leak`` — **data-integrity failure, highest priority**: any tick in
+the MT5 corpus whose price deviates from the corpus median by more than the
+append-time scale guard (``SCALE_GUARD_MAX_RATIO = 2.5``) — i.e. Deriv
+1HZ-scale prices (~3.7-4.0x Blueberry SYN scale) got appended despite the
+venue guard.  The report names the symbol, count, and a sample price, and
+**exits non-zero** so the morning task logs ``collector-health failed (...)``
+instead of ``ok``.  The scan reads raw CSV rows (not deduped) so a leaked
+row can't hide behind an epoch collision.  Fix: quarantine the flagged rows
+(see the tick_store venue guard).
+- ``needs_re_tune`` — ≥3 IPC-timeout init failures in the window: the
+guard didn't eliminate the race → re-tune the reconnect backoff.
+- ``attention`` — 1–2 IPC timeouts, or repeated feed-loss/read-error
+reconnects (terminal-side stalls, not the init race), or a corpus with no
+fresh ticks for 12h+.
+- ``ok`` — zero IPC timeouts in the window and a clean (in-scale) corpus.
+
+**The re-tune path** (only if the verdict says so): the knobs live in
+``src/synthetic_trader/data/continuous_collector.py`` —
+``RECONNECT_BACKOFF_SEC`` (5s), ``MAX_RECONNECTS`` (50), and
+``STALL_RECONNECT_SEC`` (600s).  If IPC timeouts recur ≥3×/48h, the first
+move is to raise the backoff (5s → 15-30s) so reconnects never cluster, and
+lengthen ``STALL_RECONNECT_SEC`` if the stalls are the terminal's own.
+
+**Baseline (pre-fix) for comparison:** the collector run that ended 2026-08-08
+21:19 (started 00:30, ~21h, OLD code) recorded **1 IPC-timeout init failure,
+3 feed-loss reconnects, 4 stalls** — a ~1.1 init-failure/day recurrence
+rate that the guard is meant to eliminate.
+
+**Clock started:** the collector was restarted 2026-08-08 21:19 with the new
+code — clean init under the guard (0 errors/reconnects), fresh ticks flowing,
+event log live.  The 48h window closes 2026-08-10 21:19; run
+``collector-health-report`` then (the daily task also logs the verdict each
+morning).  Expected outcome if the guard holds: 0 IPC timeouts (feed-loss
+stalls may still appear — those are terminal-side, not the init race).
+
+**Validated:** 7 report tests (no-events ok, ≥3 IPC timeouts re-tune,
+single attention, window filtering, feed-loss attention, stale/fresh corpus)
++ full affected suites (collector, continuous-collector, guard, hardening)
+= 35 green; the event writer + classifier verified directly; the daily task
+script parses and ran end-to-end (restart + coverage + scoring + gated
+re-validation + health log).
+
+## 46. Combined-Regime A/B Module — productionized overlap attribution
+
+The ``_probe_combined.py`` investigation (§41.5-era) concluded that stacking
+momentum next to the band fade is *arithmetic, not synergy*: ratio-gate
+momentum fires on the SAME candles in the OPPOSITE direction, and the
+absolute-gate leg was unprofitable at realistic costs.  This section
+productionizes that measurement so any future pair can be A/B tested
+against the same baseline without a scratch script.
+
+**Module:** ``research/combined_regime.py`` + ``combine-regime`` CLI.
+
+- One shared candle stream; each leg gets its own broker (breakeven-trail
+  for band/fade, plain paper otherwise) and its own RiskEngine — true
+  separate sub-accounts, exactly like a standalone backtest.
+- ``LegSpec(strategy, config, label)`` — strategies ``band`` / ``fade`` /
+  ``momentum`` with arbitrary config overrides, so a re-tuned leg is one
+  dict away from a full A/B.
+- Overlap attribution: per-candle both-fired/opposite-dir/same-dir counts,
+  plus each leg's PnL split into overlap-candle vs standalone trades
+  (keyed by the candle close epoch, matching outcome ``opened_at``).
+- Daily-PnL correlation (Pearson), "lift days" (days where combined trade
+  count beats the best single leg), and a composite verdict
+  (``adds_trades_and_net`` / ``adds_trades_net_neutral`` / ``dilutes_net`` /
+  ``no_change``) with a one-line reason.
+- Seeded with calibrated EGARCH state from ``data/garch_calibration``
+  (mirrors ``headtohead_verify``), so the numbers are directly comparable
+  to §40/§43.
+
+**Baseline reproduction (R_75 @300s, 9.75-day corpus):**
+
+| leg | trades | WR | ExpR | net |
+|---|---|---|---|---|
+| band | 23 | 48% | +0.994R | +139.66 |
+| momentum (ratio) | 39 | 41% | +0.086R | +14.94 |
+| **combined** | 62 | 44% | +0.423R | +154.61 |
+
+overlap both=25 (all opposite-dir), daily-corr +0.43, lift 3/6 days.
+These are exactly the probe's numbers — the module measures the same thing
+as the scratch script, so future pair results are directly comparable.
+Verdict: ``adds_trades_and_net`` in raw net terms, but that is the
+arithmetic-dilution warning the probe identified: +11% net for 2.7× the
+trades, zero risk diversification (legs move together).
+
+**Validation:** 12 tests (LegSpec validation, both-legs reporting, union
+metrics, equity sum, overlap shape/attribution, verdict keys, opposite- vs
+same-direction classification, artifact round-trip) + full affected suites
+(vol-param sweep, head-to-head verify, band revalidate) = 63 green; the
+real-corpus run reproduces the probe baseline exactly.
+
+## 47. Band Gate-Relaxation vs the Daily-Loss Halt — the real bottleneck
+
+Question: can the band's own 2.35 entries/day be raised by relaxing the
+vol-extension gate (with a per-trade expectancy floor), given that §38's
+gate-opening appeared to dilute expectancy?
+
+**Method.**  Replayed R_75 @300s (9.77-day clean corpus) with
+``vol_extended_ratio`` from 1.0→1.3, recording every accepted trade's
+entry-time features (z_dev, mean-revert signal, implied RR, vol ratio)
+joined to its outcome, under two risk-halt configs.  Probes at root
+(``_probe_gate_floor*.py``) keep the measurement reproducible.
+
+**Finding 1 — the gate is NOT the binding constraint; the risk halt is.**
+Under the live 0.02-daily / 4-consecutive-loss halt, *relaxing* the gate
+collapses the account: the marginal signals cluster in one ~6h window,
+all lose, and the halt trips — 4-5 trades total, −0.77R, dead for the rest
+of the corpus.  (This is why §38's "40-44 trades at gate 1.0" reading never
+reproduced — it was measured without the halt tripping.)
+
+**Finding 2 — with an honest halt, the breakeven trail DOES offset the
+dilution.**  Under 0.05/8:
+
+| gate | trades | /day | ExpR | net | maxDD |
+|---|---|---|---|---|---|
+| 1.30 | 23 | 2.35 | +0.994R | +139.66 | 1.7% |
+| 1.15 | 28 | 2.87 | +0.920R | +158.47 | 2.3% |
+| 1.10 | 35 | 3.58 | **+0.988R** | +218.60 | 2.9% |
+| 1.05 | 39 | 3.99 | **+0.987R** | +246.29 | 2.9% |
+| 1.00 | 50 | 5.12 | +0.785R | +249.59 | 4.7% |
+
+Gate 1.05-1.1 keeps the +0.99R expectancy while raising entries +52-70%
+(maxDD still ~3%): the trail converts the marginal trades' would-be -1R
+losses into ~0R exits.  Gate 1.0 is the dilution point — but even there net
+is still +78% higher.
+
+**Finding 3 — a per-trade expectancy floor adds nothing on top of the
+gate.**  Sweeping entry-time floors on the relaxed stream (z_dev ≥ 0.5-2.5,
+revert ≥ 0.02-0.15, RR ≥ 1-4) never beat simply picking the gate: the
+floors just re-raise the bar and hand back the extra trades.  The lever is
+the gate + the halt config, not a signal filter.
+
+**Finding 4 — R_100's band "loss" was a halt artifact.**  At the default
+0.02/4 halt R_100 shows 16 trades, −0.07R; under 0.05/8 the same gate gives
+38 trades, +0.44R, and gate 1.1 gives 80 trades, +0.633R (+329.9).  The
+head-to-head verdicts on R_100 were measuring the halt, not the strategy.
+
+**Tooling changes.**  (1) ``BAND_VOL_RATIO`` grid floor lowered 1.15→1.0
+(step 0.1) so the sweep actually searches the region where the cells live
+— the old grid skipped the entire 1.0-1.15 zone.  (2) ``sweep-vol`` gains
+``--max-daily-loss-frac`` / ``--max-consecutive-losses`` so the halt
+dimension is measurable instead of silently pinned at the sniper default.
+The VolBandConfig docstring now records the halt caveat.  Live default
+stays at gate 1.3 until the §43 milestone verifier confirms the relaxed
+cell on 40+ trades.
+
+**Validation:** 21 sweep tests (incl. new risk-override threading + the
+1.0-1.6 grid size) + band-revalidate + head-to-head + combined-regime =
+64 green; CLI sweep reproduces the table above exactly.
+
+## 48. Band Re-Tune: Two Backtest Defects Fixed, Entries 5× — R_75 fires again
+
+**Problem.** "R_75 stands aside most of the time" — the vol-extension gate
+(σ/σ_EMA ≥ 1.3) rarely fired, and a focused geometry sweep found *zero*
+trades in the recent dense half of the corpus at every gate setting.
+
+**Defect 1 — gap poison.** The corpus has multi-hour collector-downtime
+gaps (e.g. 08-07 18:41 → 08-08 03:30, +4.3% jump). The 5-min candle
+builder buckets by wall-clock, so a gap became a single fabricated
+"+4.2% candle" — the EGARCH forecaster saw z≈+52, slammed log-variance
+into the +5 clip (σ=12.18), poisoned the sigma EMA, and suppressed the
+gate for days. Fixed by re-anchoring (`_gap_reanchor`) in all three
+vol-regime strategies (band/reversion/momentum): a candle following a
+gap > 3 bars re-anchors `_prev_close`/`_prev_sigma` instead of feeding
+the fabricated return into the forecaster. Post-fix max σ = 0.0009 (was
+12.18); 08-08/09 fire again.
+
+**Defect 2 — permanent risk halt.** Neither `BacktestEngine.run_ticks`
+nor `run_vol_regime_backtest` ever called `risk_engine.sync_session_day`,
+so the first 4-loss streak (or daily-loss trip) halted the account for
+the ENTIRE rest of the corpus — no new trade could open to win and reset
+the streak. The live `paper_runner` does sync days; backtests never did.
+Every backtest verdict so far (band, fade, momentum) understated trade
+counts and its walk-forward halves came back empty. Both runners now
+sync session days exactly like the live path.
+
+**Re-tune result (R_75 @300s, 9.5-day corpus, live 2%/4 risk, real
+runner, state-carrying walk-forward halves):**
+
+| config | trades | win | expR | net PnL | h1 | h2 |
+|---|---|---|---|---|---|---|
+| OLD (σEMA 60, revert 0.02, cd 30) | 16 | 50% | +1.42R | +141.8 | 15t +1.25R | 1t +4.00R |
+| **NEW (σEMA 30, revert 0.0, cd 10)** | **80** | 38% | +0.62R | **+330.0** | 72t +0.61R | 8t +0.64R |
+
+The proven 1.3 vol gate and z=1.0 entry are untouched (gate 1.1 still
+collapses under live 2%/4 risk — §47). The entry frequency comes from
+dropping the mean-revert-signal confirmation and speeding the sigma
+baseline, which lets the strategy re-arm faster after each fade. Entries
+per day: ~1.7 → ~8.4; net PnL 2.3×. Expectancy per trade drops
+(+1.42R → +0.62R) because the OLD cell's 16 trades were a handful of
+lucky fades — the NEW cell's 80 trades are positive in BOTH halves,
+which is the robust walk-forward claim.
+
+**Regression tests** (`tests/test_band_revalidate.py`): gap re-anchor
+(no sigma explosion across a fabricated gap) + session-day sync (trades
+still open after a loss streak crosses a day boundary). 26 pass.
+
+## 48. Stage-3 Collapse: One Answer (full / half / paper)
+
+**Decision (operator self-review):** the gate had accreted a state machine
+with two operator knobs — `SYNTH_GATE_SUPPRESSION_MODE=suppress|annotate` and
+`SYNTH_GATE_PROVEN_ONLY`/`--proven-only` — on top of the break-even floor, the
+horizon verdict, and the empirical sizing ladder.  Both knobs were removed.
+The collapsed gate answers **one question (full / half / paper) from one
+number (scored outcomes, hit rate, floor)** and never needs configuration:
+
+- **`gated`** — ≥ `MIN_STAGE3_SAMPLES` scored outcomes, rate ≥ the
+  per-trigger **break-even floor**, horizon `calibrated` → **full** (1.0).
+- **`annotated`** — same evidence but horizon not calibrated → **half**.
+- **`suppressed`** — enough samples, rate **below** the floor → **always held
+  back** (`stand_aside`).  The old `annotate` escape hatch is gone: a
+  market-failing call type is never surfaced as a candidate, period.
+- **`insufficient_data`** — fewer than `MIN_STAGE3_SAMPLES` → **paper-only**
+  (0.0), emitted so the operator can watch it and paper-trade it into the
+  journal.
+
+### What was removed
+
+- `SYNTH_GATE_SUPPRESSION_MODE` env knob + `suppression_mode` parameter on
+  `build_stage3_block` / `apply_stage3_gate` / `simulate_gate_walk_forward`.
+  `SUPPRESSION_MODE = "suppress"` remains as a payload constant so dashboards
+  that still read `stage3.suppression_mode` parse cleanly.
+- `SYNTH_GATE_PROVEN_ONLY` env knob, `--proven-only` CLI flag, `proven_only`
+  parameter, and the `proven_only` schema field.  The belt was redundant: the
+  collapsed ladder already makes everything unproven paper-only.
+- The dashboard proven-only toggle (`synth-gate-proven-only` localStorage),
+  the `TradeInstructionPanel` / `MobileTradeSheet` switch, and the
+  `PrimaryCallPanel` `mode:`/`proven-only` badges.  The "Below verified floor"
+  annotate state can no longer render (that state is unreachable).
+
+### What was kept / hardened
+
+- **Fail-closed submit path** (`use-operator-workspace.ts`): a live MT5 order
+  requires `size_multiplier > 0` AND stage-3 authorization.  The
+  authorization is the gate's own `execution_allowed` when present; for
+  stale payloads without it, only `gated`/`annotated` states are inferred
+  allowed — a payload with no stage3 block at all, or one claiming full size
+  on `still_learning` evidence, is blocked.
+- `sizing_ladder` signature simplified (no `proven_only`); `gate_decision`
+  stays pure and shared with the gate backtest, so the replay measures the
+  exact production rules.
+- Env-configurable thresholds kept: `SYNTH_GATE_MIN_SAMPLES`,
+  `SYNTH_GATE_HIT_RATE_FLOOR` (flat fallback), `SYNTH_GATE_BREAK_EVEN_MARGIN`,
+  `SYNTH_GATE_FLOOR_MIN/MAX`, `SYNTH_GATE_SIZE_HALF`.
+
+**Tests:** `tests/test_stage3_gate.py` rewritten (45 pass) — annotate/proven-only
+tests replaced with collapsed-gate assertions (below-floor always suppressed,
+execution_allowed by evidence, legacy env vars ignored, backtest no-lookahead);
+`tests/test_gate_backtest.py` (annotate test → always-suppresses, kwargs
+dropped); `use-operator-workspace.test.tsx` (+proven happy-path live submit,
+below-floor always blocked, stale full-size payload blocked);
+`operator-panels.test.tsx` (Suppressed label, no mode badge);
+`engine-bridge.test.ts` / `contracts.test.ts` schema updates.
+Python: 933 passed + 31 subtests; TS: 203 passed.
+
+## 49. Entry Re-Anchor — a held plan's entry tracks the market
+
+**The operator report:** a sell call was issued at entry 1,865. The market
+turned bearish immediately and never retraced up to 1,865 — the direction
+was right, but a sell limit at the stale entry never filled, so the call was
+untradeable. Root cause: the plan's entry is fixed at the price of the last
+execution candle at emission, and the "stand by the call" restore
+(`_restore_held_plan`) resurrected that ORIGINAL entry verbatim on every
+later read while the market ran past it.
+
+**Fix** (`src/synthetic_trader/live/market_snapshot.py`): when a held
+confirmed plan is restored and the current price has moved BEYOND the entry
+in the call's favor by more than half a stop-distance
+(`HELD_PLAN_REANCHOR_FRACTION = 0.5`), the plan is re-anchored:
+
+- entry = current market price (enter at market);
+- stop/target translated with IDENTICAL distances (same risk geometry, same
+  R:R) so the calibrated band sizing is untouched;
+- payload flags `entry_chased: true`, `original_entry: <issued level>`,
+  `entry_instruction: "market"`, and the guardian reason explains it;
+- guardian memory is re-written to the re-anchored levels so stop-lock /
+  breakeven-trail invalidation watches what the operator actually holds.
+
+No re-anchor when price is still near the entry (the original plan stands —
+an operator already in at 1,865 keeps seeing their plan), or when the target
+zone has already been reached in the call's favor (the plan is done — a
+re-anchor would manufacture nonsense geometry). Adverse trade-through of the
+stop still never restores.
+
+**Tests:** `tests/test_live_market_snapshot.py` — ran-away sell re-anchors
+(geometry preserved, memory updated), near-entry unchanged, target-reached no
+re-anchor, buy mirror. Dashboard renders the amber "Entry re-anchored — enter
+at market" note with the original entry via `entry_chased` /
+`original_entry` / `entry_instruction` (contracts + engine-bridge pass-through).
+
+## 53. MQL5 SynthCallExecutor — Python research lab → MT5 production executor
+
+**The architecture split (as requested):** Python stays the quantitative
+research laboratory (EGARCH band geometry, walk-forward validation, Stage-3
+empirical gate, outcomes journal). MQL5 becomes the production execution /
+visual-testing engine — a thin `SynthCallExecutor.mq5` EA that polls an
+approved-call JSON file and places orders natively with broker SL/TP.
+
+**Why a file handoff cannot slow execution:** the EA polls the call file on a
+1-second `OnTimer` (microseconds of local I/O) and places orders via `CTrade`
+at tick speed. There is no Python→MT5 IPC in the execution path at all — no
+`order_send` round-trip, no `initialize`/`login` handshake per read — which
+removes the recurring "MT5 not connected" / "retry live read" failure modes
+entirely. `OnTick` stays free for position management (breakeven trail, MFE).
+
+**Protocol** (MT5 Common Files folder, `%APPDATA%\MetaQuotes\Terminal\Common\Files`):
+- Python → EA: `synth_calls_<symbol>.json` (single flat record, atomic write).
+- EA → Python: `synth_ea_state_<symbol>.json` (call_id, status, ticket, open
+  price, MFE) so the dashboard and outcomes journal see real fills.
+
+**The honest gate:** `InpRequireProven=true` (default) — the EA refuses every
+call whose `evidence_status` is not `proven`. `still_learning` and
+`suppressed` call types never execute; this is the production form of the
+proven-only execution mode.
+
+**Files:**
+- `mql5/SynthCallExecutor.mq5` — the EA (mini JSON parser, CTrade FOK entry,
+  magic separation, max-spread guard, max-daily-loss halt, call expiry,
+  call_id dedupe persisted across restarts, breakeven trail).
+- `mql5/README.md` — install/compile/attach instructions, protocol, Strategy
+  Tester usage ("Every tick" mode only).
+- `src/synthetic_trader/execution/ea_emitter.py` — builds the call record from
+  a Stage-3-gated alert, atomic write, dedupe, `read_ea_state()`.
+- Live hook: `build_watch_alert` emits when `SYNTH_EA_EMIT=1` (opt-in), volume
+  from `SYNTH_EA_VOLUME` (default 0.2) scaled by the empirical
+  `size_multiplier`.
+- CLI: `emit-ea-call --symbol R_75 [--volume N] [--allow-unproven]`.
+
+**Tests:** `tests/test_ea_emitter.py` (16: gate refusal paths, atomic write,
+dedupe, level validation, state readback, call-id format); 3 live-hook tests
+in `tests/test_live_market_snapshot.py`. Full suite: 1005 passed + 31
+subtests.

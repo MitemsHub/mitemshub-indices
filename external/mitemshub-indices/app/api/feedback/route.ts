@@ -22,6 +22,7 @@ type SignalFeedback = {
   outcome_at: string | null;
   pnl_pips: number | null;
   r_multiple: number | null;
+  executed_at: string | null;
   fed_to_calibration: boolean;
   fed_at: string | null;
 };
@@ -223,6 +224,7 @@ export async function POST(request: Request) {
       outcome_at: null,
       pnl_pips: null,
       r_multiple: null,
+      executed_at: null,
       fed_to_calibration: false,
       fed_at: null,
     };

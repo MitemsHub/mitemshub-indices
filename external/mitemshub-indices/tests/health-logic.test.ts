@@ -30,6 +30,12 @@ function metricsWithMt5(initMs: number): HealthMetrics {
     mt5_server: "test-server",
     mt5_error: null,
     mt5_timing: { init_ms: initMs, login_ms: 500, total_ms: initMs + 500, timestamp: Date.now() },
+    // Not running: the 27-combo threshold matrix expects the UNAFFECTED
+    // crit severities (mt5Alive=false keeps csv_velocity/ticks_stalled at
+    // crit instead of downgrading them to warn).
+    mt5_process_running: false,
+    mt5_last_connected_at: null,
+    mt5_last_test: null,
     csv_size_bytes: 1024,
     csv_ticks: { R_75: 1000, R_100: 2000 },
     health_history: [],
@@ -38,6 +44,8 @@ function metricsWithMt5(initMs: number): HealthMetrics {
     timestamp: Date.now(),    warmup_cache_hits: { R_75: 0, R_100: 0 },
   warmup_cache_misses: { R_75: 0, R_100: 0 },
     csv_cache_hit_ratio: 0,
+    last_warmup_at: null,
+    bridge_unavailable: false,
     pipeline_diagnostics: {
       lastGuardianReason: null,
       lastStderr: null,
@@ -55,6 +63,9 @@ const noMt5Metrics: HealthMetrics = {
   mt5_server: null,
   mt5_error: null,
   mt5_timing: null,
+  mt5_process_running: false,
+  mt5_last_connected_at: null,
+  mt5_last_test: null,
   csv_size_bytes: 0,
   csv_ticks: { R_75: 0, R_100: 0 },
   health_history: [],
@@ -64,6 +75,8 @@ const noMt5Metrics: HealthMetrics = {
   warmup_cache_hits: { R_75: 0, R_100: 0 },
   warmup_cache_misses: { R_75: 0, R_100: 0 },
   csv_cache_hit_ratio: 0,
+  last_warmup_at: null,
+  bridge_unavailable: false,
   pipeline_diagnostics: {
     lastGuardianReason: null,
     lastStderr: null,

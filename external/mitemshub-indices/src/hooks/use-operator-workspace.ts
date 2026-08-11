@@ -120,9 +120,20 @@ function buildUnavailableCall(
   };
 }
 
+// The user's symbol choice must survive page reloads.  The engine's focus
+// symbol is R_75 (Blueberry Volatility 75); persist the selection so a
+// refresh never silently snaps back to R_100.
+const ACTIVE_SYMBOL_KEY = "synth-active-symbol";
+
+function readPersistedSymbol(): SymbolCode {
+  if (typeof localStorage === "undefined") return "R_75";
+  const saved = localStorage.getItem(ACTIVE_SYMBOL_KEY);
+  return saved === "R_75" || saved === "R_100" ? saved : "R_75";
+}
+
 export function useOperatorWorkspace() {
   const [accountMode, setAccountMode] = useState<AccountMode>("own_account");
-  const [activeSymbol, setActiveSymbol] = useState<SymbolCode>("R_100");
+  const [activeSymbol, setActiveSymbol] = useState<SymbolCode>(readPersistedSymbol);
   const [tradingMode, setTradingMode] = useState<TradingMode>("sniper");
   const [loading, setLoading] = useState(false);
   const [loadingElapsedSeconds, setLoadingElapsedSeconds] = useState(0);
@@ -161,26 +172,6 @@ export function useOperatorWorkspace() {
     "idle" | "using_own_account_fallback" | "using_dedicated_prop_account"
   >("idle");
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("paper");
-  // Proven-only execution mode (SYNTH_GATE_PROVEN_ONLY): when on, only
-  // stage3.evidence_status == "proven" calls may place live MT5 orders;
-  // still_learning / no_data / suppressed calls never execute (paper-only),
-  // even in annotate suppression mode.  Persisted per-browser so the
-  // operator's risk preference survives refreshes.
-  const [provenOnly, setProvenOnly] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem("synth-gate-proven-only") === "1";
-    } catch {
-      return false;
-    }
-  });
-  const toggleProvenOnly = (value: boolean) => {
-    setProvenOnly(value);
-    try {
-      localStorage.setItem("synth-gate-proven-only", value ? "1" : "0");
-    } catch {
-      // storage unavailable — in-memory toggle still applies
-    }
-  };
   const [trackedPosition, setTrackedPosition] = useState<TrackedPosition | null>(null);
   const [executing, setExecuting] = useState(false);
   const [executionError, setExecutionError] = useState<string | null>(null);
@@ -189,6 +180,16 @@ export function useOperatorWorkspace() {
   const [cachedCallError, setCachedCallError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const successToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Latest-value refs for the tick-stream freshness effect ────
+  // That effect mounts once and must never read stale closures, so it
+  // reaches live values through these refs instead of captured state.
+  const currentCallRef = useRef<FreshCallResponse | null>(null);
+  const activeSymbolRef = useRef<SymbolCode>(activeSymbol);
+  const loadingRef = useRef(false);
+  const runSymbolRef = useRef<
+    ((symbol: SymbolCode, silent?: boolean) => Promise<void>) | null
+  >(null);
 
   // Clean up success toast timer on unmount
   useEffect(() => {
@@ -436,17 +437,25 @@ export function useOperatorWorkspace() {
       setLoading(true);
       setLoadingElapsedSeconds(0);
       setActiveSymbol(symbol);
+      try {
+        localStorage.setItem(ACTIVE_SYMBOL_KEY, symbol);
+      } catch {
+        // Non-fatal: persistence is best-effort (private mode, storage full).
+      }
       setGuardianStatus(null);
       setCurrentCall(null);
       setIntelligence(null);
     }
     setCachedCallError(null);
 
-    // ── Auto-dismiss loading after 45 seconds ──────────────────
-    // The Python subprocess has a 35s timeout (LIVE_SNAPSHOT_TIMEOUT_MS).
-    // We use 45s here to give the backend 10 seconds of headroom so the
-    // frontend never kills the request before the backend finishes.
-    const abortTimeout = setTimeout(() => controller.abort(), 45_000);
+    // ── Auto-dismiss loading after 90 seconds ──────────────────
+    // The Python subprocess has a 60s timeout (LIVE_SNAPSHOT_TIMEOUT_MS)
+    // and the bridge retries once (~2 x 25s under load).  Aborting at 45s
+    // killed the request mid-retry and surfaced the dreaded "Retry live
+    // read" even when the engine was fine — the frontend must outlive the
+    // backend's own budget so the real result (success or honest
+    // stand-aside) arrives instead of an AbortError fallback.
+    const abortTimeout = setTimeout(() => controller.abort(), 90_000);
 
     try {
       if (typeof fetch === "function") {
@@ -537,6 +546,22 @@ export function useOperatorWorkspace() {
       if (!silent) setLoading(false);
     }
 
+    // ── Keep-last-good on background refresh failure ─────────────
+    // A silent background refresh (mount auto-refresh, tick-driven
+    // refresh, 10-minute timer) must NEVER destroy a working plan: if
+    // the fresh Python read fails but we already hold a usable plan,
+    // keep it and only surface a note.  Only an explicit manual refresh
+    // that fails replaces the plan with the honest "Live read
+    // unavailable" fallback — the user explicitly asked for a fresh read
+    // there.  Without this, a flaky background read (e.g. a 20-80s
+    // subprocess timeout while the market is idle) wiped a perfectly
+    // good confirmed plan and the dashboard showed "Live read
+    // unavailable" between manual reads.
+    if (silent && currentCall && currentCall.guardian_state !== "unavailable") {
+      setCachedCallError("Background refresh failed — keeping the last verified plan.");
+      return;
+    }
+
     const fallback = buildUnavailableCall(
       symbol,
       accountMode,
@@ -559,6 +584,13 @@ export function useOperatorWorkspace() {
       ),
     );
   };
+
+  // Keep the latest values reachable by the one-shot tick-stream effect.
+  currentCallRef.current = currentCall;
+  activeSymbolRef.current = activeSymbol;
+  loadingRef.current = loading;
+  runSymbolRef.current = runSymbol;
+
   const hasAutoRun = useRef(false);
   useEffect(() => {
     if (hasAutoRun.current) return;
@@ -573,10 +605,15 @@ export function useOperatorWorkspace() {
         const response = await fetch(`/api/calls/latest?symbol=${activeSymbol}`);
         if (response.ok) {
           const cached = (await response.json()) as FreshCallResponse;
-          if (cached && cached.call && cached.call !== "stand_aside" && cached.guardian_state !== "unavailable") {
-            // Cached call exists and is a real signal — use it immediately.
-            // The stale-refresh effect below silently re-reads it if older
-            // than 3 minutes, so the plan always self-heals.
+          if (cached && cached.guardian_state !== "unavailable") {
+            // ANY journaled plan is usable for the initial render — including
+            // an honest stand_aside.  The market often has no clean setup, and
+            // spawning a fresh 5-45s Python read on every mount just to
+            // re-confirm "still no setup" is exactly the slow "Pulling
+            // data…" experience the operator complained about.  The
+            // stale-refresh effect below silently re-reads when the entry
+            // ages past 3 minutes, so the plan always self-heals without a
+            // blocking spinner on load.
             setCurrentCall(cached);
             setGuardianStatus({
               symbol: cached.symbol,
@@ -597,11 +634,11 @@ export function useOperatorWorkspace() {
         setCachedCallError("Cached call unavailable — refreshing live data");
       }
 
-      // No usable cached call (missing, stand_aside, or unavailable): spawn a
-      // fresh read so the trade plan populates automatically on load — the
-      // user should never be stranded on a "Retry live read" placeholder.
+      // No usable cached call (empty journal or unavailable): spawn a fresh
+      // read so the trade plan populates automatically on load — the user
+      // should never be stranded on a "Retry live read" placeholder.
       // Non-silent so the "Analyzing the market…" state shows while the
-      // Python engine runs (takes ~15-35s).
+      // Python engine runs.
       void runSymbol(activeSymbol);
     }
 
@@ -616,7 +653,7 @@ export function useOperatorWorkspace() {
   useEffect(() => {
     if (hasAutoRefreshedOnMount.current) return;
     if (!currentCall) return;
-    if (currentCall.call === "stand_aside" || currentCall.guardian_state === "unavailable") return;
+    if (currentCall.guardian_state === "unavailable") return;
     if (currentCall.call_age_seconds != null && currentCall.call_age_seconds > 180) {
       hasAutoRefreshedOnMount.current = true;
       // Silently refresh — don't show loading state
@@ -633,7 +670,7 @@ export function useOperatorWorkspace() {
   // When a cached call is older than 10 minutes, silently refresh in the background
   // so the user eventually gets fresh data without manual intervention.
   useEffect(() => {
-    if (!currentCall || currentCall.call === "stand_aside" || currentCall.call_age_seconds == null) return;
+    if (!currentCall || currentCall.guardian_state === "unavailable" || currentCall.call_age_seconds == null) return;
 
     const STALE_THRESHOLD = 600; // 10 minutes in seconds
     const CHECK_INTERVAL = 60_000; // Check every 60 seconds
@@ -656,6 +693,149 @@ export function useOperatorWorkspace() {
 
     return () => clearInterval(intervalId);
   }, [currentCall?.call_age_seconds, loading, activeSymbol]);
+
+  // ── Tick-stream plan freshness ────────────────────────────────
+  // R_75 and R_100 ticks already stream through the shared /api/ticks
+  // EventSource feed that powers the price chart.  Use that SAME feed to
+  // keep the trade plan fresh between manual reads:
+  //   • the plan's displayed price (current_close) follows live ticks,
+  //   • while ticks are actually flowing and the plan is older than 4
+  //     minutes, a silent background refresh re-reads the engine
+  //     (throttled to once per 4 minutes), so the plan never sits stale
+  //     waiting for a manual Refresh.
+  // Plan age is computed live from generated_at — the stored
+  // call_age_seconds field is frozen at journal-write time, so the older
+  // 10-minute timer never fires for journaled plans.
+  // When EventSource is unavailable (tests, old browsers) or the server
+  // rejects the stream, fall back to a lightweight 15s /api/ticks poll.
+  useEffect(() => {
+    if (typeof EventSource === "undefined" || typeof fetch !== "function") {
+      return;
+    }
+
+    let es: EventSource | null = null;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let disposed = false;
+
+    const lastTickAt: Record<string, number> = { R_75: 0, R_100: 0 };
+    let lastTickDrivenRefreshAt = 0;
+
+    const TICK_REFRESH_AGE_MS = 4 * 60_000; // plan older than 4 min
+    const TICK_FLOW_WINDOW_MS = 90_000; // ticks seen within the last 90s
+    const TICK_REFRESH_MIN_INTERVAL_MS = 4 * 60_000;
+
+    function refreshIfDue() {
+      const call = currentCallRef.current;
+      if (!call || call.guardian_state === "unavailable") return;
+      const planMs = Date.parse(call.generated_at);
+      if (!Number.isFinite(planMs)) return;
+      if (Date.now() - planMs < TICK_REFRESH_AGE_MS) return;
+      const symbol = activeSymbolRef.current;
+      const lastTick = lastTickAt[symbol];
+      if (!lastTick || Date.now() - lastTick > TICK_FLOW_WINDOW_MS) return;
+      const now = Date.now();
+      if (now - lastTickDrivenRefreshAt < TICK_REFRESH_MIN_INTERVAL_MS) return;
+      if (loadingRef.current || autoRefreshRunningRef.current) return;
+      lastTickDrivenRefreshAt = now;
+      autoRefreshRunningRef.current = true;
+      void runSymbolRef.current?.(symbol, true).finally(() => {
+        autoRefreshRunningRef.current = false;
+      });
+    }
+
+    function handleTick(symbol: string, epoch: number, price: number) {
+      if (symbol !== "R_75" && symbol !== "R_100") return;
+      lastTickAt[symbol] = Date.now();
+      if (symbol !== activeSymbolRef.current) return;
+
+      // Live-update the plan's displayed price — no Python read needed.
+      setCurrentCall((previous) => {
+        if (!previous) return previous;
+        const planMs = Date.parse(previous.generated_at);
+        if (!Number.isFinite(planMs) || epoch * 1000 < planMs) return previous;
+        if (previous.current_close === price) return previous;
+        return { ...previous, current_close: price };
+      });
+      setGuardianStatus((previous) =>
+        previous && previous.current_close !== price
+          ? { ...previous, current_close: price }
+          : previous,
+      );
+
+      refreshIfDue();
+    }
+
+    function startPolling() {
+      if (pollTimer) return;
+      const pollOnce = async () => {
+        try {
+          const res = await fetch("/api/ticks?limit=10");
+          if (!res.ok) return;
+          const json = (await res.json()) as {
+            ticks?: Record<string, Array<{ epoch: number; price: number }>>;
+          };
+          const symbol = activeSymbolRef.current;
+          const ticks = json.ticks?.[symbol];
+          const last =
+            ticks && ticks.length > 0 ? ticks[ticks.length - 1] : null;
+          if (last) handleTick(symbol, last.epoch, last.price);
+        } catch {
+          // A failed poll never destroys state — keep the last known price.
+        }
+      };
+      void pollOnce();
+      pollTimer = setInterval(() => void pollOnce(), 15_000);
+    }
+
+    function openStream() {
+      if (disposed) return;
+      try {
+        es = new EventSource("/api/ticks?stream=true&limit=10");
+      } catch {
+        startPolling();
+        return;
+      }
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data) as {
+            type?: string;
+            symbol?: string;
+            ticks?: Array<{ epoch: number; price: number }>;
+            tick?: { epoch: number; price: number };
+          };
+          if (
+            data.type === "initial" &&
+            data.symbol &&
+            Array.isArray(data.ticks)
+          ) {
+            const last = data.ticks[data.ticks.length - 1];
+            if (last) handleTick(data.symbol, last.epoch, last.price);
+          } else if (data.type === "tick" && data.symbol && data.tick) {
+            handleTick(data.symbol, data.tick.epoch, data.tick.price);
+          } else if (data.type === "error") {
+            es?.close();
+            es = null;
+            startPolling();
+          }
+        } catch {
+          // Ignore malformed events.
+        }
+      };
+      es.onerror = () => {
+        es?.close();
+        es = null;
+        startPolling();
+      };
+    }
+
+    openStream();
+
+    return () => {
+      disposed = true;
+      es?.close();
+      if (pollTimer) clearInterval(pollTimer);
+    };
+  }, []);
 
   // ── Periodic trade outcome resolution ───────────────────────
   // Every 5 minutes, trigger bulk_resolve to check whether executed
@@ -727,32 +907,26 @@ export function useOperatorWorkspace() {
     if (!currentCall || currentCall.trade_status !== "valid" || !currentCall.entry) return;
     if (!currentCall.stop_loss || !currentCall.take_profit) return;
 
-    // Stage-3 empirical sizing: risk scales with empirical confidence.  A
-    // call with no empirical verdict yet (or evidence below the floor) is
-    // paper-only — it may be paper-traded (that generates the outcomes the
-    // gate needs) but must never place a real MT5 order.  The one escape
-    // hatch is annotate suppression mode (SYNTH_GATE_SUPPRESSION_MODE=
-    // annotate): the operator explicitly chose to keep below-floor/unverified
-    // types actionable, so the block is lifted (the scaled volume still
-    // applies).  Proven-only mode is the strictest belt and OVERRIDES the
-    // annotate escape hatch: when on, only evidence_status == "proven"
-    // calls may execute — still_learning / no_data / suppressed never place
-    // a live order, regardless of suppression mode.
+    // Stage-3 empirical sizing: risk scales with empirical confidence.  The
+    // collapsed gate answers one question (full / half / paper): a call with
+    // no empirical verdict yet (or evidence below the floor) sizes 0.0 — it
+    // may be paper-traded (that generates the outcomes the gate needs) but
+    // must never place a real MT5 order.  There is no annotate escape hatch
+    // and no proven-only belt anymore.  Fail closed: a payload with no
+    // stage3 authorization (missing block, the gate marked it not
+    // executable, or an internally inconsistent stale payload) can never
+    // place a live order even if it claims a positive size.
     const sizeMultiplier = currentCall.size_multiplier ?? 1;
-    const annotateMode =
-      currentCall.stage3?.suppression_mode === "annotate";
-    const evidenceStatus = currentCall.stage3?.evidence_status;
-    // Fail closed: unknown/missing evidence is treated as not-proven, so a
-    // payload with no stage3 block at all can never slip past the mode.
-    const provenOnlyBlocks = provenOnly && evidenceStatus !== "proven";
-    if (executionMode === "live_mt5" && (sizeMultiplier <= 0 || provenOnlyBlocks) && !(annotateMode && !provenOnly)) {
+    const stage3Block = currentCall.stage3;
+    const explicitAllowed = stage3Block?.execution_allowed;
+    const allowed =
+      explicitAllowed !== undefined
+        ? explicitAllowed
+        : stage3Block != null &&
+          (stage3Block.state === "gated" || stage3Block.state === "annotated");
+    if (executionMode === "live_mt5" && (sizeMultiplier <= 0 || !allowed)) {
       setExecutionError(
-        provenOnly
-          ? "Proven-only execution is ON: this call type is not market-proven yet (" +
-            `${evidenceStatus ?? "no_data"}) — no live MT5 order was placed. ` +
-            "Paper-trade it to build the scored outcomes the gate needs; only " +
-            "evidence_status == 'proven' call types may execute live."
-          : "This call type is paper-only (no empirical verdict yet, or below the verified floor) — no live MT5 order was placed. Run it on paper to build the scored outcomes the gate needs, or set SYNTH_GATE_SUPPRESSION_MODE=annotate to keep unverified types tradeable.",
+        "This call type is paper-only (no empirical verdict yet, or below the verified floor) — no live MT5 order was placed. Run it on paper to build the scored outcomes the gate needs; only market-verified call types size up to live size.",
       );
       return;
     }
@@ -1027,8 +1201,6 @@ return {
   propConnectionStatus,
   propProfile,
   requestPropMode,
-  provenOnly,
-  setProvenOnly: toggleProvenOnly,
   setAccountMode,
   setExecutionMode,
   setTradingMode,

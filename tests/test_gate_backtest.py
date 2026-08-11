@@ -51,7 +51,6 @@ class SimulateGateWalkForwardTests(unittest.TestCase):
             calls=calls,
             min_samples=10,
             hit_rate_floor=0.5,
-            suppression_mode="suppress",
         )
         # Outcomes resolve at epoch + 60s.  Call 0 (t=0) resolves at 60; the
         # earliest emission after that is call 1 at t=100 -> sees only call 0.
@@ -72,7 +71,6 @@ class SimulateGateWalkForwardTests(unittest.TestCase):
             calls=calls,
             min_samples=10,
             hit_rate_floor=0.5,
-            suppression_mode="suppress",
         )
         good = [c for c in calls if c.trigger_type == "good"]
         bad = [c for c in calls if c.trigger_type == "bad"]
@@ -84,7 +82,10 @@ class SimulateGateWalkForwardTests(unittest.TestCase):
         self.assertEqual(bad[-1].gate_state, "suppressed")
         self.assertIn(good[-1].gate_state, ("gated", "annotated"))
 
-    def test_annotate_mode_never_suppresses(self) -> None:
+    def test_collapsed_gate_always_suppresses_below_floor(self) -> None:
+        """The annotate escape hatch is gone: a below-floor trigger is ALWAYS
+        suppressed, never merely annotated.
+        """
         calls = [
             _call(epoch=float(i * 100), trigger="bad", outcome="stop_hit")
             for i in range(15)
@@ -93,10 +94,9 @@ class SimulateGateWalkForwardTests(unittest.TestCase):
             calls=calls,
             min_samples=10,
             hit_rate_floor=0.5,
-            suppression_mode="annotate",
         )
-        self.assertEqual(calls[-1].gate_state, "annotated")  # shown with honest rate
-        self.assertEqual(calls[-1].evidence_status, "suppressed")  # data says below floor
+        self.assertEqual(calls[-1].gate_state, "suppressed")
+        self.assertEqual(calls[-1].evidence_status, "suppressed")
 
     def test_break_even_floor_stamped_on_calls(self) -> None:
         """With hit_rate_floor=None the walk-forward computes the per-trigger
@@ -112,7 +112,6 @@ class SimulateGateWalkForwardTests(unittest.TestCase):
             calls=calls,
             min_samples=10,
             hit_rate_floor=None,
-            suppression_mode="suppress",
         )
         # First call: no prior RR -> conservative flat fallback, RR unknown.
         self.assertEqual(calls[0].avg_rr_at_emission, None)
@@ -125,7 +124,6 @@ class SimulateGateWalkForwardTests(unittest.TestCase):
             calls=calls,
             min_samples=10,
             hit_rate_floor=0.5,
-            suppression_mode="suppress",
         )
         self.assertEqual(calls[1].avg_rr_at_emission, None)
         self.assertEqual(calls[1].floor_at_emission, 0.5)
@@ -148,7 +146,6 @@ class SimulateGateWalkForwardTests(unittest.TestCase):
             calls=calls,
             min_samples=4,
             hit_rate_floor=None,  # break-even default
-            suppression_mode="suppress",
         )
         # Call 6 (t=600) sees the 6 prior resolutions (60..540): 2/6 = 33%.
         self.assertEqual(calls[6].samples_at_emission, 6)
@@ -165,7 +162,6 @@ class SimulateGateWalkForwardTests(unittest.TestCase):
             calls=calls,
             min_samples=4,
             hit_rate_floor=0.5,
-            suppression_mode="suppress",
         )
         self.assertEqual(calls[6].gate_state, "suppressed")
         self.assertEqual(calls[6].evidence_status, "suppressed")
@@ -199,7 +195,6 @@ class SimulateGateWalkForwardTests(unittest.TestCase):
             calls=calls,
             min_samples=2,
             hit_rate_floor=None,
-            suppression_mode="suppress",
         )
         three = [c for c in calls if c.trigger_type == "three_r"]
         one = [c for c in calls if c.trigger_type == "one_r"]

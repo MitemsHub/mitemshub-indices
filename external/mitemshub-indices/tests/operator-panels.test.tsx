@@ -407,6 +407,9 @@ describe("PrimaryCallPanel", () => {
       entry: 1783.2,
       stop_loss: 1785.4,
       take_profit: 1778.0,
+      entry_area: null,
+      stop_area: null,
+      target_area: null,
       reward_risk: 2.1,
       current_close: 1783.0,
       guardian_state: "actionable" as const,
@@ -486,7 +489,6 @@ describe("PrimaryCallPanel", () => {
             min_samples: 10,
             hit_rate_floor: 0.5,
             suppression_mode: "suppress",
-            proven_only: false,
             execution_allowed: true,
             below_floor: false,
             suppressed_call: null,
@@ -564,7 +566,6 @@ describe("PrimaryCallPanel", () => {
             min_samples: 10,
             hit_rate_floor: 0.5,
             suppression_mode: "suppress",
-            proven_only: false,
             execution_allowed: true,
             below_floor: false,
             suppressed_call: null,
@@ -590,18 +591,18 @@ describe("PrimaryCallPanel", () => {
     expect(screen.getByText(/hit rate below floor/)).toBeInTheDocument();
   });
 
-  it("shows a below-floor call type as 'Below verified floor' in annotate mode", () => {
+  it("shows a below-floor call type as Suppressed (collapsed gate — always held back)", () => {
     render(
       <PrimaryCallPanel
         call={{
           symbol: "R_100",
-          call: "sell_candidate",
+          call: "stand_aside",
           alert_type: "setup_candidate",
           trade_status: "valid",
           confidence: 0.3,
           regime: "range",
           direction_bias: "sell",
-          why: "below floor but annotate mode keeps it visible",
+          why: "below the verified floor — the call type is suppressed",
           wait_for: "wait for confirmation",
           decision_summary: null,
           entry_area: null,
@@ -622,7 +623,7 @@ describe("PrimaryCallPanel", () => {
           prop_remaining_daily_buffer: null,
           prop_remaining_overall_buffer: null,
           stage3: {
-            state: "annotated",
+            state: "suppressed",
             evidence_status: "suppressed",
             trigger_type: "breakout_fade",
             empirical_target_hit_rate: 0.3,
@@ -635,12 +636,11 @@ describe("PrimaryCallPanel", () => {
             display_confidence: 0.3,
             min_samples: 10,
             hit_rate_floor: 0.5,
-            suppression_mode: "annotate",
-            proven_only: false,
-            execution_allowed: true,
+            suppression_mode: "suppress",
+            execution_allowed: false,
             below_floor: true,
-            suppressed_call: null,
-            note: "45 scored outcomes; target-hit rate 30% is BELOW the 50% floor — suppression mode is 'annotate'.",
+            suppressed_call: "sell_candidate",
+            note: "45 scored outcomes; target-hit rate 30% is BELOW the 50% floor — breakout_fade calls are suppressed until the market-verified rate improves.",
           },
         }}
         guardianStatus={null}
@@ -648,11 +648,11 @@ describe("PrimaryCallPanel", () => {
       />,
     );
 
-    // Annotate mode: the failing type is still shown, honestly labeled.
-    expect(screen.getByText("Below verified floor")).toBeInTheDocument();
-    expect(screen.getByText(/mode: annotate/i)).toBeInTheDocument();
-    expect(screen.getByText(/still shown/i)).toBeInTheDocument();
-    expect(screen.queryByText(/held back/i)).not.toBeInTheDocument();
+    // Collapsed gate: the failing type is suppressed (held back), never
+    // merely annotated — no mode badge, no annotate escape copy.
+    expect(screen.getByText("Suppressed")).toBeInTheDocument();
+    expect(screen.getByText(/held back/i)).toBeInTheDocument();
+    expect(screen.queryByText(/mode: annotate/i)).not.toBeInTheDocument();
   });
 
   it("suppresses calls whose call type is below the verified floor and explains why", () => {
@@ -701,7 +701,6 @@ describe("PrimaryCallPanel", () => {
             min_samples: 10,
             hit_rate_floor: 0.5,
             suppression_mode: "suppress",
-            proven_only: false,
             execution_allowed: false,
             below_floor: false,
             suppressed_call: "sell_candidate",
@@ -774,7 +773,6 @@ describe("PrimaryCallPanel", () => {
             min_samples: 10,
             hit_rate_floor: 0.5,
             suppression_mode: "suppress",
-            proven_only: false,
             execution_allowed: false,
             below_floor: false,
             suppressed_call: "buy_candidate",
@@ -1206,6 +1204,10 @@ describe("HealthDashboard", () => {
       warmup_cache_hits: { R_75: 0, R_100: 0 },
       warmup_cache_misses: { R_75: 0, R_100: 0 },
       csv_cache_hit_ratio: 0.95,
+      health_history: [],
+      snapshot_phases: null,
+      last_warmup_at: null,
+      bridge_unavailable: false,
       pipeline_diagnostics: {
         lastGuardianReason: null,
         lastStderr: null,
@@ -1243,6 +1245,10 @@ describe("HealthDashboard", () => {
       warmup_cache_hits: { R_75: 0, R_100: 0 },
       warmup_cache_misses: { R_75: 0, R_100: 0 },
       csv_cache_hit_ratio: 0.95,
+      health_history: [],
+      snapshot_phases: null,
+      last_warmup_at: null,
+      bridge_unavailable: false,
       pipeline_diagnostics: {
         lastGuardianReason: null,
         lastStderr: null,
@@ -1297,6 +1303,19 @@ describe("HealthDashboard", () => {
       timestamp: Date.now(),
       warmup_cache_hits: { R_75: 0, R_100: 0 },
       warmup_cache_misses: { R_75: 0, R_100: 0 },
+      health_history: [],
+      snapshot_phases: null,
+      csv_cache_hit_ratio: 0,
+      last_warmup_at: null,
+      bridge_unavailable: false,
+      pipeline_diagnostics: {
+        lastGuardianReason: null,
+        lastStderr: null,
+        lastRetryCount: 0,
+        lastError: null,
+        lastUpdatedAt: null,
+        staleDataSince: null,
+      },
     };
 
     render(<HealthDashboard initialData={mockMetrics} />);
@@ -1332,6 +1351,19 @@ describe("HealthDashboard", () => {
       timestamp: Date.now(),
       warmup_cache_hits: { R_75: 0, R_100: 0 },
       warmup_cache_misses: { R_75: 0, R_100: 0 },
+      health_history: [],
+      snapshot_phases: null,
+      csv_cache_hit_ratio: 0,
+      last_warmup_at: null,
+      bridge_unavailable: false,
+      pipeline_diagnostics: {
+        lastGuardianReason: null,
+        lastStderr: null,
+        lastRetryCount: 0,
+        lastError: null,
+        lastUpdatedAt: null,
+        staleDataSince: null,
+      },
     };
 
     render(<HealthDashboard initialData={mockMetrics} />);
@@ -1361,6 +1393,19 @@ describe("HealthDashboard", () => {
       timestamp: Date.now(),
       warmup_cache_hits: { R_75: 0, R_100: 0 },
       warmup_cache_misses: { R_75: 0, R_100: 0 },
+      health_history: [],
+      snapshot_phases: null,
+      csv_cache_hit_ratio: 0,
+      last_warmup_at: null,
+      bridge_unavailable: false,
+      pipeline_diagnostics: {
+        lastGuardianReason: null,
+        lastStderr: null,
+        lastRetryCount: 0,
+        lastError: null,
+        lastUpdatedAt: null,
+        staleDataSince: null,
+      },
     };
 
     render(<HealthDashboard initialData={mockMetrics} />);
@@ -1391,6 +1436,10 @@ describe("HealthDashboard", () => {
       warmup_cache_hits: { R_75: 0, R_100: 0 },
       warmup_cache_misses: { R_75: 0, R_100: 0 },
       csv_cache_hit_ratio: 0,
+      health_history: [],
+      snapshot_phases: null,
+      last_warmup_at: null,
+      bridge_unavailable: false,
       pipeline_diagnostics: {
         lastGuardianReason: null,
         lastStderr: null,

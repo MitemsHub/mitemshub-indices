@@ -19,11 +19,9 @@ type MobileTradeSheetProps = {
   trackedPosition: TrackedPosition | null;
   executing: boolean;
   executionMode: ExecutionMode;
-  provenOnly?: boolean;
   onSubmitTrade: () => void;
   onCloseTrade: () => void;
   onSetExecutionMode: (mode: ExecutionMode) => void;
-  onSetProvenOnly?: (value: boolean) => void;
   onClose: () => void;
 };
 
@@ -36,11 +34,9 @@ export function MobileTradeSheet({
   trackedPosition,
   executing,
   executionMode,
-  provenOnly = false,
   onSubmitTrade,
   onCloseTrade,
   onSetExecutionMode,
-  onSetProvenOnly = () => {},
   onClose,
 }: MobileTradeSheetProps) {
   const sheetRef = useRef<HTMLDivElement>(null);
@@ -275,11 +271,9 @@ export function MobileTradeSheet({
                 trackedPosition={trackedPosition}
                 executing={executing}
                 executionMode={executionMode}
-                provenOnly={provenOnly}
                 onExecute={() => { onSubmitTrade(); onClose(); }}
                 onClose={onCloseTrade}
                 onSetExecutionMode={onSetExecutionMode}
-                onSetProvenOnly={onSetProvenOnly}
               />
               {/* Fade gradient at bottom edge — visible only when content
                   overflows and isn't scrolled to the very end. A linear

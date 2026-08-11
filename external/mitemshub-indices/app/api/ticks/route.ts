@@ -14,6 +14,15 @@ import { join } from "node:path";
 
 type Tick = { epoch: number; price: number };
 
+// ── Outlier guard ────────────────────────────────────────────
+// The collector intermittently appends junk ticks (~6950 for R_75 vs the
+// real ~1850 — a 3.7x error).  The Python candle builder already rejects
+// >50% median deviations; the live price feed must do the same or the
+// dashboard shows a bogus "V75: 6,922" price.  MAX_DEVIATION matches the
+// candle builder's rule, and each symbol keeps a reference price (the last
+// accepted tick) so single-line reads can also reject junk.
+const MAX_DEVIATION = 0.5;
+
 // ── Byte-offset cache for incremental tick reads ─────────────
 // Tracks the last-known file size per CSV path so `readLastLine`
 // only reads new bytes appended since the last call. This reduces
@@ -22,8 +31,30 @@ type TickByteCache = {
   lastFileSize: number;
   lastLine: Tick | null;
   lastMtime: number;
+  referencePrice: number | null;
 };
 const tickByteCache = new Map<string, TickByteCache>();
+
+function isOutlierPrice(price: number, reference: number | null): boolean {
+  if (reference == null || reference <= 0) return false;
+  return Math.abs(price - reference) / reference > MAX_DEVIATION;
+}
+
+/**
+ * Filter a parsed tick against the reference price; a junk tick returns
+ * null (and does NOT update the reference).  The first valid tick seeds
+ * the reference.
+ */
+function sanitizeTick(
+  tick: Tick | null,
+  reference: number | null,
+): { tick: Tick | null; reference: number | null } {
+  if (!tick) return { tick: null, reference };
+  if (isOutlierPrice(tick.price, reference)) {
+    return { tick: null, reference };
+  }
+  return { tick, reference: reference == null ? tick.price : reference };
+}
 
 /**
  * Read the last N ticks from a CSV tick file.
@@ -59,13 +90,33 @@ async function readLastTicks(
       const startIdx =
         lines.length > 0 && !lines[0].trim().match(/^\d/) ? 1 : 0;
 
-      const ticks: Tick[] = [];
-      for (let i = lines.length - 1; i >= startIdx && ticks.length < limit; i--) {
+      // Parse from the newest line backward so the reference price is
+      // seeded by the most recent VALID tick, then filter junk with the
+      // same >50% deviation rule the engine's candle builder uses.
+      let reference: number | null = null;
+      const rawTicks: Tick[] = [];
+      for (let i = lines.length - 1; i >= startIdx && rawTicks.length < limit; i--) {
         const tick = parseTickLine(lines[i].trim());
-        if (tick) ticks.push(tick);
+        if (tick) {
+          const { tick: clean, reference: ref } = sanitizeTick(tick, reference);
+          reference = ref;
+          if (clean) rawTicks.push(clean);
+        }
       }
-      ticks.reverse();
-      return ticks;
+      rawTicks.reverse();
+      // Seed the byte cache so readLastLine inherits a sane reference price
+      // (and the last clean tick) instead of starting from null on a cold
+      // cache — otherwise a single junk first line could poison the feed.
+      const s = await stat(csvPath);
+      if (rawTicks.length > 0) {
+        tickByteCache.set(csvPath, {
+          lastFileSize: s.size,
+          lastLine: rawTicks[rawTicks.length - 1],
+          lastMtime: s.mtimeMs,
+          referencePrice: reference,
+        });
+      }
+      return rawTicks;
     } finally {
       await handle.close();
     }
@@ -128,7 +179,12 @@ async function readLastLine(csvPath: string): Promise<Tick | null> {
       const lines = tail.split("\n").filter(Boolean);
       const lastLine = lines[lines.length - 1]?.trim();
 
-      const tick = lastLine ? parseTickLine(lastLine) : null;
+      const parsed = lastLine ? parseTickLine(lastLine) : null;
+      const ref =
+        cached && cached.lastFileSize === fileSize
+          ? cached.referencePrice
+          : cached?.referencePrice ?? null;
+      const { tick, reference } = sanitizeTick(parsed, ref);
 
       // Track cache hit/miss for diagnostics
       if (cached && fileSize === cached.lastFileSize && mtime === cached.lastMtime) {
@@ -142,6 +198,7 @@ async function readLastLine(csvPath: string): Promise<Tick | null> {
         lastFileSize: fileSize,
         lastLine: tick,
         lastMtime: mtime,
+        referencePrice: reference,
       });
 
       return tick;

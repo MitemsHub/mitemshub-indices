@@ -9,7 +9,7 @@ import {
 
 export async function POST(request: Request) {
   const controller = new AbortController();
-  let symbol: string = "R_100";
+  let symbol: string = "R_75";
   let tradingMode: "sniper" = "sniper";
 
   try {

@@ -67,7 +67,26 @@ class TickStoreTests(unittest.TestCase):
         kept = _apply_scale_guard(incoming, existing)
 
         self.assertEqual([t.price for t in kept], [1791.55, 1812.03])
-        self.assertGreaterEqual(SCALE_GUARD_MAX_RATIO, 4.0)
+        # The guard MUST catch the real-world Deriv/MT5 mismatch: Deriv's R_75
+        # ~6,900-7,400 vs Blueberry SYN75 ~1,800-1,980 is only ~3.7x — a 4.0
+        # threshold was too loose and let the exact pollution it was built to
+        # stop sail through (observed in data/R_75_ticks.csv).  The threshold
+        # must be well under 3.7x while staying far above real intraday range
+        # (~1.1x, p99/p1 = 1.06 on the 9.5-day corpus).
+        self.assertLess(SCALE_GUARD_MAX_RATIO, 3.5)
+        self.assertGreaterEqual(SCALE_GUARD_MAX_RATIO, 2.0)
+
+    def test_scale_guard_catches_real_deriv_ratio(self) -> None:
+        """The exact live mismatch — Deriv R_75 ~6,920 appended into a
+        Blueberry SYN75 corpus ~1,855 (3.73x) — must be dropped."""
+        existing = [Tick("R_75", 1_700_000_000 + i, 1855.0 + (i % 7)) for i in range(50)]
+        incoming = [
+            Tick("R_75", 1_700_000_100 + i, 6917.0 + i) for i in range(5)
+        ]
+
+        kept = _apply_scale_guard(incoming, existing)
+
+        self.assertEqual(kept, [])
 
     def test_scale_guard_passes_small_corpus_through(self) -> None:
         """A corpus too small to judge scale (<20 ticks) must not reject anything."""

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from synthetic_trader.domain import Tick
 from synthetic_trader import __version__ as _engine_version
+from synthetic_trader.execution.mt5_guard import Mt5SingleFlightLock
 
 
 # ── Engine version ────────────────────────────────────────────────────
@@ -132,6 +133,7 @@ def get_health_metrics(symbol: str = "R_100") -> dict:
 # redundant directory/registry scanning when the terminal path is unknown.
 _cached_terminal_path: str | None = None
 _cached_terminal_path_attempted: bool = False
+_cached_terminal_env: str = ""
 
 
 def _mt5_available() -> bool:
@@ -295,12 +297,30 @@ def _find_best_terminal(broker_keywords: list[str]) -> str | None:
     return None
 
 
-def _resolve_mt5_terminal_path() -> str | None:
-    global _cached_terminal_path, _cached_terminal_path_attempted
+def _terminal_env_fingerprint() -> str:
+    """Env values the resolution depends on — cache is only valid for the
+    same fingerprint, so a changed SYNTHETIC_MT5_* env (e.g. between tests)
+    invalidates the module-global cache."""
+    return "|".join(
+        [
+            os.getenv("SYNTHETIC_MT5_TERMINAL_PATH", "").strip(),
+            os.getenv("SYNTHETIC_MT5_SERVER", "").strip(),
+        ]
+    )
 
-    # Return cached result if we've already resolved
-    if _cached_terminal_path_attempted:
+
+def _resolve_mt5_terminal_path() -> str | None:
+    global _cached_terminal_path, _cached_terminal_path_attempted, _cached_terminal_env
+
+    # Return cached result only when the resolving env is unchanged (the
+    # cache must not leak a resolution from a previous env, e.g. a test that
+    # resolved with no server and cached None).
+    if (
+        _cached_terminal_path_attempted
+        and _cached_terminal_env == _terminal_env_fingerprint()
+    ):
         return _cached_terminal_path
+    fingerprint = _terminal_env_fingerprint()
 
     # 1. Use explicit env var if set — this is the fast path
     configured = os.getenv("SYNTHETIC_MT5_TERMINAL_PATH", "").strip()
@@ -312,10 +332,12 @@ def _resolve_mt5_terminal_path() -> str | None:
                 exe = candidate / name
                 if exe.is_file():
                     _diag(f"using configured dir: {exe}")
+                    _cached_terminal_env = fingerprint
                     _cached_terminal_path = str(exe)
                     _cached_terminal_path_attempted = True
                     return _cached_terminal_path
         _diag(f"using configured path: {candidate}")
+        _cached_terminal_env = fingerprint
         _cached_terminal_path = str(candidate)
         _cached_terminal_path_attempted = True
         return _cached_terminal_path
@@ -327,11 +349,13 @@ def _resolve_mt5_terminal_path() -> str | None:
 
     result = _find_best_terminal(broker_keywords)
     if result:
+        _cached_terminal_env = fingerprint
         _cached_terminal_path = result
         _cached_terminal_path_attempted = True
         return _cached_terminal_path
 
     _diag("no matching terminal found — set SYNTHETIC_MT5_TERMINAL_PATH in .env.local")
+    _cached_terminal_env = fingerprint
     _cached_terminal_path = None
     _cached_terminal_path_attempted = True
     return None
@@ -419,6 +443,28 @@ class Mt5TickClient:
         #    passes — a timed-out initialize keeps running in the executor
         #    thread, and shutdown is the only way to release that half-open IPC
         #    channel so the next subprocess doesn't inherit the timeout.
+        # Cross-process single-flight guard: the scheduled collector, the
+        # dashboard warmup cycle, and manual CLI runs are separate processes,
+        # and two simultaneous mt5.initialize() calls race the terminal's
+        # startup handshake (one gets (-10005, 'IPC timeout')).  Acquire the
+        # shared named mutex for the init+login sequence ONLY, then release
+        # so concurrent sessions (the terminal supports multiple IPC
+        # clients) and long-lived collectors are never blocked afterwards.
+        guard = Mt5SingleFlightLock(timeout_sec=self._connect_timeout)
+        acquired = await loop.run_in_executor(None, guard.acquire)
+        if not acquired:
+            raise RuntimeError(
+                "MT5 terminal busy: another process is initializing "
+                "(single-flight guard timed out)"
+            )
+        try:
+            await self._connect(mt5, loop, cfg, terminal_path)
+        finally:
+            guard.release()
+        return self
+
+    async def _connect(self, mt5, loop, cfg, terminal_path) -> None:
+        """Initialize + login under the single-flight guard."""
         _diag(f"initializing: {terminal_path}")
         _t0 = time.perf_counter()
         initialized = False
@@ -496,7 +542,6 @@ class Mt5TickClient:
         _store_mt5_timing(_init_ms, _login_ms)
 
         _diag(f"logged in to {server} (init={_init_ms:.0f}ms, login={_login_ms:.0f}ms)")
-        return self
 
     async def __aexit__(self, *_: object) -> None:
         # Intentionally DO NOT call mt5.shutdown() here.
@@ -571,14 +616,28 @@ class Mt5TickClient:
             if ticks is None:
                 ticks = ()
 
-        return [
-            Tick(
-                symbol=symbol,
-                epoch=float(tick["time_msc"]) / 1000.0 if tick["time_msc"] > 0 else float(tick["time"]),
-                price=float(tick["bid"]) if tick["bid"] > 0 else float(tick["ask"]),
+        # Root-cause hardening: a real MqlTick from MT5 ALWAYS carries
+        # time_msc (millisecond precision).  A struct with time_msc == 0 is a
+        # partially-initialized / garbage read — the fallback to the
+        # whole-second ``time`` field silently turns it into a plausible
+        # Deriv-style tick (whole-second epoch) and masks the corruption.
+        # Reject those structs at the API boundary instead of letting garbage
+        # flow downstream.
+        clean: list[Tick] = []
+        for tick in ticks:
+            if tick["time_msc"] <= 0:
+                continue
+            price = float(tick["bid"]) if tick["bid"] > 0 else float(tick["ask"])
+            if price <= 0:
+                continue
+            clean.append(
+                Tick(
+                    symbol=symbol,
+                    epoch=float(tick["time_msc"]) / 1000.0,
+                    price=price,
+                )
             )
-            for tick in ticks
-        ]
+        return clean
 
     async def subscribe_ticks(
         self, symbol: str, timeout: float = 20.0,
@@ -592,6 +651,12 @@ class Mt5TickClient:
         deadline = loop.time() + timeout
         last_price: float | None = None
 
+        # Poll interval was 0.5s — a hard ~2 ticks/sec cap that made the
+        # snapshot's live phase take 5s for a handful of fresh ticks.  At
+        # 0.05s the snapshot collects 20x more ticks per second (SYN75/SYN100
+        # tick several times per second), so the same freshness budget
+        # bridges to "now" in a fraction of the time.
+        POLL_INTERVAL = 0.05
         while loop.time() < deadline:
             tick_info = await loop.run_in_executor(
                 None, mt5.symbol_info_tick, mt5_symbol
@@ -605,7 +670,7 @@ class Mt5TickClient:
                         epoch=time.time(),
                         price=price,
                     )
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(POLL_INTERVAL)
 
     def mt5_symbol(self, symbol: str) -> str:
         return _resolve_mt5_symbol(symbol)

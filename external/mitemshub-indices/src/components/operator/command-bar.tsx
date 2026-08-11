@@ -89,7 +89,7 @@ export function CommandBar({
               {loading
                 ? loadingElapsedSeconds >= 30
                   ? "Taking longer than expected — you can tap Stop and retry."
-                  : "Analyzing live market data — a fresh read takes about 20 seconds…"
+                  : "Analyzing live market data — a fresh read usually takes under 10 seconds…"
                 : "Latest market structure analysis, trade plan, and risk assessment are displayed below."}
             </p>
 
@@ -106,7 +106,7 @@ export function CommandBar({
               >
                 <span className="waiting-banner__dot" aria-hidden="true" />
                 <span className="waiting-banner__text">
-                  Still working — a full read takes about 20 seconds. Tap{" "}
+                  Still working — a full read usually takes under 10 seconds. Tap{" "}
                   <strong>Stop</strong> to cancel
                 </span>
               </div>

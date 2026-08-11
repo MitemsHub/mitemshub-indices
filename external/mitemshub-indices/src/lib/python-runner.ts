@@ -287,7 +287,11 @@ export async function checkPythonImport(engineRoot: string, importModule?: strin
     const { stdout } = await runPythonScript({
       engineRoot,
       pythonScript: `${importStmt}; print('OK')`,
-      timeout: 8000,
+      // 8s was too tight: importing the engine (pandas + river + MT5)
+      // measures ~5s warm but can exceed 8s under CPU contention, which
+      // failed validation and forced a retry — surfacing "Retry live read"
+      // even when the engine was healthy.  20s gives real headroom.
+      timeout: 20000,
       label: importModule ? `checkImport:${importModule.slice(0, 80)}` : "checkPythonImport",
     });
     const ok = stdout.trim() === "OK";

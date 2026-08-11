@@ -1,0 +1,6 @@
+# Transient verification artifacts — never commit these
+__pycache__/
+*.py[cod]
+*.log
+_verify_build/
+*.set

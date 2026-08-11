@@ -3,7 +3,7 @@ import { readPreparedCall, getConfiguredEngineRoot } from "../../../../src/lib/e
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const symbol = (searchParams.get("symbol") ?? "R_100") as "R_75" | "R_100";
+  const symbol = (searchParams.get("symbol") ?? "R_75") as "R_75" | "R_100";
 
   const engineRoot = getConfiguredEngineRoot();
   if (!engineRoot) {

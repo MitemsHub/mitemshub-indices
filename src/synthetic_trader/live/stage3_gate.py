@@ -31,23 +31,11 @@ Suppression mode (``SYNTH_GATE_SUPPRESSION_MODE``, default ``suppress``):
 
 - ``suppress`` (default) — a below-floor call type is held back entirely: the
   call is downgraded to ``stand_aside`` and never surfaced as a candidate.
-- ``annotate`` — the same below-floor evidence is *annotated* instead of
-  acted on: the call still emits (with the honest, low empirical rate and a
-  note saying it is below the floor), so the operator can watch the failing
-  call type without the system silently holding it back.  ``evidence_status``
-  is ``suppressed`` in both modes — the mode only changes what is done with
-  the call, never what the data says.
-
-Proven-only execution mode (``SYNTH_GATE_PROVEN_ONLY``, default off):
-
-When on, **only** call candidates whose ``evidence_status`` is ``proven``
-(above the floor AND enough scored samples) may trigger orders.  Anything
-still learning, without data, or below the floor is forced to paper-only
-sizing (multiplier 0.0) and stamped ``execution_allowed: false`` — the
-call may still be *shown* (so the operator can watch what the engine wants
-and paper-trade it to build outcomes) but it can never place a live order,
-regardless of suppression mode.  ``annotate`` mode shows more, it does not
-unlock execution: in proven-only mode the annotate escape hatch is closed.
+The gate is collapsed to one answer (``full`` / ``half`` / ``paper``) from
+one number (scored outcomes, hit rate, floor).  The old suppression-mode
+(``suppress`` vs ``annotate``) and proven-only knobs were removed: a
+below-floor call type is ALWAYS held back, and anything without a proven
+market verdict sizes paper-only.
 This is the strictest belt: the operator is saying "prove it in the market
 before I risk real money on it".
 
@@ -126,21 +114,13 @@ STAGE3_SIZE_HALF = _env_float("SYNTH_GATE_SIZE_HALF", 0.5)
 
 SIZING_LEVELS = ("full", "half", "paper_only", "stand_aside")
 
-# Suppression behaviour: "suppress" downgrades a below-floor call type to
-# stand_aside (never surfaced as a candidate); "annotate" keeps emitting it
-# with the honest below-floor rate and a note.  Override with
-# SYNTH_GATE_SUPPRESSION_MODE.
-def _env_mode() -> str:
-    mode = os.environ.get("SYNTH_GATE_SUPPRESSION_MODE", "suppress").strip().lower()
-    return mode if mode in ("suppress", "annotate") else "suppress"
-
-
-SUPPRESSION_MODE = _env_mode()
-
-# Proven-only execution: when on, only evidence_status == "proven" calls may
-# trigger orders; everything else is forced paper-only (0.0) regardless of
-# suppression mode.  Override with SYNTH_GATE_PROVEN_ONLY (1/true/yes/on).
-PROVEN_ONLY_MODE = _env_bool("SYNTH_GATE_PROVEN_ONLY", False)
+# Collapsed Stage-3: below-floor call types are ALWAYS suppressed (never
+# surfaced as candidates).  The old ``SYNTH_GATE_SUPPRESSION_MODE=annotate``
+# escape hatch and the ``SYNTH_GATE_PROVEN_ONLY`` belt were removed — the
+# gate answers one question (full / half / paper) from one number (scored
+# outcomes, hit rate, floor).  The constant stays for payload compatibility
+# with dashboards that still read ``stage3.suppression_mode``.
+SUPPRESSION_MODE = "suppress"
 
 # Default journal paths (cwd-relative — matches the CLI defaults, and the
 # Python snapshot subprocess runs with cwd = engine root).
@@ -423,7 +403,6 @@ def sizing_ladder(
     hit_rate: float | None,
     hit_rate_floor: float,
     half_multiplier: float | None = None,
-    proven_only: bool = False,
 ) -> dict[str, Any]:
     """Turn the gate decision into an empirical position-size recommendation.
 
@@ -437,20 +416,11 @@ def sizing_ladder(
       ``half_multiplier`` or ``STAGE3_SIZE_HALF``).  The setup is proven in
       the market but the vol bands are not yet verified — a fraction, not
       full.
-    - ``annotated`` below the floor (annotate suppression mode) ->
-      **paper_only** (0.0).  Never size real money on evidence below the
-      floor, even in annotate mode.
     - ``insufficient_data`` (still_learning / no_data) -> **paper_only**
       (0.0).  No empirical verdict yet — the call emits so the operator can
       watch it, but no live position.
-    - ``suppressed`` -> **stand_aside** (0.0).  Held back entirely.
-
-    ``proven_only`` (SYNTH_GATE_PROVEN_ONLY) is the strictest belt: when on,
-    ANY evidence_status other than ``proven`` is forced to **paper_only**
-    (0.0) before the ladder runs, so still_learning / no_data / suppressed
-    calls can never size a live position — even in annotate mode.  The call
-    stays visible (the operator can watch it and paper-trade it to build
-    outcomes) but the execution path is closed.
+    - ``suppressed`` -> **stand_aside** (0.0).  Held back entirely (below-
+      floor call types are never surfaced as candidates anymore).
 
     Returns ``{level, multiplier, basis, reason}``.
     """
@@ -461,17 +431,6 @@ def sizing_ladder(
     )
     rate_display = f"{hit_rate:.0%}" if hit_rate is not None else "n/a"
 
-    if proven_only and evidence_status != "proven":
-        return {
-            "level": "paper_only",
-            "multiplier": 0.0,
-            "basis": "proven_only",
-            "reason": (
-                f"proven-only mode: evidence is '{evidence_status}' "
-                f"({rate_display} hit rate) — not market-proven, paper only "
-                "until the scored outcomes clear the floor"
-            ),
-        }
     if state == "suppressed":
         return {
             "level": "stand_aside",
@@ -479,6 +438,7 @@ def sizing_ladder(
             "basis": "suppressed",
             "reason": f"below the {hit_rate_floor:.0%} verified floor ({rate_display}) — held back",
         }
+
     if state == "gated":
         return {
             "level": "full",
@@ -487,13 +447,6 @@ def sizing_ladder(
             "reason": f"calibrated horizon + {rate_display} hit rate clears the floor",
         }
     if state == "annotated":
-        if evidence_status == "suppressed":
-            return {
-                "level": "paper_only",
-                "multiplier": 0.0,
-                "basis": "below_floor",
-                "reason": f"below the {hit_rate_floor:.0%} verified floor ({rate_display}) — paper only even in annotate mode",
-            }
         return {
             "level": "half",
             "multiplier": half,
@@ -533,7 +486,6 @@ def gate_decision(
     verdict_label: str | None,
     min_samples: int,
     hit_rate_floor: float,
-    suppression_mode: str,
 ) -> tuple[str, str]:
     """Pure gate state machine shared by the live gate and the gate backtest.
 
@@ -543,10 +495,10 @@ def gate_decision(
     - ``evidence_status`` is how far verification has gotten: ``no_data``,
       ``still_learning``, ``suppressed`` (enough samples AND below floor),
       or ``proven``.
-    - ``state`` is the operator-facing decision: ``suppressed`` (below floor,
-      suppress mode), ``annotated`` (below floor in annotate mode, or above
-      floor with uncalibrated horizon), ``gated`` (above floor + calibrated
-      horizon), or ``insufficient_data`` (fewer than ``min_samples``).
+    - ``state`` is the operator-facing decision: ``suppressed`` (below
+      floor — always held back), ``annotated`` (above floor with
+      uncalibrated horizon), ``gated`` (above floor + calibrated horizon),
+      or ``insufficient_data`` (fewer than ``min_samples``).
 
     Keeping this pure lets the backtest replay the corpus through the exact
     production rules instead of a copy that can drift.
@@ -562,9 +514,10 @@ def gate_decision(
 
     if count >= min_samples:
         if hit_rate is not None and hit_rate < hit_rate_floor:
-            # Market-tested and BELOW the floor.  evidence_status stays
-            # "suppressed" in both modes — the mode only decides the action.
-            state = "annotated" if suppression_mode == "annotate" else "suppressed"
+            # Market-tested and BELOW the floor — the call type has failed
+            # verification and is always held back (collapsed gate: there is
+            # no annotate mode anymore).
+            state = "suppressed"
         elif hit_rate is not None and hit_rate >= hit_rate_floor and verdict_label == "calibrated":
             state = "gated"
         else:
@@ -581,14 +534,13 @@ def build_stage3_block(
     verdict_cache_path: str | Path | None = None,
     min_samples: int | None = None,
     hit_rate_floor: float | None = None,
-    suppression_mode: str | None = None,
-    proven_only: bool | None = None,
 ) -> dict[str, Any]:
     """Compute the Stage-3 annotation block for a call snapshot.
 
-    ``min_samples`` / ``hit_rate_floor`` / ``suppression_mode`` / ``proven_only``
-    override the (env-configurable) module thresholds for this call; when
-    omitted the module defaults apply.
+    ``min_samples`` / ``hit_rate_floor`` override the module defaults for
+    this call; when omitted the module defaults apply.  The gate answers one
+    question (full / half / paper) from one number (scored outcomes, hit
+    rate, floor) — the suppression-mode and proven-only knobs were removed.
     """
     symbol = str(snapshot.get("symbol") or "")
     trigger_type = resolve_trigger_type(snapshot)
@@ -597,12 +549,7 @@ def build_stage3_block(
     # The caller's explicit floor (if any) always wins; when omitted the floor
     # is the per-trigger-type BREAK-EVEN rate computed below.
     explicit_floor = hit_rate_floor
-    mode = (
-        suppression_mode
-        if suppression_mode in ("suppress", "annotate")
-        else SUPPRESSION_MODE
-    )
-    proven = proven_only if proven_only is not None else PROVEN_ONLY_MODE
+    mode = SUPPRESSION_MODE
 
     if not symbol:
         # No geometry can be known without a symbol — fall back to the explicit
@@ -630,7 +577,6 @@ def build_stage3_block(
             "floor_basis": "configured" if explicit_floor is not None else "fallback",
             "break_even_rr": None,
             "suppression_mode": mode,
-            "proven_only": proven,
             "execution_allowed": False,
             "below_floor": False,
             "sizing": sizing_ladder(
@@ -638,7 +584,6 @@ def build_stage3_block(
                 evidence_status="no_data",
                 hit_rate=None,
                 hit_rate_floor=resolved_floor,
-                proven_only=proven,
             ),
             "suppressed_call": None,
             "note": "no symbol — cannot look up empirical evidence",
@@ -698,7 +643,6 @@ def build_stage3_block(
         verdict_label=verdict_label,
         min_samples=min_samples,
         hit_rate_floor=hit_rate_floor,
-        suppression_mode=mode,
     )
 
     rate_display = f"{hit_rate:.0%}" if hit_rate is not None else "n/a"
@@ -707,16 +651,6 @@ def build_stage3_block(
             f"{count} scored outcomes; target-hit rate {rate_display} is BELOW "
             f"the {hit_rate_floor:.0%} floor — {trigger_type} calls are "
             "suppressed until the market-verified rate improves."
-        )
-    elif state == "annotated" and evidence_status == "suppressed":
-        # Annotate-only mode: the failing call type is still shown with its
-        # honest rate so the operator can watch it, but the note says plainly
-        # that it is below the floor.
-        note = (
-            f"{count} scored outcomes; target-hit rate {rate_display} is BELOW "
-            f"the {hit_rate_floor:.0%} floor — suppression mode is 'annotate', "
-            f"so {trigger_type} calls are still shown with this honest rate. "
-            "Set SYNTH_GATE_SUPPRESSION_MODE=suppress to hold them back."
         )
     elif state == "gated":
         note = (
@@ -760,12 +694,12 @@ def build_stage3_block(
         str(snapshot.get("call")) if state == "suppressed" else None
     )
 
-    # Machine-readable execution gate: proven-only mode closes live execution
-    # for anything that isn't market-proven yet (still_learning / no_data /
-    # suppressed), even in annotate mode.  The sizing ladder above already
-    # forces paper_only for those; this flag is the explicit contract for
-    # downstream consumers (dashboard submit path, CLI renderers).
-    execution_allowed = not proven or evidence_status == "proven"
+    # Machine-readable execution gate: only a sized call (gated=full or
+    # annotated=half) may trigger a live order; suppressed / insufficient
+    # never can.  This is the explicit contract for downstream consumers
+    # (dashboard submit path, CLI renderers) — the collapsed gate's one
+    # answer.
+    execution_allowed = state in ("gated", "annotated")
 
     return {
         "state": state,
@@ -793,8 +727,6 @@ def build_stage3_block(
         "floor_basis": floor_basis,
         "break_even_rr": break_even_rr,
         "suppression_mode": mode,
-        # Proven-only execution mode + the resulting go/no-go for live orders.
-        "proven_only": proven,
         "execution_allowed": execution_allowed,
         # Machine-readable marker: True whenever the empirical evidence is below
         # the floor (both modes), so downstream execution consumers can tell a
@@ -806,7 +738,6 @@ def build_stage3_block(
             evidence_status=evidence_status,
             hit_rate=hit_rate,
             hit_rate_floor=hit_rate_floor,
-            proven_only=proven,
         ),
         "suppressed_call": suppressed_call,
         "note": note,
@@ -820,25 +751,15 @@ def apply_stage3_gate(
     verdict_cache_path: str | Path | None = None,
     min_samples: int | None = None,
     hit_rate_floor: float | None = None,
-    suppression_mode: str | None = None,
-    proven_only: bool | None = None,
 ) -> dict[str, Any]:
     """Annotate (and optionally suppress) a call snapshot with the Stage-3 gate.
 
     Replaces ``snapshot["confidence"]`` with the market-verified target-hit
     rate when evidence exists, and attaches the full ``stage3`` block so the
     bridge can surface it in the operator payload.  When the call type is
-    ``suppressed`` (enough samples, rate below the floor, and suppression
-    mode is ``suppress``) the call is downgraded to ``stand_aside`` so a
-    failing call type is never surfaced as a candidate — the original intent
-    stays in ``stage3.suppressed_call``.  In ``annotate`` mode the same
-    evidence is shown honestly without holding the call back.
-
-    ``proven_only`` (SYNTH_GATE_PROVEN_ONLY) closes live execution for any
-    call whose evidence isn't ``proven``: the sizing is forced to paper_only
-    (multiplier 0.0) and ``stage3.execution_allowed`` is False, so no
-    downstream consumer can place a live order — even in annotate mode.  The
-    call is still surfaced (watch it, paper-trade it) but never risked.
+    ``suppressed`` (enough samples, rate below the floor) the call is
+    downgraded to ``stand_aside`` so a failing call type is never surfaced
+    as a candidate — the original intent stays in ``stage3.suppressed_call``.
     Best-effort: never raises.
     """
     if not isinstance(snapshot, dict):
@@ -851,11 +772,8 @@ def apply_stage3_gate(
             verdict_cache_path=verdict_cache_path,
             min_samples=min_samples,
             hit_rate_floor=hit_rate_floor,
-            suppression_mode=suppression_mode,
-            proven_only=proven_only,
         )
     except Exception:
-        proven = proven_only if proven_only is not None else PROVEN_ONLY_MODE
         block = {
             "state": "insufficient_data",
             "evidence_status": "no_data",
@@ -873,12 +791,7 @@ def apply_stage3_gate(
             "display_confidence": snapshot.get("confidence"),
             "min_samples": min_samples if min_samples is not None else MIN_STAGE3_SAMPLES,
             "hit_rate_floor": hit_rate_floor if hit_rate_floor is not None else GATE_HIT_RATE_FLOOR,
-            "suppression_mode": (
-                suppression_mode
-                if suppression_mode in ("suppress", "annotate")
-                else SUPPRESSION_MODE
-            ),
-            "proven_only": proven,
+            "suppression_mode": SUPPRESSION_MODE,
             "execution_allowed": False,
             "below_floor": False,
             "sizing": sizing_ladder(
@@ -888,7 +801,6 @@ def apply_stage3_gate(
                 hit_rate_floor=(
                     hit_rate_floor if hit_rate_floor is not None else GATE_HIT_RATE_FLOOR
                 ),
-                proven_only=proven,
             ),
             "suppressed_call": None,
             "note": "stage-3 lookup failed; raw model confidence shown",

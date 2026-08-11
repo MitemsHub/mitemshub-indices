@@ -59,15 +59,35 @@ class VolBandConfig:
     # trail.  §38 swept the full geometry grid around this cell — the
     # winning cell keeps the same selective gate but tightens the stop to
     # 0.20σ_h and the target to 0.80σ_h with a 1h hold (23 trades,
-    # +0.994R/trade vs the §36 default's 21 trades, +0.654R).  The gate is
-    # the edge: opening vol_extended_ratio toward 1.0 buys more trades
-    # (40-44) but dilutes expectancy to ~+0.44R, and 50+ trades are not
-    # reachable on a 9.5-day corpus without destroying the edge.
+    # +0.994R/trade vs the §36 default's 21 trades, +0.654R).
+    #
+    # §47 revisited the gate: the earlier "gate-opening dilutes to +0.44R"
+    # reading was measured under the risk engine's 0.02/4 daily-loss halt,
+    # which the relaxed gate trips (marginal signals cluster in one ~6h
+    # window, lose, and kill the account — 5 trades, not 40).  Under an
+    # honest halt (0.05/8) the breakeven trail offsets the dilution: gate
+    # 1.05-1.1 keeps +0.99R at ~3.6-4.0 trades/day vs the 1.3 gate's 2.35
+    # (R_75), and flips R_100 from -0.07R (halt artifact) to +0.63R at 80
+    # trades.  The default stays at 1.3 until the milestone verifier
+    # confirms the relaxed cell on 40+ trades.
+    #
+    # §48 re-tune (this round): two backtest defects were fixed — (1) data
+    # gaps from collector downtime were misread as single gigantic candles,
+    # poisoning the EGARCH sigma EMA and suppressing the gate for days, and
+    # (2) the backtest runners never synced session days, so the first
+    # 4-loss streak permanently halted the account (live does reset daily),
+    # understating every trade count.  With both fixed, the sweep on the
+    # clean corpus found a cell that fires ~3x more often at nearly the
+    # same expectancy, positive in BOTH walk-forward halves: keep the
+    # proven 1.3 vol gate and z=1.0, but drop the mean-revert-signal
+    # confirmation (0.02 -> 0.0) and speed the sigma baseline (EMA 60 ->
+    # 30, cooldown 30 -> 10): 71 trades, +0.90R/trade (h1 +1.03/42, h2
+    # +0.71/29) vs the old 23 trades, +1.17R (h1 +0.84/11, h2 +1.47/12).
     z_entry: float = 1.0
     vol_extended_ratio: float = 1.3
-    sigma_ema_period: int = 60
-    min_revert_signal: float = 0.02
-    drift_cooldown_bars: int = 30
+    sigma_ema_period: int = 30
+    min_revert_signal: float = 0.0
+    drift_cooldown_bars: int = 10
     drift_delta: float = 0.002
     warmup_candles: int = 60
     distribution: str = "normal"
@@ -113,6 +133,31 @@ class VolBandStrategy:
         self._prev_close: float | None = None
         self._prev_sigma: float | None = None
         self._candles_seen = 0
+        # Wall-clock end of the last processed candle — used to detect
+        # data gaps (collector downtime / terminal disconnect) so a
+        # multi-hour gap is not misread as one gigantic bar return.
+        self._last_bar_end: float | None = None
+        self._max_gap_sec = max(3 * timeframe_sec, 600)
+
+    def _gap_reanchor(self, candle: Candle) -> bool:
+        """Return True and re-anchor when the candle follows a data gap.
+
+        The candle stream is bucketed by wall-clock, so a multi-hour feed
+        outage (collector downtime, terminal disconnect) produces a candle
+        whose close sits far above the previous candle's close even though
+        the market moved normally across the outage.  Feeding that span as
+        one bar-scale return fabricates a spurious EGARCH shock (z ~ +50),
+        clipping log-variance and poisoning the sigma EMA for the rest of
+        the run — which suppresses the vol-extension gate for days.  On a
+        gap we re-anchor the close/EMA baselines, skip the forecaster
+        update, and stand aside for that candle."""
+        if self._last_bar_end is not None and candle.open_time > self._last_bar_end + self._max_gap_sec:
+            self._prev_close = candle.close
+            self._ema = candle.close
+            self._last_bar_end = candle.open_time + candle.timeframe_sec
+            return True
+        self._last_bar_end = candle.open_time + candle.timeframe_sec
+        return False
 
     @property
     def version(self) -> str:
@@ -124,6 +169,8 @@ class VolBandStrategy:
         if self._prev_close is None or candle.close <= 0.0:
             self._prev_close = candle.close
             self._ema = candle.close
+            return None
+        if self._gap_reanchor(candle):
             return None
 
         log_return = math.log(candle.close / self._prev_close)

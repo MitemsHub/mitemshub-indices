@@ -114,12 +114,15 @@ class TestGrids:
 
     def test_band_grid_cartesian_size(self) -> None:
         grid = band_grid()
-        n_z = len([0.5, 0.75, 1.0, 1.25, 1.5])
-        n_vr = len([1.15, 1.3, 1.45, 1.6])
+        # §47/§50: the vol-gate range now starts at 0.75 (step 0.1) so the
+        # sweep can find relaxed-gate cells (1.05-1.1) and measure the calm
+        # 0.86-vol regime — the old 1.0 floor skipped that entire region.
+        n_z = len([0.25, 0.5, 0.75, 1.0, 1.25, 1.5])
+        n_vr = len([0.75, 0.85, 0.95, 1.05, 1.15, 1.25, 1.35, 1.45, 1.55])
         n_s = len([0.2, 0.3, 0.4, 0.5])
         n_t = len([0.6, 0.8, 1.0, 1.2, 1.4])
         n_h = len([3600, 7200, 10800])
-        assert len(grid) == n_z * n_vr * n_s * n_t * n_h == 5 * 4 * 4 * 5 * 3 == 1200
+        assert len(grid) == n_z * n_vr * n_s * n_t * n_h == 6 * 9 * 4 * 5 * 3 == 3240
         # Every config carries the fixed breakeven trail (verified in §36).
         for cfg in grid[:5]:
             assert cfg.breakeven_trail_frac == 0.3
@@ -270,6 +273,60 @@ class TestSweep:
         assert artifact.exists()
         persisted = json.loads(artifact.read_text(encoding="utf-8"))
         assert persisted["configs_tested"] == report["configs_tested"]
+
+    def test_risk_limit_overrides_threaded(self, tmp_path) -> None:
+        """§47: the risk-halt knobs must reach the runner — the 0.02/4 default
+        halt is what silently kills relaxed-gate cells."""
+        import json
+
+        from synthetic_trader.research.vol_param_sweep import run_sweep_for_csv
+
+        ticks = dedupe_ticks(_ticks())
+        csv_path = tmp_path / "ticks.csv"
+        csv_path.write_text(
+            "\n".join(
+                f"{t.epoch:.0f},{t.symbol},{t.price:.6f}" for t in ticks
+            ),
+            encoding="utf-8",
+        )
+        artifact = tmp_path / "sweep_risk.json"
+        # One band config at the relaxed gate; only the halt knob differs.
+        ranges = {
+            "z_entries": (1.0, 1.0, 0.1),
+            "vol_ratios": (1.0, 1.0, 0.1),
+            "stops": (0.2, 0.2, 0.1),
+            "targets": (0.8, 0.8, 0.1),
+            "holds": (3600, 3600, 1),
+        }
+        tight = run_sweep_for_csv(
+            csv_path,
+            symbol="R_75",
+            timeframe_sec=60,
+            min_trades=0,
+            top_n=1,
+            gates=("absolute",),
+            strategies=("band",),
+            band_ranges=ranges,
+            artifact_output_path=artifact,
+            max_daily_loss_fraction=0.02,
+            max_consecutive_losses=4,
+        )
+        loose = run_sweep_for_csv(
+            csv_path,
+            symbol="R_75",
+            timeframe_sec=60,
+            min_trades=0,
+            top_n=1,
+            gates=("absolute",),
+            strategies=("band",),
+            band_ranges=ranges,
+            artifact_output_path=artifact,
+            max_daily_loss_fraction=0.05,
+            max_consecutive_losses=8,
+        )
+        # The relaxed gate admits garbage that the strict halt stops; the
+        # looser halt must trade strictly more.
+        assert loose["top"][0]["trades"] >= tight["top"][0]["trades"]
 
     def test_min_trades_filter(self, sweep_rows) -> None:
         rows = sweep_rows
