@@ -51,7 +51,9 @@ def _make_candles(
             Candle(
                 symbol=symbol,
                 timeframe_sec=timeframe_sec,
-                open_time=i * timeframe_sec,
+                # 13:00 UTC base — inside the sniper entry-gate window
+                # (UTC [12,24)) so evaluate-based tests aren't stood aside.
+                open_time=13 * 3600 + i * timeframe_sec,
                 open=round(open_price, 5),
                 high=round(high, 5),
                 low=round(low, 5),

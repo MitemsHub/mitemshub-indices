@@ -44,7 +44,7 @@ class _EmptyClient:
     async def ticks_history(self, symbol: str, count: int) -> list[object]:
         return []
 
-    async def subscribe_ticks(self, symbol: str):
+    async def subscribe_ticks(self, symbol: str, timeout: float = 0.0):
         if False:
             yield None
 

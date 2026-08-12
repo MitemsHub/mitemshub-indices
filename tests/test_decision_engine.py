@@ -32,6 +32,12 @@ from synthetic_trader.strategy.setup_builder import classify_setup
 from synthetic_trader.strategy.top_down_bias import infer_top_down_bias
 
 
+# Sniper entry-gate window: candles must land inside UTC [12,24) or the
+# DecisionEngine's live emission gate stands every signal aside.  Base at
+# 13:00 UTC so 100-200 x 60s candles stay in-window.
+_EPOCH_BASE = 13 * 3600
+
+
 def trending_candles(symbol: str = "R_75", count: int = 100) -> list[Candle]:
     candles: list[Candle] = []
     price = 100.0
@@ -42,7 +48,7 @@ def trending_candles(symbol: str = "R_75", count: int = 100) -> list[Candle]:
             Candle(
                 symbol=symbol,
                 timeframe_sec=60,
-                open_time=index * 60,
+                open_time=_EPOCH_BASE + index * 60,
                 open=open_price,
                 high=close + 0.12,
                 low=open_price - 0.08,
@@ -69,10 +75,34 @@ def choppy_candles(symbol: str = "R_75", count: int = 120) -> list[Candle]:
             Candle(
                 symbol=symbol,
                 timeframe_sec=60,
-                open_time=index * 60,
+                open_time=_EPOCH_BASE + index * 60,
                 open=open_price,
                 high=max(open_price, close) + abs(drift) * 0.4,
                 low=min(open_price, close) - abs(drift) * 0.4,
+                close=close,
+                tick_count=5,
+            )
+        )
+        price = close
+    return candles
+
+
+def out_of_window_candles(symbol: str = "R_75", count: int = 60) -> list[Candle]:
+    """Trending candles anchored at UTC hour 0 — outside the sniper entry
+    gate's [12,24) UTC window, so evaluate stands them aside."""
+    candles: list[Candle] = []
+    price = 100.0
+    for index in range(count):
+        open_price = price
+        close = open_price + 0.35
+        candles.append(
+            Candle(
+                symbol=symbol,
+                timeframe_sec=60,
+                open_time=index * 60,
+                open=open_price,
+                high=close + 0.12,
+                low=open_price - 0.08,
                 close=close,
                 tick_count=5,
             )
@@ -91,7 +121,7 @@ def borderline_trending_candles(symbol: str = "R_75", count: int = 100) -> list[
             Candle(
                 symbol=symbol,
                 timeframe_sec=60,
-                open_time=index * 60,
+                open_time=_EPOCH_BASE + index * 60,
                 open=open_price,
                 high=close + 0.05,
                 low=open_price - 0.05,
@@ -370,6 +400,41 @@ class DecisionEngineTests(unittest.TestCase):
                 assert report.signal is not None
                 self.assertGreaterEqual(report.signal.confidence, 0.5)
                 self.assertEqual(report.signal.direction, Direction.LONG)
+
+    def test_sniper_entry_gate_stands_aside_outside_utc_window(self) -> None:
+        # Anchored at UTC hour 0 — outside [12,24) — the live emission gate
+        # must stand the whole evaluation aside with a clear rationale.
+        engine = DecisionEngine(legacy_sniper_config())
+        report = engine.evaluate("R_75", out_of_window_candles())
+        self.assertIsNone(report.signal)
+        self.assertTrue(any("entry gate" in r for r in report.reasons))
+
+    def test_sniper_entry_gate_emits_inside_window_and_can_be_disabled(self) -> None:
+        # Inside the window → normal emission (existing factories use a
+        # 13:00 UTC base).
+        engine = DecisionEngine(legacy_sniper_config())
+        with patch(
+            "synthetic_trader.strategy.decision_engine.build_swing_execution",
+            return_value=intraday_execution_plan(),
+        ):
+            report = engine.evaluate("R_75", trending_candles())
+        self.assertIsNotNone(report.signal)
+
+        # Gate disabled → out-of-window emission restored (old behavior).
+        cfg_off = replace(
+            legacy_sniper_config(),
+            symbols={
+                sym: replace(prof, entry_gate_enabled=False)
+                for sym, prof in legacy_sniper_config().symbols.items()
+            },
+        )
+        engine_off = DecisionEngine(cfg_off)
+        with patch(
+            "synthetic_trader.strategy.decision_engine.build_swing_execution",
+            return_value=intraday_execution_plan(),
+        ):
+            report_off = engine_off.evaluate("R_75", out_of_window_candles())
+        self.assertIsNotNone(report_off.signal)
 
     def test_builds_structure_led_trade_plan_from_top_down_components(self) -> None:
         config = legacy_sniper_config()

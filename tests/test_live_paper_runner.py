@@ -32,7 +32,10 @@ class _FakeClient:
     async def ticks_history(self, symbol: str, count: int) -> list[Tick]:
         return list(self._warmup)
 
-    async def subscribe_ticks(self, symbol: str):
+    async def subscribe_ticks(self, symbol: str, timeout: float = 20.0):
+        # matches the MarketDataClient protocol (run_live_paper passes the
+        # remaining run duration as the stream timeout)
+        del symbol, timeout
         for tick in self._live_ticks:
             yield tick
 

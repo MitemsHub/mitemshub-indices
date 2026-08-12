@@ -717,6 +717,59 @@ def compare_sniper(ticks, timeframe_sec=300):
     st["retuned"] = {"n": n_r, "hit": hit_r, "avg_r": avg_r_r,
                      "avg_rr": avg_rr_r, "floor": floor_r,
                      "prod_blocked": prod_blocked}
+
+    # --- entry-gated time-exit leg end-to-end --------------------------------
+    # The live emission gate (UTC 12-24h & |range_z_50| < 1.0, enforced INSIDE
+    # DecisionEngine.evaluate via SymbolProfile.entry_gate_*) with the research
+    # time-exit broker — the configuration the entry-filter probes measured at
+    # +0.09..0.14R net@0.05.  Measured with the gate in the live path (not a
+    # probe hook), so the ML model, risk engine and broker all see it.
+    clear_assembler_caches()
+    g_out, g_broker, g_sig, g_rej, g_model = run_sniper_ticks_captured(
+        ticks, 300, time_exit=True)
+    ng = len(g_out)
+    hit_g = (sum(1 for o in g_out if o.won) / ng) if ng else 0.0
+    avg_g = (mean(o.return_r for o in g_out)) if ng else 0.0
+    rr_g = []
+    for o in g_out:
+        entry, stop, target, _ = g_broker.geometry[o.position_id]
+        risk = abs(entry - stop) or entry * 0.001
+        rr_g.append(abs(target - entry) / risk)
+    avg_rr_g = mean(rr_g) if rr_g else 0.0
+    floor_g = py_break_even_floor(avg_rr_g, 0.05) if rr_g else 0.5
+    wins = [o.return_r for o in g_out if o.return_r > 0]
+    losses = [abs(o.return_r) for o in g_out if o.return_r <= 0]
+    avg_win = mean(wins) if wins else 0.0
+    avg_loss = mean(losses) if losses else 0.0
+    be_g = avg_loss / (avg_win + avg_loss) if (avg_win + avg_loss) > 0 else 1.0
+    ordered = sorted(g_out, key=lambda o: o.closed_at)
+    peak = cum = max_dd = 0.0
+    for o in ordered:
+        cum += o.return_r
+        peak = max(peak, cum)
+        max_dd = max(max_dd, peak - cum)
+    tags_g = walk_forward_stage3_gate(g_out, g_broker)
+    kept_g = [t for t in tags_g if t["state"] != "suppressed"]
+    kept_hit_g = (sum(1 for t in kept_g if t["won"]) / len(kept_g) * 100
+                  if kept_g else 0.0)
+    print("[TQCHECK] --- sniper entry-gated time-exit leg end-to-end "
+          "(UTC 12-24h & |range_z|<1.0 gate in DecisionEngine.evaluate) ---")
+    print(f"[TQCHECK]   signals={g_sig} risk-rejected={g_rej} closed={ng} "
+          f"model={g_model.version}")
+    print(f"[TQCHECK]   n={ng} hit={hit_g*100:.1f}% avgR={avg_g:+.3f} gross | "
+          f"net@0.05={avg_g-0.05:+.3f}R | net@0.10={avg_g-0.10:+.3f}R")
+    print(f"[TQCHECK]   avgRR={avg_rr_g:.2f} floor={floor_g*100:.1f}% -> "
+          f"{'BEATS' if hit_g >= floor_g else 'does NOT beat'} | "
+          f"payout BE={be_g*100:.1f}% -> "
+          f"{'BEATS' if hit_g >= be_g else 'does NOT beat'}")
+    print(f"[TQCHECK]   maxDD={max_dd:.2f}R (realized cumulative-R) | "
+          f"walk-forward gate: KEPT {len(kept_g)} (hit {kept_hit_g:.1f}%) "
+          f"/ SUPPRESSED {ng - len(kept_g)}")
+    st["entry_gated_time_exit"] = {
+        "n": ng, "hit": hit_g, "avg_r": avg_g, "avg_rr": avg_rr_g,
+        "floor": floor_g, "be_realized": be_g, "max_dd": max_dd,
+        "kept": len(kept_g),
+    }
     return st
 
 

@@ -209,13 +209,149 @@ grows (the cells are subsets of one run); a violation fails the suite.
   [15%, 60%] and exp in [−0.35, +0.35]R (measured spans across geometries:
   hit 28–47% / exp −0.19 to +0.12; the bands catch the 2%-hit
   trail-disaster class while surviving window changes).
+- **Stage-3 floor verdict** — the gate's own `VERDICT: achieved hit X%
+  BEATS / does NOT beat the Y% floor` line is a contract too.  It must be
+  PRESENT (a refactor dropping the gate block fails the suite); the verdict
+  must be internally CONSISTENT with its own numbers (a declared `BEATS`
+  with hit below the floor — or `does NOT beat` with hit above it — is a
+  FLIP bug, not an improvement, and fails with `floor verdict FLIP:`); and
+  the floor must sit in [20%, 60%] (the 1/(1+RR)+margin band for the RR
+  1.0–3.5 geometries this suite measures — outside that, the break-even
+  math regressed).  A ±0.15pp tolerance absorbs the suite's print rounding
+  (it decides on raw doubles, prints 1-decimal).  The healthy verdict state
+  rides in the Detail column (`floor-gate: hit 25.4% does NOT beat 30%`),
+  so a flip is visible in every run's summary.
+- **Vol-regime split contract** — the suite also prints a vol-regime split
+  at entry (`vol_ratio_entry = prev_sigma / sigma_ema`, cells
+  `vol<=1.25` / `vol>1.25`, each with n / hit / exp / stop-outs) to answer
+  whether the book drifts into high-vol-regime entries.  The verifier parses
+  it and flags when the `vol>1.25` cell becomes a MEANINGFUL SHARE of
+  trades: `>=20%` of the book with negative expectancy fails the suite
+  (`high-vol entries diluting the edge`), and `>=35%` fails unconditionally
+  (`the vol cell IS the book` — at that point it is no longer a diagnostic
+  cell but the strategy, and its floor needs its own validation).  A
+  large-but-positive share is reported in the Detail line, not failed
+  (measured 2026-08-12 default run: 0.7% share, +0.200R).  Each vol cell
+  prints ONLY when it has trades (the suite skips empty buckets), so a
+  missing `vol>1.25` row means zero high-vol trades — normal; a missing
+  split HEADER is a refactor regression and fails like the other contracts.
+- **Machine-parseable depth profile + floor verdict** — the suite also
+  prints one `[BANDBT] DEPTHPROFILE` line (all 5 cumulative caps in one
+  line: `n=... hit=... exp=... share=... total=...`, empty buckets emitted
+  as n=0) and one `[BANDBT] FLOORVERDICT` line
+  (`floor=... achieved=... verdict=BEAT|NOT_BEAT mean_rr=...`).  These are
+  the robust contract lines for the BUCKET-COMPOSITION gate: each cap's
+  share of the book must stay in the measured bands — sweep ON/OFF across
+  5 seeds and TARGET/TIME modes span <=1.25 10.7-12.4%, <=1.50
+  20.9-24.7%, <=2.00 46.7-48.6%, <=2.50 71.7-74.3% — so a composition
+  shift (a refactor letting deep trades dominate, or the shallow bucket
+  collapsing) FAILs the loop with `bucket composition shifted`.  Guarded
+  by total>=50 so thin windows don't false-fail.  The machine lines must
+  AGREE with the parsed per-row lines (per-cap n and total cross-checked —
+  a mismatch is a print bug) and FLOORVERDICT must agree with the human
+  VERDICT (BEAT <-> BEATS / NOT_BEAT <-> does NOT beat).  Missing machine
+  lines FAIL the suite.  The healthy state rides in the Detail column
+  (`depth-comp: <=1.25 12.4% | <=1.50 24.7% | <=2.50 71.7% (total 693)`).
 
 On a healthy run the summary rides in the Detail column (`depth-split: 5
-cells, <=1.25 hit 28.1%/exp 0.124R, <=2.00 hit 27.7%/exp 0.106R ...`); on
-violation the suite shows `FAIL ... | DEPTH-REGRESSION: <why>` and the
-overall loop exits 1. Verified: healthy run PASSes with the summary,
-missing-report / collapsed-hit / partial-table fixtures all FAIL with the
-specific cause.
+cells, <=1.25 hit 28.1%/exp 0.124R, <=2.00 hit 27.7%/exp 0.106R ... |
+floor-gate: hit 25.4% does NOT beat 30% | vol-split: <=1.25 n=1527
+hit=25.3% exp=+0.014R; >1.25 n=10 hit=30.0% exp=+0.200R (0.7% of
+trades)`); on violation the suite shows `FAIL ... | DEPTH-REGRESSION:
+<why>` and the overall loop exits 1.
+Verified: healthy run PASSes with the summary; missing-report /
+collapsed-hit / partial-table fixtures, all floor-verdict branches
+(flip-to-BEATS, flip-to-NOT, missing block, missing verdict line, floor
+out of band), and all vol-split branches (meaningful share + negative exp,
+share >= 35%, missing header, missing lo row, zero high-vol cell, large
+positive share, missing DEPTHPROFILE, missing FLOORVERDICT, machine-vs-human
+verdict mismatch, deep-dominant composition, and thin-window composition
+skip) FAIL/PASS with the specific cause (`verify_volsplit_fixtures.ps1`).
+
+**Seed noise caveat — the RNG-reshuffle confound (measured 2026-08-12):**
+all of the above tables come from ONE seed of the suite's per-signal
+geometry sweep (`MathSrand(InpGeomSeed)` draws z_entry in [0.7, 1.6] and
+stop_mult in [0.15, 0.35] — target = 3.0 x stop — for every gated signal,
+so the seed decides which signals pass the z gate, their stop width, and
+their edge-depth bucket).  `mql5/seed_sweep.ps1` runs the RR-3.0
+cap-2.0 cell across 5 seeds (7/42/123/777/2024, ~25s each, sniper gate
+skipped) and the spread is material:
+
+| seed | <=1.25 exp | <=2.00 n/hit/exp | <=3.00 exp | vol>1.25 n/exp |
+|---|---|---|---|---|
+| 7 | −0.038R | 323 / 25.4% / +0.018R | −0.011R | 8 / −1.000R |
+| 42 (default) | +0.256R | 329 / 25.8% / +0.033R | +0.017R | 10 / +0.200R |
+| 123 | −0.241R | 317 / 23.0% / −0.079R | −0.089R | 10 / +0.200R |
+| 777 | −0.257R | 298 / 25.8% / +0.034R | −0.025R | 6 / +0.333R |
+| 2024 | +0.222R | 324 / 27.8% / +0.111R | +0.109R | 9 / −0.111R |
+
+Cap-2.0 across seeds: hit 23.0–27.8% (mean 25.6%, spread 4.8pp); exp
+−0.079R to +0.111R (mean +0.023R, spread 0.190R — ~8x the mean, so a
+single seed's exp is NOT distinguishable from noise); n 298–329 (±5% —
+entry COUNT barely moves; the seed changes WHICH signals and their
+geometry).  The shallow <=1.25 cell is far worse: exp flips sign across
+seeds (−0.257R to +0.256R).  The depth-split bands and the vol-share
+contract survive every seed (no false failures), but any positive-EXP
+conclusion on a cell should be re-checked across >=3 seeds before trusting
+it; seed 42 (the default) sits near the cap-2.0 mean, not at an extreme.
+
+**Pure subset test — geometry sweep OFF (fixed z_entry=1.0, stop 0.20 sigma,
+target 0.60 sigma = 3.0R), TARGET mode, 6-month (2026-08-12):** with
+`InpGeomSweep=false` there is no RNG at all (MathSrand is never consumed),
+so `depth = |z|/z_entry = |z|` is a pure market measure and the rows are
+deterministic — verified byte-identical across seeds 42 and 7.  The
+shallow-fade edge is REAL, not a sweep artifact, and is actually CLEANER
+with the confound removed:
+
+| depth bucket (sweep OFF) | n | hit | exp | sweep-ON (seed 42) exp |
+|---|---|---|---|---|
+| <=1.25 | 54 | 27.8% | +0.111R | +0.256R |
+| **<=1.50** | **109** | **27.5%** | **+0.101R** | **+0.053R** |
+| <=2.00 | 220 | 23.2% | −0.073R | +0.033R |
+| <=2.50 | 339 | 24.2% | −0.032R | +0.038R |
+| <=3.00 | 456 | 24.3% | −0.026R | +0.017R |
+| verdict | | hit 24.4% | does NOT beat 30% | |
+
+Shallow <=1.50 (|z| in [1.0, 1.5]) is the ONLY positive bucket — hit
+27.5%, exp +0.101R — while every deeper bucket is negative (−0.073R at
+<=2.00, −0.026R at <=3.00): the pure depth profile is monotone (edge in
+shallow, bleed in deep), exactly the pattern the depth-cap work targeted.
+The sweep was DILUTING the shallow edge (its random z_entry divisor
+rebuckets trades: sweep-ON shallow mixes in deeper trades that drew a
+high z_entry, and a high z_entry also raises the entry bar).  Fixed
+geometry also shrinks the funnel (456 vs 693 trades).  BUT the floor
+verdict still stands aside: overall 24.4% vs 30%, and even shallow-only
+27.5% is 2.5pp short of the 30% floor — within ~0.6 sigma at n=109
+(can't reject hit >= 30% statistically), but the measured value is below
+and the gate correctly refuses.
+
+### Sniper walk-forward gate contract (SniperGate row)
+
+The band's depth-split contract covers the MQL5 tester side; the sniper
+leg's walk-forward gate lives in the Python harness, so its regression gate
+is a second suite row: `verify_all.ps1` runs
+`python mql5/svcap_recheck.py --gate-check` (one real `run_ticks` pass of
+the reference gate-clean svcap cell — UTC 12-24h & |range_z|<1.0 &
+|garch_z|<=1.5, time-exit — ~3-5 min, corpus replay, no MT5 dependency) and
+honors its `[GATECHECK]` verdict + exit code:
+
+- **PASS** — kept/suppressed split sane (reference run 2026-08-12:
+  kept=147/147, suppressed=0, +0.160R net@0.05).
+- **FAIL** (loop exits 1) — suppressed fraction > 10% of the cell (the
+  walk-forward gate blocking a previously gate-clean cell), zero kept
+  trades, or net@0.05 below −0.10R (expectancy regression).
+- **SKIP** — corpus too thin (< 30 cell trades) or python missing; neither
+  fails the loop (a fresh checkout must not false-fail, but the check is
+  armed on this machine).
+
+The row renders in the summary table as `SniperGate - PASS|FAIL` (Compile
+"-" = Python row, no MQL5 compile).  Add `-SkipSniperGate` to a run to
+skip the ~3-5 min Python pass.  Verified end-to-end 2026-08-12: healthy
+run emits `[GATECHECK] PASS` (n=147 kept=147 suppressed=0 (0.0%)) and the
+loop reports `ALL SUITES PASSED (compile + Strategy Tester + sniper gate
+contract)`; the FAIL/SKIP verdict branches are unit-tested in
+gate_verdict() and the PowerShell parse (last-`[GATECHECK]`-line-wins) is
+fixture-tested.
 
 ## Field notes (forward-demo pass, 2026-08-10)
 
@@ -946,6 +1082,40 @@ finally sees the feature).  Regression tests in `tests/test_assembler.py`
 lock it; the periodic arch refit it activates now suppresses its
 DataScaleWarning inside `_try_fit_arch`.
 
+**Live-path & band-path exposure verified + frozen-vs-live A/B
+(2026-08-12):** the freeze covered EVERY consumer of the assembler's
+`build_snapshot` — the live dashboard read calls it directly AND
+`DecisionEngine.evaluate` calls it again internally, so every live call's
+confidence components (`_confidence_score` vol-ratio/|z| branches,
+`_garch_mr_component`, `_vol_regime_component`) and the ML model's feature
+vector saw z=0.0 / mr=0.0 / constant σ=0.02 / and — once the calibrated
+priors landed — a pathological constant `garch_vol_ratio` ≈20 (→ the
+"vol expansion" −0.10 confidence penalty on EVERY call).  The band path's
+stop/target LEVELS were never frozen: `_structure_band_levels` derives them
+from the strategy's own `_prev_sigma` (`band_levels(sigma_per_bar=…)`),
+not the assembler garch — but the band/vol-dynamics confidence that gates
+them (`_score_direction`) consumed the same frozen features.  The vol-band
+BACKTEST leg is untouched (own per-bar `EGARCHVarianceForecaster`).
+Frozen-vs-live A/B on the current 12.9-day corpus (frozen = old guard
+emulated — `update()` never advances state; fresh model per run; same UTC
+entry gate):
+
+| run | n | hit | gross | net@0.05 | z_mean | \|z\|>1.5 | vr_mean | σ range |
+|---|---|---|---|---|---|---|---|---|
+| FROZEN | 159 | 50.9% | +0.192R | +0.142R | 0.00 | 0.0% | 19.85 | 0.0200 const |
+| LIVE | 155 | 51.0% | +0.187R | +0.137R | −0.08 | 3.9% | 0.25 | 0.0016–0.0131 |
+
+Call-level verdict: small — −4 trades (−2.5%), hit +0.0pp, gross
+−0.004R.  The feature went from dead/constant to live, but the entry gate
+(garch-independent |range_z_50|) plus the online model's adaptation absorb
+almost all of the difference; the 4-trade delta is borderline-confidence
+crossings from the systematic frozen penalty vs the live compression
+boost.  The freeze's real cost was feature-vector health and the
+systematic confidence bias in ungated regimes, not the gated leg's count.
+Caveat: the live read feeds `build_snapshot` twice per read (panel +
+evaluate) — the same last-bar log-return reaches the forecaster twice, a
+minor recent-return overweight, not a freeze.
+
 **Entry-filter sweep on the captured sniper set (same gate, 2026-08-11):**
 with the z feature live, the sweep replays each captured trade's intrabar
 path (exact PaperBroker stop-first semantics) under production-legal
@@ -959,6 +1129,32 @@ targets:
   the top-4 hour cluster [0-3] is the worst (medMFE 0.62R).
 - **drift alignment: null** — ADWIN over the M5 return series fired 0 times
   in 2,338 bars (9.5 days); no drift filter can discriminate on this corpus.
+
+**Why ADWIN never fires — and the error-based detector is dead too
+(2026-08-12, `_probe_adwin_why.py`, 12.9-day / 2,356-bar corpus):** the
+return stream ADWIN (`|log_return|×100`, delta 0.002 — what the band/reversion
+drift gates feed) fired **0 / 2,356** bars, and the model's error-stream ADWIN
+(`abs(label−p)` per taken-trade update) fired **0 / 155** updates — the
+`_drift_confidence_penalty` / `_dynamic_min_confidence` paths and both
+strategies' drift-cooldown gates are inert on this corpus.  Two measured
+reasons for the return stream: (1) **heavy tails swamp the mean signal** —
+|r|% mean 0.194 / std 0.254 / p99 0.644 (3.3× the mean), while the actual
+regime signal is only a rolling-250-bar mean swing of 0.169→0.291 (~0.12,
+a ~1.7× vol change on R_75 M5); (2) **ADWIN's detectability floor at the
+windows it can resolve** — eps(m=10)≈1.47 (a 7.5× instantaneous vol jump
+would be needed), and even at m=100 the observed adjacent-half shift (0.173)
+sits at 0.71× the floor; at m=250 a simplified offline floor is crossed
+(ratio 1.39) but the real detector's window-spanning variance keeps it below
+line — a gentle ramp shift in a heavy-tailed absolute-return stream is
+structurally the wrong input for a mean-shift detector.  The error stream is
+worse: starved to ~12 updates/day (UTC 12-24h trades only, so it never sees
+regime changes outside the window) and its per-trade outcome noise
+(mean 0.516, std 0.415, max 0.92) dwarfs any slow model-quality drift — a win
+or a loss both produce a large |error| in every regime.  Verdict: neither
+ADWIN variant is a usable entry-timing signal on this corpus; entry timing
+is carried by the vol-extension gate + the UTC/|range_z| filter, as the sweep
+above measured.  (Sanity: the detector does fire on real steps — the unit
+tests feed 0.5→5.0; the R_75 regime moves are ~20× smaller.)
 - **THE ANSWER: two cells clear the 1.0R median-MFE bar with
   production-legal targets** — `UTC 12-24h & |range_z|<1.0` (n=34, medMFE
   +1.10R, meanMFE +1.10R: hit 58.8% at RR 1.2 AND RR 1.5 vs floors 50%/45%,
@@ -1011,9 +1207,227 @@ gate (svcap +0.161R gross / 52.1% hit vs sv +0.142R / 50.3%) but the
 3.2× drawdown cut (18.28R → 5.71R) comes almost entirely from the gate
 itself** — the band's cap-vs-drawdown relationship did not transfer to
 the sniper side (5.85R vs 5.71R).  Best balanced cell: **svcap — 146
-trades (~14/day), +0.111R net@0.05, +0.061R net@0.10, KEPT 146/146**.  The
-6-month combined measurement still requires porting the sniper ML path to
+trades (~14/day), +0.111R net@0.05, +0.061R net@0.10, KEPT 146/146**.  The6-month combined measurement still requires porting the sniper ML path to
 the tester (Python corpus is ~10.5 days).
+
+**svcap OUT-OF-SAMPLE re-check (13.02-day corpus, 2026-08-12):** the
+combined-gate probe re-run on the fresh ~2.5 days of corpus growth
+(`mql5/svcap_recheck.py`, same methodology: real `run_ticks` passes,
+TIME-exit broker, in-loop filtering, fresh model per run):
+
+| cell | n | hit | gross | net@0.05 | net@0.10 | maxDD | streak | WF kept |
+|---|---|---|---|---|---|---|---|---|
+| sv (gate only) @13.02d | 150 | 50.7% | +0.190R | +0.140R | +0.090R | 5.71R | 5 | 149/150 |
+| sv (10.5d ref) | 149 | 50.3% | +0.142R | +0.092R | +0.042R | 5.71R | 5 | — |
+| **svcap @13.02d** | **147** | **52.4%** | **+0.210R** | **+0.160R** | **+0.110R** | **5.85R** | **5** | **147/147** |
+| svcap (10.5d ref) | 146 | 52.1% | +0.161R | +0.111R | +0.061R | 5.85R | 5 | — |
+
+**The +0.111R net@0.05 lift HOLDS out-of-sample — and improves to
++0.160R net@0.05** (+0.049R better than ref; hit 52.1 → 52.4%; the
+2.5 days of fresh data were *better* than the training window, not
+worse).  The depth-cap delta is stable too: svcap − sv = +0.020R
+net@0.05 now vs +0.019R at 10.5d.  maxDD (5.85R), worst streak (5) and
+walk-forward behavior (KEPT 147/147, no suppression) all reproduce.
+First gate cell to survive a corpus-growth re-run without decay.
+
+
+**Entry gate wired into the LIVE emission path (2026-08-11) — measured
+end-to-end, not by a probe hook:** `SymbolProfile.entry_gate_*`
+(enabled, UTC [12,24), |range_z_50| < 1.0) is now enforced INSIDE
+`DecisionEngine.evaluate` for sniper mode — placed after the stateful
+monitors (regime/calibration/GARCH stay fed every bar) and before
+scoring, so out-of-window bars stand aside without freezing market
+state or wasting model work.  Because `market_snapshot` resolves
+sniper-only and the harness replica calls the same evaluate, the gate
+now governs the live dashboard calls, the watch loop, and the
+real-corpus harness alike.  Re-run of the harness (337 checks, 0
+failed):
+
+| leg | n | hit | gross | net@0.05 | net@0.10 | maxDD | WF gate |
+|---|---|---|---|---|---|---|---|
+| gated production broker (fixed 1.9R target) | 155 | 51.0% | +0.187R | +0.137R | +0.087R | — | KEPT |
+| **gated time-exit (adopted research exit)** | **150** | **50.7%** | **+0.190R** | **+0.140R** | **+0.090R** | **5.71R** | KEPT 149/150 |
+
+**The gate alone (no time exit) already flips the production sniper leg
+positive** — 155 trades, 51.0% hit vs the 39.5% Stage-3 floor, +0.187R
+vs the ungated +0.008R — and the gated time-exit leg reproduces the
+probe's +0.14R net@0.05 at the live-path level (+0.190R gross, maxDD
+5.71R, KEPT 149/150).  This is the first time the gate has been measured
+with the online ML model, risk engine and broker all seeing it — the
+probes filtered post-risk; the live path gates at emission, which the
+end-to-end run shows is slightly BETTER (model never even scores
+extreme-vol entries).  Test fixtures that synthesize candles at epoch
+0 were re-anchored to a 13:00 UTC base so the gate doesn't stand
+existing evaluate-based tests aside; new gate tests lock the behavior
+(out-of-window → None + "entry gate" rationale; disabled → restored).
+
+**Time-exit horizon sweep (2026-08-12, `_probe_time_exit_sweep.py`, 12.9-day
+corpus):** the exit horizon was swept from 4h down to 1h (2h = the adopted
+"mean positive-drift" baseline; same 1R band stop, target ignored, same UTC
+gate, fresh online model per run, single-position broker so n grows as the
+horizon shrinks):
+
+| h | n | hit | gross | net@0.05 | net@0.10 | tot@0.05 | tot@0.10 | maxDD |
+|---|---|---|---|---|---|---|---|---|
+| 4.0h | 46 | 37.0% | **+0.541R** | +0.491 | +0.441 | +22.6 | +20.3 | 6.0R |
+| **3.0h** | **55** | 38.2% | +0.491R | +0.441 | +0.391 | **+24.3** | **+21.5** | 8.3R |
+| 2.0h (baseline) | 75 | 40.0% | +0.276R | +0.226 | +0.176 | +17.0 | +13.2 | 8.7R |
+| 1.5h | 88 | 45.5% | +0.257R | +0.207 | +0.157 | +18.2 | +13.8 | 7.9R |
+| 1.0h | 119 | 49.6% | +0.237R | +0.187 | +0.137 | +22.3 | +16.4 | **5.1R** |
+
+Per-trade gross rises monotonically with horizon (still rising at 4h — the
+per-trade peak sits beyond the sweep) while hit falls (49.6% → 37.0%): the
+longer hold lets early winners mean-revert back while the trending winners
+accumulate.  Costs do NOT change the per-trade ordering (4h is best at any
+cost) but DO change the total-return optimum: the n-collapse (46 vs 119
+trades) moves the total-net peak to **3h** (+24.3R @0.05 / +21.5R @0.10),
+with 1h the runner-up at 0.05 cost (+22.3R, best drawdown 5.1R, best hit
+49.6%).  The adopted 2h baseline is the WORST cell on total net (+17.0R) —
+a local minimum of the sweep.
+
+**UTC 12-24h filtered-cell re-check @ 12.9 corpus days (2026-08-12):**
+`mql5/utc_cell_recheck.py` (durable — re-run as the corpus grows)
+replays the captured sniper leg and splits it by the sweep cells; corpus
+is 12.92 days / 172,368 ticks (not yet 15 — checkpoint measurement),
+and the replay matches realized exactly (51.0% == 51.0%, n=155).  The
+live gate is the production default now, so the entire capture sits in
+the 12-24h cell (cell == baseline); the strict subset is 18-24h:
+
+| cell | n | hit@1.2 | exp@1.2 | hit@1.5 | exp@1.5 | medMFE |
+|---|---|---|---|---|---|---|
+| UTC 12-24h & |range_z|<1.0 (was n=34 / 58.8% / +0.246R) | 155 | 54.2% | +0.175R | 51.6% | +0.199R | +0.98R |
+| **UTC 18-24h & |range_z|<1.5 (was n=24 / 58.8% / +0.267R)** | **67** | **58.2%** | **+0.242R** | **55.2%** | **+0.304R** | **+1.12R** |
+
+**The edge survives n-growth; the narrow session window is the robust
+form.**  The 12-24h cell diluted toward n=155 (58.8% → 54.2% hit,
++0.246R → +0.175R exp — positive, above the RR-1.2 floor, but weaker),
+while the 18-24h & |range_z|<1.5 cell held almost exactly at n=67 ≥ 60
+(hit 58.2%, exp +0.242R@1.2 / +0.304R@1.5, medMFE +1.12R).  Re-run
+`utc_cell_recheck.py` once the corpus passes ~15 days for the final
+confirmation.
+
+**Deep-vs-shallow + vol-regime profile on the sniper leg (2026-08-12,
+12.99-day corpus, 155 gated trades, fidelity replay MATCH 51.0%) —
+`utc_cell_recheck.py` now records per-trade entry features and splits the
+realized production geometry (fixed 1.9R target / 1R stop):**
+
+| depth (\|range_z_50\|) | n | hit | exp | sumR | maxDD | medMFE |
+|---|---|---|---|---|---|---|
+| rz<0.33 (near-center) | 44 | 47.7% | +0.251R | +11.0R | 7.3R | +0.87R |
+| rz 0.33-0.66 | 51 | 45.1% | +0.086R | +4.4R | 8.4R | +0.95R |
+| **rz>=0.66 (band-edge)** | **60** | **58.3%** | **+0.227R** | **+13.6R** | **2.9R** | **+1.10R** |
+
+| vol-regime (garch_vol_ratio) | n | hit | exp | sumR | maxDD | medMFE |
+|---|---|---|---|---|---|---|
+| **vol<=1.25** | **138** | **52.2%** | **+0.220R** | **+30.3R** | **5.7R** | **+1.02R** |
+| vol>1.25 | 17 | 41.2% | −0.076R | −1.3R | 4.0R | +0.91R |
+
+**The sniper edge CONCENTRATES — the opposite of the band's flat
+profile.**  The MQL5 band holds identical hit/MFE across depth (bleeding
+by volume); the sniper's edge is NOT flat: the **band-edge entries
+(rz>=0.66) are the strongest cell** — 58.3% hit, +0.227R, the LOWEST
+maxDD (2.9R) and highest medMFE (+1.10R) — while the mid-depth cell is
+the weak pocket (45.1%, +0.086R).  And the edge lives in **normal vol**
+(vol<=1.25: 52.2%, +0.220R, +30.3R sumR over 138 trades); the
+extreme-vol minority (17 trades, 11%) is the only negative pocket
+(41.2%, −0.076R).  Two discardable pockets identified: mid-depth and
+vol>1.25.  Caveats: single 12.99-day window, n=155 total (vol>1.25 n=17),
+and this band-edge axis (\|range_z_50\| within the <1.0 gate) is
+consistent with — not contradictory to — the older \|garch_z\|≥1.0
+finding, which measured stretched log-return z on the UNGATED book.
+
+**Direction + hour split of the forward-pass cell (2026-08-12, 13.01-day
+corpus, UTC 18-24h & |range_z|<1.5, n=67, fidelity MATCH) — does the edge
+concentrate further or is it balanced?**  `utc_cell_recheck.py` now
+splits the cell by side and hour (replay at RR 1.2/1.5; realized =
+production 1.9R geometry):
+
+| side | n | hit@1.2 | exp@1.2 | hit@1.5 | exp@1.5 | realized(1.9R) | medMFE |
+|---|---|---|---|---|---|---|---|
+| LONG | 52 | 59.6% | +0.264R | 55.8% | +0.303R | 53.8%/+0.310R | +1.13R |
+| SHORT | 15 | 53.3% | +0.166R | 53.3% | +0.306R | 53.3%/+0.175R | +1.12R |
+| ALL | 67 | 58.2% | +0.242R | 55.2% | +0.304R | 53.7%/+0.279R | +1.12R |
+
+| hour | n | hit@1.2 | exp@1.2 | realized(1.9R) | medMFE |
+|---|---|---|---|---|---|
+| 18-19 | 9 | 66.7% | +0.226R | 66.7%/+0.229R | +1.08R |
+| 19-20 | 9 | 88.9% | +0.956R | 77.8%/+0.894R | +1.40R |
+| 20-21 | 13 | 46.2% | +0.096R | 46.2%/+0.307R | +0.67R |
+| 21-22 | 14 | 57.1% | +0.133R | 57.1%/+0.256R | +0.73R |
+| 22-23 | 9 | 44.4% | +0.146R | 33.3%/−0.036R | +0.84R |
+| 23-24 | 13 | 53.8% | +0.089R | 46.2%/+0.106R | +1.10R |
+| **18-21 coarse** | **31** | **64.5%** | **+0.383R** | **61.3%/+0.455R** | **+1.28R** |
+| 21-24 coarse | 36 | 52.8% | +0.120R | 47.2%/+0.129R | +0.84R |
+
+**Verdict: the edge is balanced across direction but concentrates by
+hour.**  Both sides are positive (LONG 59.6%/+0.264R with 78% of the
+volume; SHORT 53.3%/+0.166R) and they converge at RR 1.5 (+0.303 vs
++0.306) — no one-sided dependency, the ML scoring simply favors longs in
+this window.  The hour split is the concentrated axis: the FIRST half of
+the window (18-21) carries nearly all the strength — 64.5% hit,
++0.383R@1.2, realized +0.455R@1.9 — vs the back half's 52.8%/+0.120R;
+19-20 is the standout hour (88.9%, +0.956R) and 22-23 is the only
+sub-50% cell (44.4%, realized −0.036R).  Caveats: hourly cells are thin
+(n=9-14; the coarse 18-21/21-24 split of 31/36 is the firmer read), and
+this is the same single 13-day window.  The RUNNING forward pass stays
+on 18-24 (changing it mid-pass would invalidate the out-of-sample test);
+the 18-21 concentration is the refinement candidate for the NEXT pass.
+
+**rz-tightening ladder (UTC 12-24h gate, 13.02-day corpus, 2026-08-12):**
+the user hypothesis — a tighter vol gate (rz<0.7) lifts hit/net at the
+cost of trade count — is **disproven**: tightening DILUTES the edge.  On
+the 155-trade gated population (fidelity MATCH), moving the |range_z_50|
+cap 1.0 → 0.7 lowers hit 54.2 → 50.0%, expectancy +0.175 → +0.110R and
+net@0.05 +0.125 → +0.060R while cutting trade count 34% (155 → 102);
+the 0.6 step bounces to +0.145R on noise (n=85).  The reason is the
+inverse of the band: on the sniper, the BAND-EDGE entries (rz 0.7-1.0,
+which the tighter cap deletes) are the strongest cell — the deep-vs-
+shallow profile's rz>=0.66 bucket is 58.3% hit / +0.227R / 2.9R maxDD —
+so removing them removes the edge.  The hour axis dominates: 18-24 &
+rz<0.7 (n=48) still runs 56.2%/+0.186R because 18-21 is the strong half
+of the window.  Conclusion: keep |range_z|<1.0; the band-edge entries
+are the edge, not a tail to trim.
+
+| cell | n | hit@1.2 | exp@1.2 | net@0.05 | hit@1.5 | exp@1.5 | medMFE |
+|---|---|---|---|---|---|---|---|
+| UTC 12-24h & rz<1.0 (gate) | 155 | 54.2% | +0.175R | +0.125R | 51.6% | +0.199R | +0.98R |
+| UTC 12-24h & rz<0.8 | 118 | 51.7% | +0.141R | +0.091R | 49.2% | +0.180R | +0.95R |
+| UTC 12-24h & rz<0.7 | 102 | 50.0% | +0.110R | +0.060R | 47.1% | +0.150R | +0.93R |
+| UTC 12-24h & rz<0.6 | 85 | 51.8% | +0.145R | +0.095R | 48.2% | +0.184R | +0.93R |
+| UTC 18-24h & rz<0.7 | 48 | 56.2% | +0.186R | +0.136R | 52.1% | +0.235R | +1.08R |
+| UTC 18-24h & rz<1.5 (fwd pass) | 67 | 58.2% | +0.242R | +0.192R | 55.2% | +0.304R | +1.12R |
+
+**12-24h hour ladder — the edge concentrates in THREE hours, not one block
+(13.02-day corpus, 2026-08-12):** per-hour replay of the gated population
+(155 trades, fidelity MATCH):
+
+| hour | n | hit@1.2 | exp@1.2 | net@0.05 | trades/day |
+|---|---|---|---|---|---|
+| 12-13 | 17 | 64.7% | +0.390R | +0.340R | 1.3 |
+| 13-14 | 12 | 50.0% | +0.034R | −0.016R | 0.9 |
+| 14-15 | 19 | 42.1% | −0.035R | −0.085R | 1.5 |
+| 15-16 | 15 | 46.7% | +0.055R | +0.005R | 1.2 |
+| 16-17 | 15 | 60.0% | +0.289R | +0.239R | 1.2 |
+| 17-18 | 10 | 40.0% | −0.064R | −0.114R | 0.8 |
+| 18-19 | 9 | 66.7% | +0.226R | +0.176R | 0.7 |
+| 19-20 | 9 | 88.9% | +0.956R | +0.906R | 0.7 |
+| 20-21 | 13 | 46.2% | +0.096R | +0.046R | 1.0 |
+| 21-22 | 14 | 57.1% | +0.133R | +0.083R | 1.1 |
+| 22-23 | 9 | 44.4% | +0.146R | +0.096R | 0.7 |
+| 23-24 | 13 | 53.8% | +0.089R | +0.039R | 1.0 |
+
+Best contiguous sub-windows: **4h 16-20 → 62.8%/+0.333R/net +0.283R
+(3.3/day, n=43)**; 5h 18-23 → 59.3%/+0.279R (4.1/day); 6h 16-22 →
+58.6%/+0.249R (5.4/day) vs the full 12-24h gate's 54.2%/+0.175R/net
++0.125R (11.9/day).  Three strength pockets: 12-13 (n=17, 64.7%, +0.390R),
+16-17 (60.0%, +0.289R) and 19-20 (n=9, 88.9%, +0.956R — thin); two
+net-negative hours drag the window: 14-15 (−0.035R) and 17-18 (−0.064R).
+So a tighter sub-window DOES roughly double expectancy at 28-45% of the
+trade count — the 18-23h / 16-22h candidates (4-5/day) are the balance
+point.  Caveats: hourly cells are thin (n=9-19) and the window was
+chosen on this single 13-day corpus — the candidates need an out-of-
+sample re-check before replacing the running 18-24h pass (which sits at
++0.242R, statistically indistinguishable from 16-22's +0.249R).
 
 **Why deep fades are the drawdown machines (6-month tester, RR 1.2,
 2026-08-11):** per-trade exit-reason / vol-regime-at-entry capture plus a
@@ -1035,6 +1449,29 @@ dead-trade time exit (exit at close when MFE < 0.4R after N bars) never
 fires at N=4, and at N=1 it makes things WORSE (exp −0.121R, maxDD
 227.8R vs 204.8R).  The tail is entry-side: hit toward the 50.5% floor,
 not exits.
+
+**Per-bucket drawdown attribution via equity-curve position
+(2026-08-12, RR 3.0 default geometry):** `BandBackTests` now records each
+trade's equity-curve position at close, so max drawdown is computed per
+depth bucket directly from reconstructed per-bucket equity curves (no
+sumR proxy):
+
+| bucket | n | hit | exp | sumR | maxDD | maxDD/trade |
+|---|---|---|---|---|---|---|
+| shallow ≤1.5 | 171 | 26.3% | +0.053R | +9.0R | 22.0R | 0.129R |
+| mid 1.5-2.5 | 326 | 25.8% | +0.031R | +10.0R | 37.0R | 0.114R |
+| deep >2.5 | 1,040 | 25.1% | +0.005R | +5.0R | 59.0R | 0.057R |
+
+**Direct measurement refines the "bleed by volume" story:** the deep
+fades own the largest ABSOLUTE drawdown (59.0R — 68% of the book), but
+the SMALLEST per-trade drawdown (0.057R/trade vs shallow 0.129R, mid
+0.114R).  The earlier depth-cap "6× drawdown cut" was therefore
+mechanical count-scaling after all — removing 1,040 trades' worth of DD
+accumulation, not a tail.  The shallow fades are the sharper per-trade
+risk AND the better expectancy (+0.053R); the deep bucket is the
+lowest-risk-per-trade leg that simply never converts (hit 25.1% vs 30%
+floor).  The equity-position field now ships in every BandBackTests
+report.
 
 **Depth-cap grid on the RR-3.0 DEFAULT geometry (6-month tester,
 2026-08-11):** confirms the cap HURTS at RR 3.0 and corrects the old
@@ -1111,6 +1548,371 @@ untested escape hatch: the tester's trail exit lacks the closed-candle
 grace the Python system already applies to stops — same-candle wick
 jitter scratches valid plans; a closed-candle trail exit is the natural
 next experiment.
+
+**Closed-candle trail grace — the trail STOPPED racing the target
+(same window, 2026-08-11):** the escape hatch above is now implemented
+(`InpTrailClosedCandle=true`): once armed (eff_stop == entry) the
+breakeven exit only fires when an M5 candle CLOSES through entry — a wick
+can no longer scratch a runner (mirrors the Python stop-lock).  Re-swept
+InpTrailFrac 0.2–0.8 at RR 1.2 with the grace ON:
+
+| frac | arm | n | hit | exp gross | exp@0.05 | maxDD |
+|---|---|---|---|---|---|---|
+| 0.0 | off | 1,796 | 40.4% | −0.112R | −0.162R | 204.8R |
+| **0.2** | 0.24R | **1,818** | **43.6%** | **+0.398R** | **+0.348R** | **5.8R** |
+| 0.4 | 0.48R | 1,800 | 43.5% | +0.283R | +0.233R | 7.8R |
+| 0.5 | 0.60R | 1,809 | 44.2% | +0.241R | +0.191R | 12.4R |
+| 0.6 | 0.72R | 1,778 | 43.9% | +0.199R | +0.149R | 13.2R |
+| 0.7 | 0.84R | 1,811 | 43.9% | +0.152R | +0.102R | 17.0R |
+| 0.8 | 0.96R | 1,831 | 43.5% | +0.117R | +0.067R | 21.4R |
+
+**Complete turnaround: every frac is positive, hit holds at 43.5–44.2%
+(vs 2–4% without the grace), and drawdown collapses 204.8R → 5.8R at
+frac 0.2.**  The wick-scratch was the entire problem — not late arming.
+With the grace, winners survive their pullbacks and the trail converts
+would-be −1R losers to 0R breakevens (~44% of trades scratch at entry;
+the real loss rate falls to ~12%).  Best cell: **frac 0.2 — +0.398R gross,
++0.348R net@0.05, +0.298R net@0.10, maxDD 5.8R** — the first positive-net
+band geometry at ANY RR, reproduced on the next-day window (+0.390R
+/+0.340R).  The honesty note: this rests on the closed-candle fill model
+the user chose (a wick through the breakeven level does NOT fill); with
+wick fills it is the old 2%-hit disaster.  Default stays 0.0 — flipping
+is a one-flag decision (`InpTrailFrac=0.2;InpTrailClosedCandle=true`)
+after the fresh-window confirmation.
+
+**RR-3.0 trail sweep with the grace (default geometry, same window,
+2026-08-11):** does the trail behave the same when the target is 3.0R
+instead of 1.2R?  Same qualitative shape — every frac positive, hit
+holds (no collapse), drawdown crushed — and the optimum moves EARLIER:
+
+| frac | arm (x3R) | n | hit | exp gross | exp@0.05 | exp@0.10 | maxDD |
+|---|---|---|---|---|---|---|---|
+| 0.0 | off | 1,537 | 25.4% | +0.016R | −0.034R | −0.084R | 81.0R |
+| **0.1** | **0.30R** | **1,537** | **28.1%** | **+0.687R** | **+0.637R** | **+0.587R** | **7.0R** |
+| 0.2 | 0.60R | 1,526 | 29.0% | +0.582R | +0.532R | +0.482R | 13.0R |
+| 0.4 | 1.20R | 1,526 | 28.4% | +0.380R | +0.330R | +0.280R | 18.0R |
+| 0.5 | 1.50R | 1,511 | 27.5% | +0.273R | +0.223R | +0.173R | 33.0R |
+| 0.6 | 1.80R | 1,506 | 27.7% | +0.233R | +0.183R | +0.133R | 32.0R |
+| 0.7 | 2.10R | 1,495 | 27.7% | +0.194R | +0.144R | +0.094R | 36.0R |
+| 0.8 | 2.40R | 1,529 | 27.3% | +0.156R | +0.106R | +0.056R | 47.0R |
+
+**frac 0.1 (arm at 0.30R) is the strongest band configuration ever
+measured: +0.687R gross, +0.637R net@0.05, +0.587R net@0.10, maxDD 81R
+→ 7R, hit 28.1%.**  The RR-3.0 win/loss/scratch mix at 0.1: 28.1% win
++3R, ~56% scratch 0R, only ~16% lose −1R (84% of trades never lose).
+STRONG (deep) bucket carries it (+0.697R, n=1469) — consistent with the
+RR-3.0 depth profile where deep fades are the positive buckets.  **One
+measurement-lens caveat that matters now:** with breakeven exits, the
+Stage-3 hit-vs-floor test (28.1% vs 30.0% floor) counts 0R scratches as
+losses and is no longer the right gate — the realized payout BE (wins
++3R, losers −1R, 56% scratches) is far below 28.1%.  The floor logic
+should treat 0R outcomes as non-losses before this geometry is judged
+floor-beatable.
+
+**Arming-to-exit path instrumentation (2026-08-11) — how many trades the
+grace actually saves:** `BandBackTests` now records per trade the bar the
+trail armed at, the arm MFE, and the count of post-arm bars that wick
+through entry.  Counterfactual: any armed trade with ≥ 1 wick-through
+would have been scratched at 0R by the old same-candle rule; the ones
+that STILL reached target are the trades the closed-candle grace
+converts from a 0R scratch to a +RR win.  Measured on the two RR-3.0
+cells:
+
+| frac | armed | wick-through | saved (0R→target) | saved R | grace R/trade |
+|---|---|---|---|---|---|
+| 0.1 | 1,299/1,537 (84.5%) | 449 (34.6%) | **125** | **+375R** | **+0.244R** |
+| 0.8 | 514/1,529 (33.6%) | 92 (17.9%) | 19 | +57R | +0.037R |
+
+**The mechanism, now quantified:** early arming (frac 0.1, arm at 0.30R)
+arms 84.5% of trades — most positions touch 0.30R MFE — and 34.6% of
+them then wick back through entry at least once, the exact jitter the
+grace spares.  Of those 449 wick-throughs, 125 (28%) went on to hit the
+3.0R target — **+375R the old rule would have thrown away, +0.244R over
+every trade in the run**.  Late arming (frac 0.8, arm at 2.40R) arms only
+33.6% (few trades ever reach 2.4R MFE), and its wick-through rate is
+half (17.9%) because a trade that reached 2.4R usually runs straight to
+3.0R — so it saves only 19 trades (+0.037R/trade).  This is the
+quantitative reason the optimum sits at the earliest arm: the grace
+converts the most scratches exactly where the trail arms earliest, while
+the breakeven-exit group (867 at frac 0.1) is 0R either way.  (Per-trade
+arm_hold/arm_mfe/dips fields now land in the journal record for every
+trade.)
+
+**Trail × edge-depth cross-tab (2026-08-11) — do shallow fades survive
+the trail better than deep extensions?**  The arming-path stats are now
+split by the same depth buckets (|z|/z_entry: shallow ≤1.5, mid
+1.5-2.5, deep >2.5):
+
+*frac 0.1 (arm 0.30R, the adopted cell):*
+
+| bucket | n | hit | exp | armed% | wick-thru% | saved/conv | saved R/trade |
+|---|---|---|---|---|---|---|---|
+| shallow ≤1.5 | 160 | 23.8% | +0.531R | 81.9% | 38.2% | 14/50 (28.0%) | +0.262R |
+| **mid 1.5-2.5** | **346** | **32.4%** | **+0.812R** | 84.1% | 34.0% | 36/99 (**36.4%**) | **+0.312R** |
+| deep >2.5 | 1,031 | 27.4% | +0.670R | 85.1% | 34.2% | 75/300 (25.0%) | +0.218R |
+
+*frac 0.4 (arm 1.20R):*
+
+| bucket | n | hit | exp | armed% | wick-thru% | saved/conv | saved R/trade |
+|---|---|---|---|---|---|---|---|
+| shallow ≤1.5 | 153 | 26.1% | +0.301R | 51.6% | **45.6%** | 11/36 (**30.6%**) | **+0.216R** |
+| mid 1.5-2.5 | 341 | 27.6% | +0.355R | 52.8% | 42.8% | 18/77 (23.4%) | +0.158R |
+| deep >2.5 | 1,032 | 29.1% | +0.400R | 52.9% | 37.2% | 52/203 (25.6%) | +0.151R |
+
+**Verdict: NO — at the adopted frac 0.1 the shallow fades are the
+WEAKEST bucket under the trail, not the strongest.**  Mid depth carries
+the edge (hit 32.4%, exp +0.812R, the best wick-through conversion
+36.4%, and the most saved R per bucket trade +0.312R); shallow is
+bottom on exp (+0.531R) and conversion (28.0%), deep sits in between.
+The shallow fades arm just as eagerly (81.9%) but their marginal entries
+convert to breakeven instead of running: the bucket's BE-trail exit rate
+is the highest (58.1%) and its hit rate actually DROPS vs the no-trail
+measurement (28.0% → 23.8%, the scratches now counting as losses),
+though expectancy still turns strongly positive (+0.119R → +0.531R) as
+the losers become 0R scratches.  Ordering flips at the later arm (frac
+0.4: shallow converts best, 30.6%), but all three buckets are positive
+at every frac — the trail+grace helps every depth class, just most of
+all the mid-depth fades.
+
+**RR 2.5-3.5 finer map (2026-08-12, `-Inputs
+InpDerivedTargetRR=<rr>;InpMinTargetRR=<rr>`, 0.25 steps, fresh 6-month
+window):** the coarse §50 grid found the hit-vs-floor gap narrowing to a
+~−4-point minimum around RR 3.0; the 0.25-step map pins it exactly:
+
+| RR | n | hit | exp gross | floor | gap (hit−floor) | tot net@0.05 |
+|---|---|---|---|---|---|---|
+| 2.50 | 1,649 | 27.6% | −0.034R | 33.6% | −6.0 | −138.5R |
+| 2.75 | 1,572 | 26.9% | +0.009R | 31.7% | −4.8 | −64.5R |
+| **3.00** | **1,537** | **25.4%** | **+0.016R** | **30.0%** | **−4.6** | **−52.3R** |
+| 3.25 | 1,483 | 23.8% | −0.040R | 28.5% | −4.7 | −133.5R |
+| 3.50 | 1,455 | 21.9% | −0.137R | 27.2% | −5.3 | −272.1R |
+
+**RR 3.0 is the exact optimum of the zone** — the gap minimum (−4.6pp)
+and the best expectancy (+0.016R; both 0.25 neighbors already lose it,
+3.5 collapses to −0.137R on the MFE cliff).  Trade count falls
+monotonically with RR (slot-occupancy), and the ≤1.25 shallow bucket
+clears its floor (31.4% vs 30.0%) while the full population still misses
+by 4.6pp — the Stage-3 gate keeps standing the band leg aside at every RR
+in the zone.
+
+**Wider-stop test at RR 1.2 (2026-08-12, 6-month window, sweep OFF,
+`InpGeomSweep=false;InpStopSigmaMult=<s>;InpTargetSigmaMult=<1.2s>`,
+`InpDerivedTargetRR=1.2;InpMinTargetRR=1.2`):** hypothesis — a wider
+stop cuts the ~59% stop-out rate enough to lift hit toward the 50.5%
+floor:
+
+| cell | stop/target σ | n | hit | exp gross | stop-out | floor gap |
+|---|---|---|---|---|---|---|
+| base RR 1.2 (sweep ON, 0.15-0.35σ) | ~0.2σ | 1,932 | 39.4% | −0.132R | 60.6% | −11.1 |
+| stop 0.50 / target 0.60 | 0.50/0.60 | 1,719 | 45.2% | −0.006R | 54.8% | −5.3 |
+| stop 0.60 / target 0.72 | 0.60/0.72 | 1,585 | 44.7% | −0.016R | 54.9% | −5.8 |
+| stop 0.70 / target 0.84 | 0.70/0.84 | 1,501 | 45.0% | −0.015R | 53.9% | −5.5 |
+
+**Directionally confirmed but insufficient alone:** the stop-out rate
+drops 60.6% → ~54% and hit jumps 39.4% → ~45% — but hit PLATEAUS at
+~45%, still −5.5pp short of the 50.5% floor, and expectancy lands at raw
+breakeven (−0.006R at 45.2% vs the 45.45% no-margin breakeven).  Wider
+stops also cost trade count (1,932 → 1,501 — wide stops trip
+`InpMaxStopPct=1.5%` more often).  **The hidden winner: the MID-depth
+bucket (depth 1.5-2.5) flips from the worst (37.9%, −0.166R at baseline)
+to floor-beatable with wide stops — 49.6%/+0.091R (0.50σ), 50.8%/+0.119R
+(0.60σ — CLEARS the 50.5% floor), 49.8%/+0.102R (0.70σ).**  A
+width-depth-window combo (depth 1.5-2.5 × 0.60σ stop) is the next
+candidate, not the full book.
+
+**Session-hour gate on the band (2026-08-12, 6-month window,
+`InpSessionHourStart/End`, default 0/24 = OFF — the sniper's proven UTC
+12-24h edge applied to the band):** the tester reports server→UTC
+offset 0, so bar hours ARE UTC hours here (apples-to-apples with the
+Python corpus's gmtime).
+
+| geometry | gate | n | hit | exp gross | net@0.05 | floor gap |
+|---|---|---|---|---|---|---|
+| RR 3.0 (default) | none | 1,537 | 25.4% | +0.016R | −0.034R | −4.6 |
+| **RR 3.0** | **UTC 12-24** | **846** | **26.6%** | **+0.063R** | **+0.013R** | **−3.4** |
+| RR 1.2 | none | 1,932 | 39.4% | −0.132R | −0.182R | −11.1 |
+| RR 1.2 | UTC 12-24 | 1,024 | 41.3% | −0.091R | −0.141R | −9.2 |
+
+**The hour edge helps the band — most at RR 3.0, and it flips the
+shallow subset floor-beatable.**  At RR 3.0 the gate cuts trade count
+45% (1,537 → 846) and lifts expectancy 4× (+0.016 → **+0.063R**),
+turning net@0.05 positive (+0.013R) — the first positive-cost cell on
+the default geometry.  The depth-split cells now CLEAR their floors:
+depth ≤1.25 → hit 40.0% vs 30.0% floor (exp **+0.600R**, n=35); ≤1.50 →
+30.9%/+0.235R; ≤2.00 → 30.3%/+0.212R; ≤2.50 → 30.2%/+0.207R — only the
+full population (26.6%) still misses by 3.4pp.  This revises the
+earlier "depth-cap HURTS at RR 3.0" claim: cap + session hour together
+DO clear the floor.  At RR 1.2 the gate lifts hit 39.4 → 41.3% but the
+−9.2pp floor gap remains (expectancy still negative).  Caveat: single
+6-month window; the gate removed mostly deep (>2.5) entries — the same
+bucket the wide-stop test flagged as the drag.
+
+**Time-exit + UTC-entry filter ported end-to-end (2026-08-12, 6-month
+window) — does the Python harness's +0.14R edge hold on the MQL5 band
+leg?**  `InpExitMode=1` (TIME) + `InpSessionHourStart/End` + the NEW
+`InpMaxRangeZ` filter (|range_z_50| — z of the current M5 range vs the
+prior-50 range window, population std, faithful to indicators.py
+zscore; 0 = OFF):
+
+| config (band, RR 3.0 unless noted) | n | hit | exp gross | net@0.05 | CI |
+|---|---|---|---|---|---|
+| TIME@1h alone (no filters) | 1,355 | 15.1% | +0.125R | +0.075R | PASS |
+| **TIME + UTC 12-24 + rz<1.0** | **574** | **13.1%** | **+0.094R** | **+0.044R** | PASS |
+| TIME + UTC 12-24 (no rz) | 756 | 13.0% | −0.013R | −0.063R | PASS |
+| TIME + UTC 18-24 + rz<1.5 | 350 | 12.3% | −0.127R | −0.177R | FAIL (shallow 0%) |
+| TIME + 12-24 + rz<1.0 @ RR 1.2 | 615 | 12.7% | −0.050R | −0.100R | FAIL (shallow −0.71R) |
+
+**Python reference (sniper leg, same combo): n=149, hit 50.3%, +0.142R
+gross / +0.092R net@0.05.**
+
+**Verdict: the direction and the rz mechanism replicate, the magnitude
+does not.**  The |range_z|<1.0 filter's contribution REPRODUCES exactly
+the Python pattern — it flips the session-filtered TIME leg from
+−0.063R to +0.044R net@0.05 (+0.107R/trade), confirming the port's
+fidelity.  But the full +0.14R edge does NOT transfer: the ported combo
+lands at +0.044R net@0.05 — roughly half the Python's +0.092R — and is
+WORSE than the band's own unfiltered TIME@1h (+0.075R net@0.05,
++101.6R total vs +25.3R total; the session+rz filters cut trade count
+58% and diluted the band edge).  The Python edge is sniper-leg-specific
+(ML-scored entries, ~50% hit at the 1h horizon); the band leg in TIME
+mode is a different population (~13% hit, ~87% stop-outs) whose edge
+lives in the DEEP bucket (cell A: deep exp +0.132R, sumR +49.7R — the
+1h TIME exit converts the deep fades' +2.7-3.0R median MFE into
+realized gains, the opposite of TARGET mode where deep is the drag).
+RR 1.2 and the 18-24h window are both negative in TIME mode on the
+band.  **Band's best stays TIME@1h, no entry filters.**
+
+**Shallow-fade + TIME-exit test — does the shallow edge clear the 30%
+floor?  NO (measured 2026-08-12, seed 42, RR 3.0):** the hypothesis was
+that the shallow bucket's positive TARGET-mode expectancy (<=1.50:
+n=171, hit 26.3%, +0.053R) would be lifted by the 1h TIME exit.  It is
+not — TIME mode's hit metric is positive-R closes (~14-16% by design at
+the 1h horizon), so the floor gate keying on a 3.0-RR planned geometry
+(30% floor) gets further away, not closer:
+
+| depth bucket | TARGET n/hit/exp | TIME n/hit/exp |
+|---|---|---|
+| <=1.25 | 86 / 31.4% / +0.256R | 60 / 11.7% / +0.014R |
+| **<=1.50** | **171 / 26.3% / +0.053R** | **115 / 13.9% / +0.062R** |
+| <=2.00 | 329 / 25.8% / +0.033R | 257 / 15.6% / +0.127R |
+| <=2.50 | 497 / 26.0% / +0.038R | 403 / 16.6% / +0.257R |
+| <=3.00 | 693 / 25.4% / +0.017R | 549 / 16.2% / +0.229R |
+| verdict | hit 25.4% does NOT beat 30% | hit 15.1% does NOT beat 30% |
+
+Shallow <=1.50 hit CRASHES 26.3% -> 13.9% (floor gap widens -3.7pp ->
+-16.1pp) while exp barely moves (+0.053R -> +0.062R).  The TIME edge at
+RR 3.0 is the MIRROR of TARGET mode: expectancy rises monotonically
+with depth (+0.014R at <=1.25 up to +0.229R at <=3.00) — the 1h exit
+realizes the deep fades' large MFE, and the shallow fades (small MFE,
+rarely positive at the horizon) are the weakest bucket.  And the 30%
+floor is STRUCTURALLY un-beatable in TIME mode: hit ~14-16% needs a
+~9R planned geometry for 1/(1+RR)+5% to drop to 15%, so no RR makes
+the current TIME-mode hit clear its own floor.
+
+**svcap ported to the tester as a forward-test candidate (6-month SYN75
+window, 2026-08-12):** the sniper's full svcap configuration is now a
+first-class tester config — `InpMaxGarchZ` (new input; |garch_z_score|,
+the entry bar's log-return over the post-update conditional EGARCH sigma
+— Python `arch_garch.update`'s `z_score = log_return / current_sigma`,
+faithful including the current bar's own return) joins the already-ported
+TIME exit, UTC 12-24h and |range_z|<1.0:
+
+| config (all TIME exit) | n | hit | gross | net@0.05 | maxDD | CI |
+|---|---|---|---|---|---|---|
+| UTC 12-24 + rz<1.0 @ RR 3.0 (no gz) | 574 | 13.1% | +0.094R | +0.044R | — | PASS |
+| **svcap (gz<=1.5) @ RR 3.0** | **450** | **13.3%** | **−0.082R** | **−0.132R** | **71.3R** | FAIL (shallow −0.455R) |
+| UTC 12-24 + rz<1.0 @ RR 1.2 (no gz) | 615 | 12.7% | −0.050R | −0.100R | — | FAIL (shallow −0.71R) |
+| **svcap (gz<=1.5) @ RR 1.2** | **478** | **13.8%** | **+0.054R** | **+0.004R** | **44.2R** | FAIL (shallow hit 0%) |
+
+**The garch-z depth cap is geometry-dependent on the band leg — and the
+sniper's svcap edge does NOT transfer.**  At RR 3.0 the cap HURTS: it
+filters 5,035 candidate bars (diag gzskip) and removes exactly the
+deep-extension entries the 1h TIME exit converts into gains (deep exp
+flips +0.132R → −0.218R, sumR −63.8R), flipping the leg from +0.094R to
+−0.082R gross.  At RR 1.2 the cap HELPS: mid-depth (1.5-2.5) concentrates
+the edge — n=127, hit 18.1%, **+0.334R**, sumR +42.4R, maxDD 20.5R — and
+the leg goes −0.050R → +0.054R gross (net@0.05 −0.100R → +0.004R,
+breakeven), maxDD 44.2R vs the RR-3.0 cell's 71.3R.  Either way the band
+leg in TIME mode stays a ~13-14% hit population vs the 50.5% (RR 1.2)
+/ 30.0% (RR 3.0) floors, so the Stage-3 gate correctly stands aside at
+both geometries; the mid-bucket +0.334R cell is the sharpest positive
+subset measured on the band in TIME mode but is not itself gate-clean.
+The Python svcap edge (52% hit, +0.160R net@0.05) remains sniper-leg-
+specific — ML-scored entries on a different population — and this port
+confirms the filters alone do not transplant it.
+
+**Forward-demo paper pass (started 2026-08-12 ~02:50 UTC) — UTC 18-24h
+& |range_z_50|<1.5 on the LIVE sniper leg, 30-trade target:**
+`mql5/forward_demo_pass.py` runs `run_live_paper` (venue=MT5,
+`Mt5TickClient` on the Blueberry terminal — MT5-first, paper fills via
+SimulatedExecutionBackend, NO orders ever sent) with the R_75
+`SymbolProfile` entry gate overridden to UTC [18,24) & |range_z_50|<1.5
+(the strongest measured cell: n=67/hit 58.2%/+0.242R@RR1.2 backtest,
++0.141R net@0.05 harness).  Journal:
+`journals/forward_demo_18_24.jsonl` (every decision_skip/signal/
+outcome); log: `.freebuff/forward_demo_18_24.log`.  The loop runs 3h
+chunks with restart-on-crash, counting `type=outcome` records, and stops
+at 30 closed trades (~6 days at the measured ~5/day); hard cap 7 days.
+
+**Two live-path fixes this pass required (both now in the code):**
+(1) `Mt5TickClient._connect` REUSES the running terminal's session when
+no credentials are configured (`account_info` populated) instead of
+crashing on `int(None)` — the terminal is the source of truth for what
+it's connected to; credentialed behavior is byte-identical when
+credentials ARE set.  Verified live: `reusing running terminal session
+(5098680@BlueberryMarketsSVG-Live)`, init 2ms, no login round-trip.
+(2) `run_live_paper` now passes the remaining run duration as the tick
+stream timeout — `Mt5TickClient.subscribe_ticks`/Deriv default is a 20s
+batch, so `duration_sec` chunks previously ended after one batch and the
+candle warmup never accumulated past its seed (every evaluation skipped
+"need 30 candles"); the stream now lives as long as the session.
+
+**Status as of launch (UTC ~02:50):** one clean instance, first 3h
+chunk, 30+ candles built, and the journal records the gate firing
+correctly — `"entry gate: UTC hour 2 outside [18, 24) window"` — so no
+trades until 18:00 UTC as configured.  Check progress with
+`wc -l journals/forward_demo_18_24.jsonl` and `grep -c '"type":
+"outcome"' journals/forward_demo_18_24.jsonl`.  Caveats: the Blueberry
+terminal must stay running/logged in (the pass reuses its session); each
+chunk starts a fresh online model (matches the backtest's
+fresh-model-per-run methodology); the single-flight guard serializes
+terminal init against the scheduled collector.
+
+**Time-exit exit mode ported to the tester + 6-month backtest (2026-08-12):**
+`BandBackTests` gains `InpExitMode` (0 = TARGET default; 1 = TIME) — the
+Python time-exit policy: exit at the 1R stop or the hold-horizon close,
+target ignored entirely, breakeven trail disabled, mirroring the harness
+`TimeExitCapturePaperBroker` byte-for-byte.  Backtest on the 6-month window
+(SYN75 M5, fresh-window re-run):
+
+| exit | hold | n | hit | exp gross | total gross | tot net@0.05 | tot net@0.10 |
+|---|---|---|---|---|---|---|---|
+| TARGET | 1h | 1,537 | 25.4% | +0.016R | +24.6R | −52.3R | −129.1R |
+| **TIME** | **1h** | **1,355** | **15.1%** | **+0.125R** | **+169.4R** | **+101.6R** | **+33.9R** |
+| TIME | 2h | 1,245 | 13.3% | +0.005R | +6.2R | −56.0R | −118.3R |
+| TIME | 3h | 1,160 | 12.8% | +0.017R | +19.7R | −38.3R | −96.3R |
+
+**TIME@1h is the first clearly positive cell on the 6-month window:**
++0.125R/trade (≈8× the TARGET baseline's +0.016R), +169.4R total gross,
+and it clears realistic costs — +101.6R total net@0.05, still +33.9R at
+0.10 cost.  Exit mix confirms the port: TARGET 74% stop / 26% target /
+0% time vs TIME 86% stop / 0% target / 14% time (the 14% are the
+hold-horizon closes).  The horizon optimum on the MQL5 band leg is 1h —
+unlike the Python UTC-gated sniper leg (where 3h won total net): the
+ungated band leg is ~70% deep extensions whose drift mean-reverts within
+~1-2h (2h collapses to +0.005R, 3h recovers only marginally), while the
+Python leg's gated shallow entries carry a longer-lived drift.  The
+mid-depth fades carry the TIME edge (1.5-2.5 at 1h: exp +0.335R, sumR
++96.6R).  Caveats: one 6-month window, single position, and the TIME hit
+(~13-15%) is structurally lower than TARGET's — expectancy is the right
+lens, not the target-hit floor.
+
+**Also fixed — the depth-split CI is now exit-mode-aware:** TIME mode's
+hit (~13-15% positive-R closes) sits below the TARGET-calibrated [15,60]
+band while expectancy is HIGHER, so the check false-failed every TIME
+cell.  `Test-DepthSplit` now reads the run block's `exit_mode` and
+applies a [5,60] hit band to TIME runs (still catches the ~2%
+trail-disaster class); unit fixtures + end-to-end PASS verified.
 
 ## Phase 6 — Risk, 2026-08-11
 

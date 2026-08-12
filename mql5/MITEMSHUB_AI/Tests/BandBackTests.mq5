@@ -81,6 +81,22 @@ input double InpVolGateRatio    = 1.10;  // re-based for the calibrated-fixed es
 //   in 6 months; 1.10 (8.5% of bars on the corpus) gives a measurable sample.
 input int    InpEmaPeriod       = 20;
 input int    InpSigmaEmaPeriod  = 30;
+input int    InpSessionHourStart = 0;  // UTC session-hour gate: only enter when the bar's UTC hour
+                                        // is in [start, end) — the sniper's proven hour edge (UTC
+                                        // 12-24h).  0/24 = OFF (default — preserves the baseline).
+input int    InpSessionHourEnd   = 24;
+input double InpMaxRangeZ        = 0.0; // entry filter: |range_z_50| — z of the current M5 range vs
+                                        // the prior-50 range window (population std, current bar
+                                        // included — faithful to indicators.py zscore) — must be <
+                                        // this.  0 = OFF (default).  Python combo: 1.0 (UTC
+                                        // 12-24h & |range_z_50| < 1.0).
+input double InpMaxGarchZ        = 0.0; // entry filter: |garch_z_score| — the entry bar's log-return
+                                        // over the conditional EGARCH sigma updated WITH that return
+                                        // (Python arch_garch.update: z_score = log_return /
+                                        // current_sigma) — must be < this.  0 = OFF (default).
+                                        // Python svcap combo: 1.5 (UTC 12-24h & |range_z|<1.0 &
+                                        // |garch_z|<=1.5, time-exit — the best balanced cell:
+                                        // +0.160R net@0.05 on the 13-day corpus).
 input int    InpWarmupCandles   = 60;  input int    InpDriftCooldown   = 10;
   input bool   InpDriftGate        = false; // ADWIN regime-transition veto: OFF by default — a
                                             // vol burst IS the band's entry signal, so the veto
@@ -97,6 +113,12 @@ input double InpTargetSigmaMult = 0.60; // sweep winner (§50): 3.0 x stop.  The
 //   RR 3.0 is adopted as the default (closest to floor-clearing AND positive
 //   gross expectancy).  Trail OFF — see InpTrailFrac.
 input int    InpHoldSec         = 3600;
+input int    InpExitMode        = 0;     // exit policy: 0 = TARGET (stop/target/expiry — the default),
+                                          // 1 = TIME (Python time-exit port: exit at the 1R stop or the
+                                          // hold-horizon close, target ignored entirely — mirrors the
+                                          // harness TimeExitCapturePaperBroker).  TIME mode also disables
+                                          // the breakeven trail so the stop stays at g_stop (faithful
+                                          // to the Python PaperBroker, which has no trail).
 input int    InpDeadExitBars    = 0;     // dead-trade time exit: exit at close once the position has
                                           // been open this many M5 bars with MFE < InpDeadExitMfeR
                                           // (0 = OFF).  Experiment: do deep-extension fades that never
@@ -105,9 +127,20 @@ input int    InpDeadExitBars    = 0;     // dead-trade time exit: exit at close 
 input double InpDeadExitMfeR    = 0.40;   // MFE (R) threshold for the dead-trade exit above
 input double InpMinTargetRR     = 3.0;  // = derived RR (never below it — the floor gate's own math)
 input double InpMaxStopPct      = 0.015;
-input double InpTrailFrac       = 0.0;  // OFF (§50): at 0.3 the trail arms at 0.3xRR and locks favorable
-//   excursions into breakeven, racing the target and killing the hit rate at
-//   ANY target (measured: 51.8% hit without the trail vs 1.8% with it, k=1.2R).
+input double InpTrailFrac       = 0.0;  // OFF (§50): with same-candle checks the trail arms at
+//   frac x RR and races the target, killing the hit rate at ANY target (measured:
+//   51.8% -> 1.8% hit).  WITH InpTrailClosedCandle=true the wick-scratch is gone and
+//   EVERY frac turns positive — best cell frac=0.2: +0.398R gross / +0.348R net@0.05,
+//   maxDD 204.8R -> 5.8R (6-month window, 2026-08-11).  Default stays 0.0 pending
+//   the fresh-window confirmation; flip via -Inputs InpTrailFrac=0.2.
+input bool   InpTrailClosedCandle = true; // closed-candle grace on the trail's breakeven exit:
+                                          // once armed (eff_stop == entry) a wick through entry
+                                          // does NOT scratch the position — only a full M5 candle
+                                          // CLOSING through entry exits it.  Same-candle wick
+                                          // checks make every trail frac destroy the hit rate
+                                          // (2-4% vs 40.4% at RR 1.2); the grace tests whether the
+                                          // breakeven conversion survives when jitter can't stop
+                                          // out a valid runner (mirrors the Python stop-lock).
 input double InpDerivedTargetRR = 3.0;  // sweep-winning target multiplier (R units) used by the geometry sweep
 input int    InpFloorMinSamples = 10;    // Stage-3 gate: resolved outcomes before the floor applies
 input double InpFloorMargin     = 0.05;  // Stage-3 gate: margin added to 1/(1+RR) break-even
@@ -163,6 +196,15 @@ struct BandTrade
    //--- deep-vs-shallow profile (drawdown investigation) ------
    ENUM_EXIT_REASON exit_reason;   // stop / target / time (incl. dead-trade exit)
    double vol_ratio_entry;         // prev_sigma / sigma_ema at entry (vol regime)
+   //--- equity-curve position (per-bucket drawdown attribution) ------
+   double cum_r_at_open;    // global cumulative R before this trade's outcome
+   double cum_r_at_close;   // global cumulative R after this trade's outcome
+   //--- trail arming-to-exit path (closed-candle grace quantification) ---
+   int    arm_hold_bars;     // hold bars elapsed when the trail armed (-1 = never armed)
+   double arm_mfe_r;         // MFE (R) at arming
+   int    dips_after_arm;    // bars after arming that wick through entry (spared by the grace)
+   bool   wick_scratch_wo_grace; // any post-arm wick would have scratched at 0R (no-grace model)
+   bool   hit_target_after_dip;  // exited at target AND had >= 1 spared dip (a trade the grace SAVED)
   };
 
 BandTrade g_trades[20000];
@@ -193,6 +235,13 @@ long   g_diag_conf_fail = 0;  // ... passed ComputeLevels but the decision gate 
 int    g_diag_warmup   = 0;   // still warming up / sigma unset
 int    g_diag_gap      = 0;   // gap-reanchored bars
 int    g_diag_inpos    = 0;   // skipped because in a position
+long   g_diag_hourskip = 0;   // skipped by the UTC session-hour gate
+long   g_diag_range_skip = 0; // skipped by the |range_z_50| entry filter
+long   g_diag_gz_skip    = 0; // skipped by the |garch_z_score| entry filter
+long   g_utc_offset_sec = 0;  // server->UTC offset at OnInit (tester-constant; DST caveat noted in docs)
+double g_range_hist[50];      // ring of the last 50 M5 ranges (range_z_50 filter)
+int    g_range_head = 0;
+int    g_range_cnt  = 0;
 double g_diag_ratio_max = 0.0;
 double   g_drift_win[20];
 int      g_drift_n      = 0;
@@ -300,6 +349,11 @@ double  g_mfe_r   = 0.0;
 double  g_planned_rr = 0.0;
 double  g_risk    = 0.0;
 datetime g_opened_at = 0;
+//--- trail arming path (per-position state persisted across ClosePosition calls)
+bool    g_armed_prev     = false;   // trail armed on a previous bar
+int     g_arm_hold       = 0;
+double  g_arm_mfe        = 0.0;
+int     g_dips_after_arm = 0;
 
 //--- Phase-5 decision-layer state at the current entry -----------------------
 double  g_setup_q   = 0.0;
@@ -412,22 +466,51 @@ bool ClosePosition(const double bar_open, const double high, const double low,
    double risk = g_risk;
    double mfe = (g_dir > 0) ? (high - g_entry) / risk : (g_entry - low) / risk;
    if(mfe > g_mfe_r) g_mfe_r = mfe;
-   bool trail_armed = CBandGeometry::TrailArmed(g_mfe_r, InpTrailFrac, g_planned_rr);
+   bool trail_armed = (InpExitMode == 0)
+                     && CBandGeometry::TrailArmed(g_mfe_r, InpTrailFrac, g_planned_rr);
    double eff_stop  = CBandGeometry::EffectiveStop(trail_armed, g_entry, g_stop);
    bool expired = (open_time + BAR_SEC >= g_opened_at + InpHoldSec);
    int hold_now = (int)((long)(open_time + BAR_SEC - g_opened_at) / BAR_SEC);
+   //--- trail arming-to-exit path instrumentation --------------------------
+   // Record the bar the trail first arms at, then count every subsequent bar
+   // that WICKS through entry without closing through — each such bar would
+   // have scratched the position at 0R under the old same-candle rule, and is
+   // exactly what InpTrailClosedCandle spares.  (The exit bar itself counts
+   // too when it closes through: the no-grace model scratches there as well.)
+   if(trail_armed && !g_armed_prev)
+     {
+      g_arm_hold = hold_now;
+      g_arm_mfe  = g_mfe_r;
+      g_armed_prev = true;
+     }
+   else if(g_armed_prev)
+     {
+      if(g_dir > 0)  { if(low < g_entry) g_dips_after_arm++; }
+      else           { if(high > g_entry) g_dips_after_arm++; }
+     }
    bool dead = (InpDeadExitBars > 0 && hold_now >= InpDeadExitBars
                 && g_mfe_r < InpDeadExitMfeR);
    bool stop_hit, target_hit;
    if(g_dir > 0)
      {
-      stop_hit   = (low <= eff_stop);
-      target_hit = (high >= g_target);
+      // Closed-candle grace on the breakeven trail: once armed
+      // (eff_stop == entry) only a full M5 candle CLOSING below entry
+      // exits at breakeven — an intrabar wick can't scratch a valid
+      // runner.  The un-armed stop and the target keep intrabar
+      // stop-first semantics (mirrors the Python PaperBroker).
+      if(trail_armed && InpTrailClosedCandle)
+         stop_hit = (close < eff_stop);
+      else
+         stop_hit = (low <= eff_stop);
+      target_hit = (InpExitMode == 0) && (high >= g_target);
      }
    else
      {
-      stop_hit   = (high >= eff_stop);
-      target_hit = (low <= g_target);
+      if(trail_armed && InpTrailClosedCandle)
+         stop_hit = (close > eff_stop);
+      else
+         stop_hit = (high >= eff_stop);
+      target_hit = (InpExitMode == 0) && (low <= g_target);
      }
    double exit_price = close;
    ENUM_EXIT_REASON reason = EXIT_TIME;
@@ -475,6 +558,13 @@ bool ClosePosition(const double bar_open, const double high, const double low,
       t.z_depth          = g_z_depth;
       t.exit_reason      = reason;
       t.vol_ratio_entry  = g_vol_ratio_entry;
+      t.cum_r_at_open    = g_cumR;      // equity position before this trade resolved
+      t.cum_r_at_close   = g_cumR + rr; // equity position after it resolved
+      t.arm_hold_bars    = g_armed_prev ? g_arm_hold : -1;
+      t.arm_mfe_r        = g_armed_prev ? g_arm_mfe : 0.0;
+      t.dips_after_arm   = g_dips_after_arm;
+      t.wick_scratch_wo_grace = (g_dips_after_arm > 0);
+      t.hit_target_after_dip  = (g_dips_after_arm > 0 && reason == EXIT_TARGET_HIT);
       g_trades[g_ntrades] = t;
       g_ntrades++;
      }
@@ -484,6 +574,10 @@ bool ClosePosition(const double bar_open, const double high, const double low,
    if(dd > g_maxDD) g_maxDD = dd;
    g_in_pos = false;
    g_mfe_r = 0.0;
+   g_armed_prev     = false;
+   g_arm_hold       = 0;
+   g_arm_mfe        = 0.0;
+   g_dips_after_arm = 0;
    return(true);
   }
 
@@ -509,10 +603,15 @@ int OnInit()
       Print(StringFormat("[BANDBT] garch mode: calibrated-fixed (omega=%.3f alpha=%.3f gamma=%.3f beta=%.3f)",
                          g_omega, g_alpha, g_gamma, g_beta));
       Print(StringFormat("[BANDBT] gate inputs: vol_ratio=%.2f drift_gate=%s drift_cooldown=%d z_entry=%.2f geom_sweep=%s "
-                         "dead_exit=%d/%s mfe_cut=%.2f",
+                         "dead_exit=%d/%s mfe_cut=%.2f exit_mode=%s session_hour=%d-%d range_z=%.2f garch_z=%.2f",
                          InpVolGateRatio, (InpDriftGate ? "ON" : "OFF"), InpDriftCooldown,
                          InpZEntry, (InpGeomSweep ? "ON" : "OFF"),
-                         InpDeadExitBars, (InpDeadExitBars > 0 ? "ON" : "OFF"), InpDeadExitMfeR));
+                         InpDeadExitBars, (InpDeadExitBars > 0 ? "ON" : "OFF"), InpDeadExitMfeR,
+                         (InpExitMode == 0 ? "TARGET" : "TIME"), InpSessionHourStart, InpSessionHourEnd,
+                         InpMaxRangeZ, InpMaxGarchZ));
+      g_utc_offset_sec = (long)(TimeCurrent() - TimeGMT());
+      Print(StringFormat("[BANDBT] server->UTC offset %d sec (session-hour gate uses bar_utc = bar_time - offset)",
+                         (int)g_utc_offset_sec));
      }
 
    MqlRates rates[];
@@ -556,6 +655,11 @@ int OnInit()
 
       double log_ret = MathLog(r.close / g_prev_close);
       g_prev_close = r.close;
+
+      // range_z_50 feed: current M5 range (high-low) into the 50-bar ring
+      g_range_hist[g_range_head] = r.high - r.low;
+      g_range_head = (g_range_head + 1) % 50;
+      if(g_range_cnt < 50) g_range_cnt++;
 
       g_prev_sigma = g_sigma;                    // sigma from the previous bar
       EgarchUpdate(log_ret, g_sigma);            // faithful Python EGARCH
@@ -607,6 +711,48 @@ int OnInit()
         }
       if(g_sigma_ema <= 0.0 || g_prev_sigma <= 0.0)
          continue;
+      if(InpSessionHourStart < InpSessionHourEnd)
+        {
+         MqlDateTime _dt;
+         TimeToStruct(t - g_utc_offset_sec, _dt);
+         int hour_utc = _dt.hour;
+         if(hour_utc < InpSessionHourStart || hour_utc >= InpSessionHourEnd)
+           {
+            g_diag_hourskip++;
+            continue;
+           }
+        }
+      if(InpMaxRangeZ > 0.0 && g_range_cnt >= 50)
+        {
+         double _mean = 0.0, _var = 0.0;
+         for(int i = 0; i < 50; i++) _mean += g_range_hist[i];
+         _mean /= 50.0;
+         for(int i = 0; i < 50; i++)
+           {
+            double _d = g_range_hist[i] - _mean;
+            _var += _d * _d;
+           }
+         double _sigma = MathSqrt(_var / 50.0);
+         double rz = (_sigma > 0.0) ? (g_range_hist[(g_range_head + 49) % 50] - _mean) / _sigma : 0.0;
+         if(MathAbs(rz) >= InpMaxRangeZ)
+           {
+            g_diag_range_skip++;
+            continue;
+           }
+        }
+      if(InpMaxGarchZ > 0.0)
+        {
+         // Python garch_z_score = log_return / current_sigma AFTER the
+         // EGARCH update with the entry bar's own return (arch_garch.py
+         // update(): z_score = log_return / current_sigma).  g_sigma is the
+         // post-update conditional vol here — the faithful value.
+         double garch_z = log_ret / MathMax(g_sigma, 1e-10);
+         if(MathAbs(garch_z) >= InpMaxGarchZ)
+           {
+            g_diag_gz_skip++;
+            continue;
+           }
+        }
       if(InpDriftGate && g_cooldown < InpDriftCooldown)
          continue;
       if(!(g_prev_sigma > InpVolGateRatio * g_sigma_ema))
@@ -730,17 +876,22 @@ int OnInit()
       g_planned_rr = MathAbs(g_target - g_entry) / (g_risk > 0.0 ? g_risk : g_entry * 0.001);
       g_mfe_r    = 0.0;
       g_opened_at = t + BAR_SEC;
+      g_armed_prev     = false;   // fresh trail-arm state per position
+      g_arm_hold       = 0;
+      g_arm_mfe        = 0.0;
+      g_dips_after_arm = 0;
       g_journal.StartPosition(cand, r.close, t + BAR_SEC);
      }
 
    //--- report --------------------------------------------------------
    Print(StringFormat("[BANDBT] diag: bars=%d gap=%d inpos=%d warmup=%d drift_fires=%d  ratio>1.1=%d ratio>1.3=%d  "
                       "ratio_max=%.3f  driftclear+cross=%d  +zpass=%d  dir0=%d  lv_fail=%d  "
-                      "depth_fail=%d  conf=%d  entries=%d",
+                      "depth_fail=%d  conf=%d  hourskip=%d  rangeskip=%d  gzskip=%d  entries=%d",
                       g_diag_bars, g_diag_gap, g_diag_inpos, g_diag_warmup, g_diag_drift,
                       g_diag_ratio110, g_diag_ratio130, g_diag_ratio_max,
                       g_diag_driftclear_cross, g_diag_zpass, g_diag_dir0,
-                      g_diag_lv_fail, g_diag_depth_fail, g_diag_conf_fail, g_ntrades));
+                      g_diag_lv_fail, g_diag_depth_fail, g_diag_conf_fail, g_diag_hourskip,
+                      g_diag_range_skip, g_diag_gz_skip, g_ntrades));
    if(g_ntrades < InpMinTrades)
      {
       Print(StringFormat("[BANDBT] only %d trades — measurement too thin", g_ntrades));
@@ -855,6 +1006,7 @@ int OnInit()
    // leave a shallow-only subset that clears its own break-even floor?
    Print("[BANDBT] edge-depth split (|z|/z_entry cap;  depth >= 1 by the z gate):");
    double d_caps[5] = {1.25, 1.5, 2.0, 2.5, 3.0};
+   int    d_n[5];      double d_hit[5];      double d_exp[5];
    for(int dc = 0; dc < 5; dc++)
      {
       int dn = 0, dw = 0;
@@ -869,28 +1021,159 @@ int OnInit()
             if(g_trades[i].rr > 0.0) dw++;
            }
         }
+      d_n[dc] = dn;
+      d_hit[dc] = (dn > 0) ? 100.0 * dw / dn : 0.0;
+      d_exp[dc] = (dn > 0) ? dr / dn : 0.0;
       if(dn == 0)
          continue;
-      double dhit = 100.0 * dw / dn;
-      double dexp = dr / dn;
+      double dhit = d_hit[dc];
+      double dexp = d_exp[dc];
       double dfloor_m = 100.0 * dfloor / dn;
       string dverdict = (dfloor_m > 0.0 && dhit >= dfloor_m) ? "CLEARS" : "misses";
       Print(StringFormat("[BANDBT]   depth <= %.2f:  n=%d  hit=%.1f%%  exp=%+.3fR  "
                          "(mean floor at entry %.1f%%)  -> %s the floor",
                          d_caps[dc], dn, dhit, dexp, dfloor_m, dverdict));
      }
+   // Machine-parseable depth profile for verify_all.ps1's bucket-composition
+   // contract: all 5 cumulative caps in one line (n / hit / exp / share of
+   // total), empty buckets emitted as n=0 — a refactor that changes which
+   // depth buckets the entries land in must fail the scheduled loop visibly.
+   Print(StringFormat("[BANDBT] DEPTHPROFILE caps=1.25,1.50,2.00,2.50,3.00 "
+                      "n=%d,%d,%d,%d,%d "
+                      "hit=%.1f,%.1f,%.1f,%.1f,%.1f "
+                      "exp=%+.3f,%+.3f,%+.3f,%+.3f,%+.3f "
+                      "share=%.1f,%.1f,%.1f,%.1f,%.1f total=%d",
+                      d_n[0], d_n[1], d_n[2], d_n[3], d_n[4],
+                      d_hit[0], d_hit[1], d_hit[2], d_hit[3], d_hit[4],
+                      d_exp[0], d_exp[1], d_exp[2], d_exp[3], d_exp[4],
+                      d_n[4] > 0 ? 100.0 * d_n[0] / d_n[4] : 0.0,
+                      d_n[4] > 0 ? 100.0 * d_n[1] / d_n[4] : 0.0,
+                      d_n[4] > 0 ? 100.0 * d_n[2] / d_n[4] : 0.0,
+                      d_n[4] > 0 ? 100.0 * d_n[3] / d_n[4] : 0.0,
+                      d_n[4] > 0 ? 100.0 * d_n[4] / d_n[4] : 0.0,
+                      d_n[4]));
+
+   // --- trail arming-to-exit path: how many trades does the grace save? ----
+   // Counterfactual: every armed trade that wick-throughs entry (any post-arm
+   // bar with low < entry / high > entry) would have been scratched at 0R by
+   // the old same-candle rule.  The ones that STILL reached target afterwards
+   // are trades the closed-candle grace converted from a 0R scratch to a +RR
+   // win — the quantified reason the trail stopped racing the target.
+   if(InpTrailFrac > 0.0)
+     {
+      int a_n = 0, a_dip = 0, a_saved = 0, a_tgt_nodip = 0, a_be = 0, a_time = 0;
+      double a_saved_r = 0.0, a_arm_mfe = 0.0, a_arm_mfe_dip = 0.0;
+      int a_dip_sum = 0, a_dip_saved = 0;
+      for(int i = 0; i < g_ntrades; i++)
+        {
+         if(g_trades[i].arm_hold_bars < 0)
+            continue;
+         a_n++;
+         a_arm_mfe += g_trades[i].arm_mfe_r;
+         a_dip_sum += g_trades[i].dips_after_arm;
+         if(g_trades[i].wick_scratch_wo_grace)
+           {
+            a_dip++;
+            a_arm_mfe_dip += g_trades[i].arm_mfe_r;
+           }
+         if(g_trades[i].hit_target_after_dip)
+           {
+            a_saved++;
+            a_saved_r += g_trades[i].rr;
+            a_dip_saved += g_trades[i].dips_after_arm;
+           }
+         else if(g_trades[i].exit_reason == EXIT_TARGET_HIT)
+            a_tgt_nodip++;
+         else if(g_trades[i].exit_reason == EXIT_BREAKEVEN_TRAIL)
+            a_be++;
+         else
+            a_time++;
+        }
+      Print(StringFormat("[BANDBT] trail arming path (InpTrailFrac=%.2f, grace %s): %d of %d trades armed (%.1f%%), "
+                         "avg arm-MFE %.2fR, avg dips-after-arm %.2f",
+                         InpTrailFrac, (InpTrailClosedCandle ? "ON" : "OFF"), a_n, g_ntrades,
+                         100.0 * a_n / g_ntrades, a_n > 0 ? a_arm_mfe / a_n : 0.0,
+                         a_n > 0 ? (double)a_dip_sum / a_n : 0.0));
+      Print(StringFormat("[BANDBT]   armed -> target, NO dip:      %d (would win anyway)", a_tgt_nodip));
+      Print(StringFormat("[BANDBT]   armed -> target AFTER dip(s): %d  (+%.2fR SAVED by the grace: 0R scratch -> target win)",
+                         a_saved, a_saved_r));
+      Print(StringFormat("[BANDBT]   armed -> breakeven exit:      %d (0R with or without the grace)", a_be));
+      Print(StringFormat("[BANDBT]   armed -> time exit:           %d", a_time));
+      Print(StringFormat("[BANDBT]   wick-through trades: %d (%.1f%% of armed), avg %d spared dips each, "
+                         "avg arm-MFE %.2fR vs %.2fR for the saved subset",
+                         a_dip, a_n > 0 ? 100.0 * a_dip / a_n : 0.0,
+                         a_dip > 0 ? a_dip_sum / a_dip : 0,
+                         a_dip > 0 ? a_arm_mfe_dip / a_dip : 0.0,
+                         a_saved > 0 ? a_saved_r / a_saved : 0.0));
+      Print(StringFormat("[BANDBT]   => the grace converts %d 0R scratches to %d target wins worth +%.2fR "
+                         "(+%.3fR/trade over all %d trades)",
+                         a_dip, a_saved, a_saved_r,
+                         g_ntrades > 0 ? a_saved_r / g_ntrades : 0.0, g_ntrades));
+      // --- arming path by edge-depth bucket: do shallow fades survive the
+      // trail better than the deep extensions? -----------------------------
+      // Same buckets as the deep-vs-shallow profile below (depth = |z|/z_entry
+      // at entry).  Per bucket: arm rate, wick-through rate, how many wick-
+      // throughs the grace converted to target wins (saved) and the saved R
+      // per bucket trade — the trail's benefit attributed to shallow vs deep.
+      double d_edges[4] = {1.0, 1.5, 2.5, 999.0};
+      string d_labels[3] = {"shallow <=1.5", "mid 1.5-2.5", "deep >2.5"};
+      Print("[BANDBT] arming path by depth bucket (shallow fades vs deep extensions):");
+      for(int b = 0; b < 3; b++)
+        {
+         int bn = 0, bw = 0, barm = 0, bdip = 0, bsaved = 0, bbe = 0;
+         double br = 0.0, bsaved_r = 0.0, bdip_sum = 0.0, barm_mfe = 0.0;
+         for(int i = 0; i < g_ntrades; i++)
+           {
+            double d = g_trades[i].z_depth;
+            if(d < d_edges[b] || d >= d_edges[b + 1])
+               continue;
+            bn++;
+            br += g_trades[i].rr;
+            if(g_trades[i].rr > 0.0) bw++;
+            if(g_trades[i].arm_hold_bars < 0)
+               continue;
+            barm++;
+            barm_mfe += g_trades[i].arm_mfe_r;
+            if(g_trades[i].wick_scratch_wo_grace)
+              {
+               bdip++;
+               bdip_sum += g_trades[i].dips_after_arm;
+              }
+            if(g_trades[i].hit_target_after_dip)
+              {
+               bsaved++;
+               bsaved_r += g_trades[i].rr;
+              }
+            else if(g_trades[i].exit_reason == EXIT_BREAKEVEN_TRAIL)
+               bbe++;
+           }
+         if(bn == 0)
+            continue;
+         Print(StringFormat(
+            "[BANDBT]   %-14s n=%4d hit=%5.1f%% exp=%+.3fR  armed %4d (%4.1f%%)  "
+            "wick-thru %3d (%4.1f%% of armed)  saved %3d/%3d conv %4.1f%% (+%.1fR, %+.3fR/trade)  "
+            "BE %3d  avg arm-MFE %.2fR",
+            d_labels[b], bn, 100.0 * bw / bn, br / bn, barm,
+            bn > 0 ? 100.0 * barm / bn : 0.0, bdip,
+            barm > 0 ? 100.0 * bdip / barm : 0.0, bsaved, bdip,
+            bdip > 0 ? 100.0 * bsaved / bdip : 0.0, bsaved_r,
+            bn > 0 ? bsaved_r / bn : 0.0, bbe,
+            barm > 0 ? barm_mfe / barm : 0.0));
+        }
+     }
 
    // --- deep-vs-shallow profile (drawdown investigation) -----------------
    // Why do the deep-extension fades bleed the drawdown?  Compare per-depth
-   // bucket: hold time, MFE, exit-reason mix, vol regime at entry, and the
-   // bucket's total R contribution (sumR — the cumulative bleed attribution;
-   // maxDD is path-dependent, sumR is the per-bucket share of the bleed).
+   // bucket: hold time, MFE, exit-reason mix, vol regime at entry, the
+   // bucket's total R contribution (sumR), and the bucket's OWN max drawdown
+   // computed directly from its realized equity curve (path-dependent, not
+   // just the sumR share).
    Print("[BANDBT] deep-vs-shallow profile (depth = |z|/z_entry at entry):");
    double d_edges[4] = {1.0, 1.5, 2.5, 999.0};
    string d_labels[3] = {"shallow <=1.5", "mid 1.5-2.5", "deep >2.5"};
    for(int b = 0; b < 3; b++)
      {
-      int dn = 0, dw = 0, ds = 0, dt = 0, dd = 0;
+      int dn = 0, dw = 0, ds = 0, dt = 0, dbt = 0, dd = 0;
       double dr = 0.0, dhold = 0.0, dmfe = 0.0, dvol = 0.0;
       for(int i = 0; i < g_ntrades; i++)
         {
@@ -905,6 +1188,7 @@ int OnInit()
             if(g_trades[i].rr > 0.0) dw++;
             if(g_trades[i].exit_reason == EXIT_STOP_HIT) ds++;
             else if(g_trades[i].exit_reason == EXIT_TARGET_HIT) dt++;
+            else if(g_trades[i].exit_reason == EXIT_BREAKEVEN_TRAIL) dbt++;
             else dd++;   // EXIT_TIME (incl. dead-trade exits)
            }
         }
@@ -913,11 +1197,27 @@ int OnInit()
          Print(StringFormat("[BANDBT]   %-14s n=0", d_labels[b]));
          continue;
         }
-      Print(StringFormat("[BANDBT]   %-14s n=%4d hit=%5.1f%% exp=%+.3fR sumR=%+.1fR  "
-                         "hold=%4.1fb mfe=%+.2fR vol@entry=%.2f  exits: stop %4.1f%% target %4.1f%% time %4.1f%%",
-                         d_labels[b], dn, 100.0 * dw / dn, dr / dn, dr,
+      // Per-bucket drawdown DIRECTLY from the equity curve: walk the bucket's
+      // trades in chronological order (g_trades is appended in close order) and
+      // track the bucket's own peak-to-trough on its realized cumulative-R
+      // curve, using each trade's recorded equity position (close - open).
+      double dcum = 0.0, dpeak = 0.0, ddd = 0.0;
+      for(int i = 0; i < g_ntrades; i++)
+        {
+         double d = g_trades[i].z_depth;
+         if(d >= d_edges[b] && d < d_edges[b + 1])
+           {
+            dcum += g_trades[i].cum_r_at_close - g_trades[i].cum_r_at_open;
+            if(dcum > dpeak) dpeak = dcum;
+            if(dpeak - dcum > ddd) ddd = dpeak - dcum;
+           }
+        }
+      Print(StringFormat("[BANDBT]   %-14s n=%4d hit=%5.1f%% exp=%+.3fR sumR=%+.1fR maxDD=%+.1fR  "
+                         "hold=%4.1fb mfe=%+.2fR vol@entry=%.2f  exits: stop %4.1f%% target %4.1f%% BE-trail %4.1f%% time %4.1f%%",
+                         d_labels[b], dn, 100.0 * dw / dn, dr / dn, dr, ddd,
                          dhold / dn, dmfe / dn, dvol / dn,
-                         100.0 * ds / dn, 100.0 * dt / dn, 100.0 * dd / dn));
+                         100.0 * ds / dn, 100.0 * dt / dn, 100.0 * dbt / dn,
+                         100.0 * dd / dn));
      }
    // Vol-regime split (independent of depth): is the bleed concentrated in
    // the highest-vol-regime entries?
@@ -990,6 +1290,8 @@ int OnInit()
    Print(StringFormat("[BANDBT]   VERDICT: achieved hit %.1f%% %s the %.1f%% floor — the band's %.2f-RR geometry %s",
                       all_hit, beatable ? "BEATS" : "does NOT beat", mean_floor, g_res_avg_rr,
                       beatable ? "is floor-beatable on this window" : "is NOT floor-beatable on this window — the gate stands aside"));
+   Print(StringFormat("[BANDBT] FLOORVERDICT floor=%.1f achieved=%.1f verdict=%s mean_rr=%.2f",
+                      mean_floor, all_hit, beatable ? "BEAT" : "NOT_BEAT", g_res_avg_rr));
    if(exp0 <= 0.0)
       Print("[BANDBT] NOTE: expectancy non-positive — the band leg is not yet tradeable on this window");
    Print(StringFormat("[BANDBT] === %d passed, %d failed ===  (%.1f%% hit rate, %.3f R expectancy on %s)",

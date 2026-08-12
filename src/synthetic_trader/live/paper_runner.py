@@ -114,7 +114,18 @@ async def run_live_paper(
                 _store_closed_candles(closed, histories)
 
         started = time.monotonic()
-        async for tick in client.subscribe_ticks(symbol):
+        # The tick stream must live as long as the run, not the client's
+        # default batch timeout (20s for Mt5TickClient / DerivWebSocketClient)
+        # — otherwise a "chunk" ends after one batch and the candle warmup
+        # never accumulates past its seed, so the entry gate can never fire.
+        # Derive the stream timeout from the remaining run duration so
+        # ``duration_sec`` truly bounds the session.
+        _stream_timeout = (
+            max(5.0, duration_sec - (time.monotonic() - started))
+            if duration_sec > 0
+            else 86400.0
+        )
+        async for tick in client.subscribe_ticks(symbol, timeout=_stream_timeout):
             if duration_sec > 0 and time.monotonic() - started >= duration_sec:
                 break
             live_ticks += 1

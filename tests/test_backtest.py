@@ -20,7 +20,9 @@ def synthetic_ticks(symbol: str = "R_75", candles: int = 130) -> list[Tick]:
     ticks: list[Tick] = []
     price = 100.0
     for candle in range(candles):
-        base_epoch = candle * 60
+        # 13:00 UTC base — inside the sniper entry-gate window (UTC [12,24))
+        # so run_ticks-based tests emit signals instead of standing aside.
+        base_epoch = 13 * 3600 + candle * 60
         for offset, delta in [(1, 0.00), (20, 0.10), (40, -0.04), (59, 0.32)]:
             ticks.append(Tick(symbol=symbol, epoch=base_epoch + offset, price=price + delta))
         price += 0.30
@@ -38,7 +40,8 @@ def random_walk_ticks(symbol: str = "R_75", candles: int = 300, seed: int = 7) -
     ticks: list[Tick] = []
     price = 100.0
     for candle in range(candles):
-        base_epoch = candle * 60
+        # 13:00 UTC base — inside the sniper entry-gate window.
+        base_epoch = 13 * 3600 + candle * 60
         # regime shift halfway: calmer first half, wilder second half
         sigma = 0.05 if candle < candles // 2 else 0.16
         for offset in (1, 20, 40, 59):

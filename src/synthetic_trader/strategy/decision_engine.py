@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import mean
@@ -354,6 +355,38 @@ class DecisionEngine:
         # ── Regime-specific probabilistic model (direction-agnostic) ──
         regime_out = regime_model(features, snapshot.regime, Direction.FLAT)
         features.update(regime_out.to_features())
+
+        # ── Sniper entry gate (live emission) ────────────────────────────
+        # Only emit sniper signals inside the profile's UTC hour window with a
+        # non-extreme entry-candle vol-z.  Measured end-to-end on the R_75
+        # corpus (2026-08-11): UTC 12-24h & |range_z_50| < 1.0 lifts the leg
+        # from ~0 to +0.09..0.14R net@0.05 with a 3x drawdown cut.  Placed
+        # AFTER the stateful monitors (regime/calibration/GARCH stay fed on
+        # every bar — the session detector must not freeze for 12h) and
+        # BEFORE scoring/emission, so out-of-window bars stand aside without
+        # wasting model work.  Only entry-time information is used
+        # (snapshot.epoch + snapshot features): no lookahead.
+        if trading_mode == "sniper" and profile.entry_gate_enabled:
+            hour_utc = time.gmtime(snapshot.epoch).tm_hour
+            if not (profile.entry_gate_hour_utc_start <= hour_utc < profile.entry_gate_hour_utc_end):
+                return DecisionReport(
+                    None,
+                    (
+                        "entry gate: UTC hour "
+                        f"{hour_utc} outside [{profile.entry_gate_hour_utc_start}, "
+                        f"{profile.entry_gate_hour_utc_end}) window",
+                    ),
+                )
+            entry_range_z = abs(features.get("range_z_50", 0.0))
+            if entry_range_z >= profile.entry_gate_max_range_z:
+                return DecisionReport(
+                    None,
+                    (
+                        "entry gate: |range_z_50| "
+                        f"{entry_range_z:.2f} >= {profile.entry_gate_max_range_z} "
+                        "(extreme entry-candle vol)",
+                    ),
+                )
 
         long_score = self._score_direction(Direction.LONG, snapshot.regime, features, calibrated_prob)
         short_score = self._score_direction(Direction.SHORT, snapshot.regime, features, calibrated_prob)

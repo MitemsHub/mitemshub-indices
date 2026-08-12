@@ -4,3 +4,5 @@ __pycache__/
 *.log
 _verify_build/
 *.set
+*.ex5
+*.ex4

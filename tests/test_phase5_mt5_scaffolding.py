@@ -66,7 +66,7 @@ class Phase5PaperRunnerVenueTests(unittest.IsolatedAsyncioTestCase):
             ) -> list[Tick]:
                 return [Tick(symbol=symbol, epoch=1.0, price=100.0)]
 
-            async def subscribe_ticks(self, symbol: str):
+            async def subscribe_ticks(self, symbol: str, timeout: float = 0.0):
                 if False:
                     yield Tick(symbol=symbol, epoch=2.0, price=101.0)
 

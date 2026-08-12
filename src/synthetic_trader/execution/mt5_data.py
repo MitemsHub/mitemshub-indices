@@ -512,23 +512,39 @@ class Mt5TickClient:
         else:
             _diag("terminal_info returned None — cannot verify terminal identity")
 
-        # Fast login (1 retry, 0.5s gap)
-        login = int(cfg["login"])
+        # Fast login (1 retry, 0.5s gap).  When NO credentials are configured
+        # but the running terminal already holds a session (account_info is
+        # populated), REUSE that session instead of forcing a credentialed
+        # re-login — the terminal is the source of truth for what it's
+        # connected to (MT5-first; no credential dependency).  When
+        # credentials ARE configured the behavior is byte-identical to before.
+        existing = None
+        _account_info = getattr(mt5, "account_info", None)
+        if callable(_account_info):
+            existing = await loop.run_in_executor(None, _account_info)
+        reuse_session = (cfg["login"] is None and existing is not None)
+        if reuse_session:
+            login = int(getattr(existing, "login", 0))
+            server = getattr(existing, "server", "") or ""
+            _diag(f"reusing running terminal session ({login}@{server})")
+        else:
+            login = int(cfg["login"])
+            server = cfg["server"] or ""
         password = cfg["password"] or ""
-        server = cfg["server"] or ""
         _t1 = time.perf_counter()
-        logged_in = False
-        for attempt in range(1 + _LOGIN_RETRY_COUNT):
-            logged_in = await loop.run_in_executor(
-                None,
-                lambda: mt5.login(login, password=password, server=server),
-            )
-            if logged_in:
-                break
-            err = mt5.last_error()
-            if attempt < _LOGIN_RETRY_COUNT:
-                _diag(f"login attempt {attempt + 1} failed: {err}, retrying in {_LOGIN_RETRY_SLEEP}s")
-                await asyncio.sleep(_LOGIN_RETRY_SLEEP)
+        logged_in = reuse_session
+        if not reuse_session:
+            for attempt in range(1 + _LOGIN_RETRY_COUNT):
+                logged_in = await loop.run_in_executor(
+                    None,
+                    lambda: mt5.login(login, password=password, server=server),
+                )
+                if logged_in:
+                    break
+                err = mt5.last_error()
+                if attempt < _LOGIN_RETRY_COUNT:
+                    _diag(f"login attempt {attempt + 1} failed: {err}, retrying in {_LOGIN_RETRY_SLEEP}s")
+                    await asyncio.sleep(_LOGIN_RETRY_SLEEP)
         _login_ms = (time.perf_counter() - _t1) * 1000
         if not logged_in:
             err = mt5.last_error()
@@ -541,7 +557,7 @@ class Mt5TickClient:
         # Persist timing for the health dashboard
         _store_mt5_timing(_init_ms, _login_ms)
 
-        _diag(f"logged in to {server} (init={_init_ms:.0f}ms, login={_login_ms:.0f}ms)")
+        _diag(f"connected as {login}@{server} (init={_init_ms:.0f}ms, login={_login_ms:.0f}ms)")
 
     async def __aexit__(self, *_: object) -> None:
         # Intentionally DO NOT call mt5.shutdown() here.

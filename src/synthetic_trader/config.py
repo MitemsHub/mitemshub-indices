@@ -66,6 +66,17 @@ class SymbolProfile:
     min_reclaim_quality_score: float = 0.65
     late_extension_rejection_ratio: float = 0.70
     max_stop_distance_pct: float = 0.05
+    # Sniper entry gate (live emission): only emit sniper signals inside the
+    # UTC hour window AND on non-extreme entry-candle volatility.  Measured
+    # end-to-end on the R_75 corpus (2026-08-11): UTC 12-24h & |range_z_50|
+    # < 1.0 lifts the sniper leg from ~0 to +0.09..0.14R net@0.05 with a 3x
+    # drawdown cut; extreme-vol entries carry the losses.  The gate lives in
+    # DecisionEngine.evaluate (sniper mode) so the live emission path, the
+    # watch loop, and the real-corpus harness all respect it.
+    entry_gate_enabled: bool = True
+    entry_gate_hour_utc_start: int = 12
+    entry_gate_hour_utc_end: int = 24
+    entry_gate_max_range_z: float = 1.0
 
 
 @dataclass(frozen=True)
