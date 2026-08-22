@@ -1,76 +1,21 @@
-; MITEMSHUB AI MARKET ENGINE -- VOLATILITY 75 OPTIMAL
-; ====================================================================
-; Generated: 2026-08-21 by reinforcement learning engine
-; Engine version: Final production (v6+ ensemble)
-; Backtest: 99 trades, 34.3% WR, PF=2.69, +$6,948 (+69.5%)
-; Max Drawdown: 4.62% | Max Consec Loss: 10
-; Grid search: 3,000+ configurations tested
-; ====================================================================
-;
-; === BAR AGGREGATION ===
-InpBarSec=300
-;
-; === ENTRY SIGNALS ===
-InpZEntry=1.8
+; MitemshubAI Volatility 75 FINAL - v11 z=1.9
+InpZEntry=1.9
+InpStopSigmaMult=2.0
+InpTargetSigmaMult=2.0
+InpRiskPerTrade=0.08
+InpMinTargetRR=1.0
+InpMaxStopPct=0.05
 InpVolGateRatio=1.0
 InpMinRevertSignal=0.0
-InpEmaPeriod=20
-InpSigmaEmaPeriod=30
-InpWarmupCandles=60
-;
-; === STOP & TARGET (price-normalized) ===
-InpStopSigmaMult=1.5
-InpTargetSigmaMult=2.0
-InpHoldSec=3600
-InpMinTargetRR=1.0
-InpMaxStopPct=0.015
-;
-; === GARCH PARAMETERS (calibrated) ===
-InpGarchMode=0
-InpGarchOmega=-1.884103
-InpGarchAlpha=0.142169
-InpGarchGamma=-0.073285
-InpGarchBeta=0.852741
-;
-; === TRAILING STOP ===
 InpTrailOn=true
-InpTrailFrac=0.3
-InpPartialClose=false
-InpClosedCandleGrace=false
-InpDriftGate=false
-;
-; === EXECUTION COSTS ===
-InpExitSlippage=0.05
-;
-; === RISK MANAGEMENT ===
-InpRiskPerTrade=0.005
-InpMinConfidence=0.0
-InpMinRewardRisk=0.0
-InpMaxDailyLossPct=1.0
-InpMaxConsecLosses=9999
-InpMaxEquityDDPct=1.0
-;
-; === STAGE-3 FLOOR GATE ===
-InpFloorMinSamples=10
-InpFloorMargin=0.05
-InpFloorGate=false
-;
-; === DEPTH CAP ===
-InpMaxEdgeDepth=0.0
-;
-; === EXECUTION MODE ===
-InpLiveExecution=true
-InpMagic=7788123
-InpMaxSlippagePts=50
-InpMaxSpreadPts=0
-;
-; === UI ===
-InpDrawDashboard=true
-InpDrawSignals=true
-InpZDecayExit=true
-InpZDecayTarget=1.0
+InpTrailStartR=0.8
+InpTrailStepR=0.2
+InpCooldownBars=1
 InpVol75StopMult=2.0
 InpSessionStart=0
 InpSessionEnd=24
 InpCorrelationGuard=true
 InpCorrelThreshold=2.0
+InpZDecayExit=true
+InpZDecayTarget=1.0
+InpEAComment=MITEM_v11

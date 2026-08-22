@@ -12,14 +12,14 @@
 //|  strong signals profitable, Profit Factor 3.0+ on Vol 75 & 100.  |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "10.00"
+#property version   "11.00"
 #property strict
 
 //+------------------------------------------------------------------+
 //| INPUTS                                                             |
 //+------------------------------------------------------------------+
 input int    InpBarSec           = 300;      // Bar period in seconds (300=M5)
-input double InpZEntry           = 2.0;      // z-score threshold to enter (optimized: only strong signals)
+input double InpZEntry           = 1.9;      // z-score threshold to enter (optimized v11: balanced signal quality)
 input double InpVolGateRatio     = 1.0;     // vol must be > ratio * vol_ema
 input double InpMinRevertSignal  = 0.0;     // min mean-reversion signal
 input int    InpEmaPeriod        = 20;       // EMA period for price average
@@ -37,7 +37,7 @@ input double InpGarchGamma       = -0.073285;
 input double InpGarchBeta        = 0.852741;
 input bool   InpTrailOn          = true;     // enable trailing stop
 input double InpTrailFrac        = 0.3;      // trail distance as fraction of ATR
-input double InpRiskPerTrade     = 0.005;    // 0.5% of equity per trade
+input double InpRiskPerTrade     = 0.08;     // 8% of equity per trade (aggressive compounding)
 input double InpMaxDailyLossPct  = 1.0;      // max daily loss before pause
 input double InpMaxEquityDDPct   = 1.0;      // max equity drawdown
 input bool   InpLiveExecution    = true;    // false=paper, true=live
@@ -377,7 +377,7 @@ void DashUpdate()
    double wr=(g_trade_count>0)?(double)wins/g_trade_count*100:0;
    double dd=(g_peak_equity>0)?(g_peak_equity-g_equity)/g_peak_equity*100:0;
    string L[20];
-   L[0]="=== MITEMSHUB AI v10 ===";
+   L[0]="=== MITEMSHUB AI v11 ===";
    L[1]="Balance: $"+DoubleToString(g_equity,2);
    L[2]="Trades: "+IntegerToString(g_trade_count);
    L[3]="Win Rate: "+DoubleToString(wr,1)+"%";
@@ -564,7 +564,7 @@ void ProcessOneBar(const AggregatedBar &bar)
       req.tp=NormalizeDouble(tp,_Digits);
       req.deviation=InpMaxSlippagePts;
       req.magic=InpMagic;
-      req.comment="MITEM_v10";
+      req.comment="MITEM_v11";
       if(!OrderSend(req,res))
         { Print("[MITEM] ORDER FAIL:",res.retcode,"-",res.comment); g_cooldown=3; return; }
       stake=res.volume*SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE)
@@ -582,7 +582,7 @@ void ProcessOneBar(const AggregatedBar &bar)
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   Print("[MITEM] === MITEMSHUB AI v10 starting ===");
+   Print("[MITEM] === MITEMSHUB AI v11 starting ===");
    g_equity = AccountInfoDouble(ACCOUNT_BALANCE);
    g_peak_equity = g_equity;
    Print(StringFormat("[MITEM] Account balance: $%.2f", g_equity));

@@ -160,7 +160,7 @@ def _fetch_all_data():
 
 
 def _read_journal():
-    """Read recent EA journal entries."""
+    """Read recent EA journal entries — only latest session."""
     mt5_dir = os.path.expanduser("~/AppData/Roaming/MetaQuotes/Terminal")
     entries = []
     if not os.path.isdir(mt5_dir):
@@ -170,17 +170,26 @@ def _read_journal():
         if not os.path.isdir(log_dir):
             continue
         files = sorted(os.listdir(log_dir), reverse=True)
-        for f in files[:2]:
+        for f in files[:1]:  # only latest log file
             fp = os.path.join(log_dir, f)
             try:
                 with open(fp, 'rb') as fh:
-                    content = fh.read(16000)
+                    content = fh.read(50000)
                     text = content.decode('utf-16-le', errors='replace')
                     for line in text.split('\n'):
                         line = line.strip()
                         if '[MITEM]' in line or 'ORDER FAIL' in line:
-                            entries.append({'text': line[:150], 'time': line[:19] if len(line) > 19 else ''})
-                            if len(entries) >= 50:
+                            # Skip old session entries
+                            if '$10000' in line:
+                                continue
+                            # Extract just the [MITEM] part for cleaner display
+                            if '[MITEM]' in line:
+                                idx = line.index('[MITEM]')
+                                clean = line[idx:idx+120]
+                            else:
+                                clean = line[:120]
+                            entries.append({'text': clean, 'time': ''})
+                            if len(entries) >= 30:
                                 return entries
             except:
                 pass
@@ -188,49 +197,62 @@ def _read_journal():
 
 
 def _fetch_trade_history():
-    """Fetch recent trade history."""
-    # Last 7 days
+    """Fetch recent trade history from MT5 deals — pair IN/OUT into completed trades."""
     now = datetime.now()
     from_date = now - timedelta(days=7)
     deals = mt5.history_deals_get(from_date, now)
-    trades = []
+    completed = []
     if deals:
-        for deal in deals:
-            if deal.magic == 7788123 or deal.comment.startswith('MITEM'):
-                trades.append({
-                    'ticket': deal.ticket,
-                    'order': deal.order,
-                    'time': datetime.fromtimestamp(deal.time).strftime('%Y-%m-%d %H:%M'),
-                    'symbol': deal.symbol,
-                    'type': 'BUY' if deal.type == mt5.ORDER_TYPE_BUY else 'SELL',
-                    'entry': 'IN' if deal.entry == mt5.DEAL_ENTRY_IN else 'OUT',
-                    'volume': deal.volume,
-                    'price': deal.price,
-                    'profit': deal.profit,
-                    'swap': deal.swap,
-                    'commission': deal.commission,
-                    'comment': deal.comment,
+        # Filter MITEM deals only
+        mitem_deals = [d for d in deals if d.magic == 7788123 or d.comment.startswith('MITEM')]
+        # Group by symbol and pair IN/OUT
+        pending_in = {}  # symbol -> IN deal
+        for deal in mitem_deals:
+            sym = deal.symbol
+            if deal.entry == mt5.DEAL_ENTRY_IN:
+                pending_in[sym] = deal
+            elif deal.entry == mt5.DEAL_ENTRY_OUT and sym in pending_in:
+                in_deal = pending_in.pop(sym)
+                direction = 'BUY' if in_deal.type == mt5.ORDER_TYPE_BUY else 'SELL'
+                entry_price = in_deal.price
+                exit_price = deal.price
+                pnl = deal.profit + deal.swap + deal.commission
+                # Parse SL/TP from comment
+                sl = 0
+                tp = 0
+                comment = deal.comment or ''
+                if '[sl ' in comment:
+                    try:
+                        sl = float(comment.split('[sl ')[1].split(']')[0])
+                    except:
+                        pass
+                if '[tp ' in comment:
+                    try:
+                        tp = float(comment.split('[tp ')[1].split(']')[0])
+                    except:
+                        pass
+                status = 'STOP' if '[sl ' in comment else 'TARGET' if '[tp ' in comment else 'TIME'
+                completed.append({
+                    'time': datetime.fromtimestamp(in_deal.time).strftime('%Y-%m-%d %H:%M'),
+                    'exit_time': datetime.fromtimestamp(deal.time).strftime('%H:%M'),
+                    'symbol': sym,
+                    'direction': direction,
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'sl': sl,
+                    'tp': tp,
+                    'status': status,
+                    'pnl': round(pnl, 2),
+                    'volume': in_deal.volume,
+                    'comment': 'MITEM',
+                    'source': 'MT5',
                 })
-    # Also load from file
-    history_file = os.path.join(DATA_DIR, 'trade_history.json')
-    if os.path.exists(history_file):
-        try:
-            with open(history_file, 'r') as f:
-                file_trades = json.load(f)
-                # Merge with MT5 deals
-                existing_tickets = {t['ticket'] for t in trades}
-                for ft in file_trades:
-                    if ft.get('ticket') not in existing_tickets:
-                        trades.append(ft)
-        except:
-            pass
-
     with lock:
-        cache['trades'] = trades[-200:]  # Keep last 200
+        cache['trades'] = completed[-200:]
 
 
 def _parse_ea_log_trades():
-    """Parse MITEM trades from the EA's MQL5 log files."""
+    """Parse MITEM trades from the EA's MQL5 log files — merge with existing MT5 trades."""
     mt5_dir = os.path.expanduser("~/AppData/Roaming/MetaQuotes/Terminal")
     if not os.path.isdir(mt5_dir):
         return
@@ -240,15 +262,19 @@ def _parse_ea_log_trades():
         log_path = os.path.join(mt5_dir, d, 'MQL5', 'logs')
         if not os.path.isdir(log_path):
             continue
-        for fname in sorted(os.listdir(log_path), reverse=True)[:3]:
+        for fname in sorted(os.listdir(log_path), reverse=True)[:2]:
             if not fname.endswith('.log'):
                 continue
             fp = os.path.join(log_path, fname)
             try:
                 with open(fp, 'rb') as fh:
                     text = fh.read(200000).decode('utf-16-le', errors='replace')
+                    open_trades = []  # stack of open trades from this log session
                     for line in text.split('\n'):
                         if '[MITEM]' not in line:
+                            continue
+                        # Skip old session entries (from previous EA runs)
+                        if '$10000' in line or 'MITEMSHUB AI v10 starting' in line:
                             continue
                         # Parse SELL/BUY entries
                         if any(kw in line for kw in ['SELL @', 'BUY @']):
@@ -256,7 +282,6 @@ def _parse_ea_log_trades():
                                 parts = line.split('\t')
                                 time_str = parts[2].strip() if len(parts) > 2 else ''
                                 msg = line.split('[MITEM]')[1].strip()
-                                # Extract: SELL @607.86000 SL=609.80934 TP=605.26089 RR=1.33 z=1.79 $2.60
                                 direction = 'BUY' if 'BUY @' in msg else 'SELL'
                                 entry_price = float(msg.split('@')[1].split()[0])
                                 sl = float(msg.split('SL=')[1].split()[0]) if 'SL=' in msg else 0
@@ -268,7 +293,7 @@ def _parse_ea_log_trades():
                                     'time': time_str,
                                     'symbol': 'Volatility 100 Index' if '100' in line else 'Volatility 75 Index',
                                     'direction': direction,
-                                    'entry': entry_price,
+                                    'entry_price': entry_price,
                                     'sl': sl,
                                     'tp': tp,
                                     'rr': rr,
@@ -280,20 +305,18 @@ def _parse_ea_log_trades():
                             except Exception:
                                 pass
 
-                        # Parse STOP/TARGET/SESSION entries
-                        elif any(kw in line for kw in ['STOP @', 'TARGET @', 'TIME @']):
+                        # Parse STOP/TARGET/TIME/ZDECAY exit entries
+                        elif any(kw in line for kw in ['STOP @', 'TARGET @', 'TIME @', 'ZDECAY @']):
                             try:
                                 parts = line.split('\t')
                                 time_str = parts[2].strip() if len(parts) > 2 else ''
                                 msg = line.split('[MITEM]')[1].strip()
-                                # STOP @609.85934 R=-1.026 $-2.67 #trade=1
                                 exit_price = float(msg.split('@')[1].split()[0])
                                 r_mult = float(msg.split('R=')[1].split()[0]) if 'R=' in msg else 0
                                 pnl = float(msg.split('$')[1].split()[0]) if '$' in msg else 0
-                                reason = 'STOP' if 'STOP @' in msg else 'TARGET' if 'TARGET @' in msg else 'TIME'
-                                # Find matching open trade and close it
+                                reason = 'STOP' if 'STOP @' in msg else 'TARGET' if 'TARGET @' in msg else 'ZDECAY' if 'ZDECAY @' in msg else 'TIME'
                                 for ot in reversed(log_trades):
-                                    if ot['status'] == 'OPEN' and ot['symbol'] == ('Volatility 100 Index' if '100' in line else 'Volatility 75 Index'):
+                                    if ot['status'] == 'OPEN':
                                         ot['status'] = reason
                                         ot['exit_price'] = exit_price
                                         ot['exit_time'] = time_str
@@ -305,13 +328,23 @@ def _parse_ea_log_trades():
             except Exception:
                 pass
 
-    # Merge EA log trades into cache
+    # Merge EA log trades into cache, deduplicate against MT5 trades
     with lock:
         existing = cache.get('trades', [])
-        existing_times = {(t.get('time', ''), t.get('entry', 0)) for t in existing if t.get('source') == 'EA_LOG'}
+        # Build set of existing (time, symbol, direction) to avoid duplicates
+        existing_keys = set()
+        for t in existing:
+            key = (t.get('time', '')[:16], t.get('symbol', ''), t.get('direction', t.get('type', '')))
+            existing_keys.add(key)
         for lt in log_trades:
-            if (lt['time'], lt.get('entry', 0)) not in existing_times:
+            if lt['status'] == 'OPEN':
+                continue  # skip unmatched open trades
+            key = (lt.get('time', '')[:16], lt.get('symbol', ''), lt.get('direction', ''))
+            if key not in existing_keys:
                 existing.append(lt)
+                existing_keys.add(key)
+        # Sort by time descending
+        existing.sort(key=lambda x: x.get('time', ''), reverse=True)
         cache['trades'] = existing[-200:]
 
 
@@ -325,15 +358,20 @@ def _compute_metrics():
                 'total_pnl': 0, 'avg_win': 0, 'avg_loss': 0,
                 'max_drawdown': 0, 'sharpe': 0, 'expectancy': 0,
             }
+            cache['equity_curve'] = [{'equity': 30.04, 'trade': 0}]
         return
 
-    # Filter to completed trades (have pnl and are closed)
-    completed = [t for t in trades if t.get('pnl', 0) != 0 and
-                 (t.get('entry') in ('OUT',) or
-                  t.get('status') in ('STOP', 'TARGET', 'TIME') or
-                  (t.get('status') not in ('OPEN', None) and 'pnl' in t))]
+    # All trades now have 'pnl' field (completed trades only)
+    completed = [t for t in trades if t.get('pnl', 0) != 0]
     if not completed:
-        completed = [t for t in trades if t.get('pnl', 0) != 0]
+        with lock:
+            cache['metrics'] = {
+                'total_trades': 0, 'win_rate': 0, 'profit_factor': 0,
+                'total_pnl': 0, 'avg_win': 0, 'avg_loss': 0,
+                'max_drawdown': 0, 'sharpe': 0, 'expectancy': 0,
+            }
+            cache['equity_curve'] = [{'equity': 30.04, 'trade': 0}]
+        return
 
     wins = [t for t in completed if t.get('pnl', 0) > 0]
     losses = [t for t in completed if t.get('pnl', 0) <= 0]
