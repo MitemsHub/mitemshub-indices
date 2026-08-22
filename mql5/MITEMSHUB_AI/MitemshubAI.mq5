@@ -504,7 +504,7 @@ void ProcessOneBar(const AggregatedBar &bar)
       MqlTradeResult   res={};
       req.action=TRADE_ACTION_DEAL;
       req.symbol=_Symbol;
-      req.volume=0.01; // Will be adjusted by risk calculation
+      req.volume=SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
       req.type=(direction>0)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
       req.price=(direction>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
       req.sl=NormalizeDouble(sl,_Digits);
