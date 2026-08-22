@@ -21,6 +21,11 @@
 input int    InpBarSec           = 300;      // Bar period in seconds (300=M5)
 input double InpZEntry           = 1.9;      // z-score threshold to enter (optimized v11: balanced signal quality)
 input double InpZCap              = 3.5;      // z-score cap: skip if above (trending too hard for mean reversion)
+input double InpVol75ZCeil         = 2.5;      // Vol 75 z-ceiling: skip above (mean reversion breaks down)
+input double InpGemMult            = 2.0;      // size multiplier for gem setups (z=3.0-4.0)
+input double InpReentryMult        = 1.3;      // size multiplier after stop (Vol 100: 59% re-entry WR)
+input double InpPartialCloseR      = 1.0;      // close partial at this R-multiple
+input double InpPartialClosePct    = 0.5;      // fraction of position to close at partial target
 input double InpVolGateRatio     = 1.0;     // vol must be > ratio * vol_ema
 input double InpMinRevertSignal  = 0.0;     // min mean-reversion signal
 input int    InpEmaPeriod        = 20;       // EMA period for price average
@@ -276,22 +281,31 @@ public:
       if(m_pos.direction<0 && low<=m_pos.take_profit)
         { exit_price=m_pos.take_profit; reason="TARGET"; return 1; }
       if(pnl>m_peak_pnl) m_peak_pnl=pnl;
+      //--- Break-even at 0.5R: protect capital early
+      if(InpTrailOn && rr>=0.5)
+        {
+         if(m_pos.direction>0)
+           { double be=m_pos.entry_price+risk*0.1; if(be>m_pos.stop_loss) m_pos.stop_loss=be; }
+         else
+           { double be=m_pos.entry_price-risk*0.1; if(be<m_pos.stop_loss) m_pos.stop_loss=be; }
+        }
+      //--- Aggressive trailing: tighter at 1R, loose at 3R+
       if(InpTrailOn && rr>=1.0)
         {
          double td=InpTrailFrac*m_atr_ema;
          if(td<risk*0.5) td=risk*0.5;
+         double trail_mult=1.0;
+         if(rr>=1.0) trail_mult=0.6;   // tight trail at 1R (lock 40% of move)
+         if(rr>=2.0) trail_mult=0.45;  // tighter at 2R (lock 55%)
+         if(rr>=3.0) trail_mult=0.3;   // very tight at 3R (lock 70%)
          if(m_pos.direction>0)
            {
-            double ns=close-td;
-            if(rr>=2.0) ns=close-td*0.8;
-            if(rr>=3.0) ns=close-td*0.6;
+            double ns=close-td*trail_mult;
             if(ns>m_pos.stop_loss) m_pos.stop_loss=ns;
            }
          else
            {
-            double ns=close+td;
-            if(rr>=2.0) ns=close+td*0.8;
-            if(rr>=3.0) ns=close+td*0.6;
+            double ns=close+td*trail_mult;
             if(ns<m_pos.stop_loss) m_pos.stop_loss=ns;
            }
         }
@@ -334,6 +348,10 @@ datetime g_day_start=0;
 //--- Z-score decay tracking
 double g_peak_z=0;              // peak z-score since entry
 bool   g_z_decay_exit=false;    // flag to exit on z decay
+//--- Smart tracking
+bool   g_last_trade_won=false;  // did the last trade win?
+double g_partial_closed=0;      // fraction already partially closed
+bool   g_gem_trade=false;       // is this a gem trade (z=3.0-4.0)?
 
 //+------------------------------------------------------------------+
 //| HELPERS                                                            |
@@ -495,6 +513,7 @@ void ProcessOneBar(const AggregatedBar &bar)
             g_trade_count++;
            }
          Print(StringFormat("[MITEM] %s @%.5f R=%.3f $%.2f #trade=%d",reason,slipped,rr,pnl,g_trade_count));
+         g_last_trade_won=(rr>0);
          g_trail.Reset();
         }
      }
@@ -516,10 +535,14 @@ void ProcessOneBar(const AggregatedBar &bar)
    if(InpMinRevertSignal>0)
      { if(MeanRevertSignal(g_garch.LastZ())<InpMinRevertSignal) return; }
    double z_dev=MathLog(bar.close/g_ema)/g_prev_sigma;
-   if(MathAbs(z_dev)<InpZEntry) return;
+   double az=MathAbs(z_dev);
+   if(az<InpZEntry) return;
    //--- Z-cap: skip if z too high (market trending, not reverting)
-   if(InpZCap>0 && MathAbs(z_dev)>InpZCap)
+   if(InpZCap>0 && az>InpZCap)
      { Print(StringFormat("[MITEM] ZCAP: z=%.2f > %.1f, skipping (trending)",z_dev,InpZCap)); return; }
+   //--- Vol 75 z-ceiling: mean reversion breaks above z=2.5 on Vol 75
+   if(StringFind(_Symbol,"75")>=0 && InpVol75ZCeil>0 && az>InpVol75ZCeil)
+     { Print(StringFormat("[MITEM] V75CEIL: z=%.2f > %.1f, skipping Vol 75 (weak reversion)",z_dev,InpVol75ZCeil)); return; }
 
    int direction=(z_dev>0)?-1:1;
    double entry=bar.close;
@@ -542,6 +565,13 @@ void ProcessOneBar(const AggregatedBar &bar)
    double risk_pct=InpRiskPerTrade;
    if(g_consec_loss>=5) risk_pct*=0.5;
    if((g_peak_equity-g_equity)>g_peak_equity*0.08) risk_pct*=0.5;
+   //--- Smart sizing: gem setups (z=3.0-4.0, 75% WR) get bigger size
+   g_gem_trade=false;
+   if(az>=3.0 && az<=4.0)
+     { risk_pct*=InpGemMult; g_gem_trade=true; Print("[MITEM] GEM TRADE: z="+DoubleToString(z_dev,2)+", sizing x"+DoubleToString(InpGemMult,1)); }
+   //--- Re-entry sizing: after a loss on Vol 100, next trade has 59% WR
+   if(!g_last_trade_won && StringFind(_Symbol,"75")<0)
+     { risk_pct*=InpReentryMult; Print("[MITEM] RE-ENTRY: increasing size x"+DoubleToString(InpReentryMult,1)); }
    //--- Correlation guard: reduce size if both symbols extreme same direction
    if(InpCorrelationGuard)
      {
@@ -576,9 +606,11 @@ void ProcessOneBar(const AggregatedBar &bar)
      }
 
    g_trail.OpenPosition(direction,entry,sl,tp,bar.time+InpBarSec,stake);
+   g_partial_closed=0;
    if(InpDrawSignals) DrawSignal(direction,bar.time+InpBarSec,entry,direction>0?"BUY":"SELL");
-   Print(StringFormat("[MITEM] %s @%.5f SL=%.5f TP=%.5f RR=%.2f z=%.2f $%.2f",
-                      direction>0?"BUY":"SELL",entry,sl,tp,rr,z_dev,stake));
+   Print(StringFormat("[MITEM] %s @%.5f SL=%.5f TP=%.5f RR=%.2f z=%.2f $%.2f %s",
+                      direction>0?"BUY":"SELL",entry,sl,tp,rr,z_dev,stake,
+                      g_gem_trade?"GEM":""));
   }
 
 //+------------------------------------------------------------------+
