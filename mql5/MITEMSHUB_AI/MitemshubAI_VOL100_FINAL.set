@@ -19,8 +19,8 @@ InpSigmaEmaPeriod=30
 InpWarmupCandles=60
 ;
 ; === STOP & TARGET (price-normalized) ===
-InpStopSigmaMult=0.15
-InpTargetSigmaMult=0.6
+InpStopSigmaMult=1.2
+InpTargetSigmaMult=2.0
 InpHoldSec=3600
 InpMinTargetRR=1.8
 InpMaxStopPct=0.015
