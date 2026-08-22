@@ -19,7 +19,7 @@
 //| INPUTS                                                             |
 //+------------------------------------------------------------------+
 input int    InpBarSec           = 300;      // Bar period in seconds (300=M5)
-input double InpZEntry           = 1.5;      // z-score threshold to enter
+input double InpZEntry           = 2.0;      // z-score threshold to enter (optimized: only strong signals)
 input double InpVolGateRatio     = 1.0;     // vol must be > ratio * vol_ema
 input double InpMinRevertSignal  = 0.0;     // min mean-reversion signal
 input int    InpEmaPeriod        = 20;       // EMA period for price average
