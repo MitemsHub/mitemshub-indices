@@ -151,8 +151,9 @@ def _fetch_all_data():
             'last_update': datetime.now().strftime('%H:%M:%S'),
         }
 
-    # Trade history (today)
+    # Trade history (from MT5 + EA log)
     _fetch_trade_history()
+    _parse_ea_log_trades()
 
     # Metrics
     _compute_metrics()
@@ -177,7 +178,7 @@ def _read_journal():
                     text = content.decode('utf-16-le', errors='replace')
                     for line in text.split('\n'):
                         line = line.strip()
-                        if any(kw in line.upper() for kw in ['MITEMSHUB', 'DECISION', 'ENTRY', 'EXIT', 'TRAIL', 'STOP', 'TARGET']):
+                        if any(kw in line for kw in ['[MITEM]', 'MITEMSHUB', 'DECISION', 'ENTRY', 'EXIT', 'TRAIL', 'STOP', 'TARGET', 'BUY @', 'SELL @', 'ORDER FAIL']):
                             entries.append({'text': line[:150], 'time': line[:19] if len(line) > 19 else ''})
                             if len(entries) >= 50:
                                 return entries
@@ -195,7 +196,7 @@ def _fetch_trade_history():
     trades = []
     if deals:
         for deal in deals:
-            if deal.magic == 20260822 or deal.comment == 'MITEMSHUB':
+            if deal.magic == 7788123 or deal.comment.startswith('MITEM'):
                 trades.append({
                     'ticket': deal.ticket,
                     'order': deal.order,
@@ -225,7 +226,93 @@ def _fetch_trade_history():
             pass
 
     with lock:
-        cache['trades'] = trades[-100:]  # Keep last 100
+        cache['trades'] = trades[-200:]  # Keep last 200
+
+
+def _parse_ea_log_trades():
+    """Parse MITEM trades from the EA's MQL5 log files."""
+    mt5_dir = os.path.expanduser("~/AppData/Roaming/MetaQuotes/Terminal")
+    if not os.path.isdir(mt5_dir):
+        return
+
+    log_trades = []
+    for d in os.listdir(mt5_dir):
+        log_path = os.path.join(mt5_dir, d, 'MQL5', 'logs')
+        if not os.path.isdir(log_path):
+            continue
+        for fname in sorted(os.listdir(log_path), reverse=True)[:3]:
+            if not fname.endswith('.log'):
+                continue
+            fp = os.path.join(log_path, fname)
+            try:
+                with open(fp, 'rb') as fh:
+                    text = fh.read(200000).decode('utf-16-le', errors='replace')
+                    for line in text.split('\n'):
+                        if '[MITEM]' not in line:
+                            continue
+                        # Parse SELL/BUY entries
+                        if any(kw in line for kw in ['SELL @', 'BUY @']):
+                            try:
+                                parts = line.split('\t')
+                                time_str = parts[2].strip() if len(parts) > 2 else ''
+                                msg = line.split('[MITEM]')[1].strip()
+                                # Extract: SELL @607.86000 SL=609.80934 TP=605.26089 RR=1.33 z=1.79 $2.60
+                                direction = 'BUY' if 'BUY @' in msg else 'SELL'
+                                entry_price = float(msg.split('@')[1].split()[0])
+                                sl = float(msg.split('SL=')[1].split()[0]) if 'SL=' in msg else 0
+                                tp = float(msg.split('TP=')[1].split()[0]) if 'TP=' in msg else 0
+                                rr = float(msg.split('RR=')[1].split()[0]) if 'RR=' in msg else 0
+                                z = float(msg.split('z=')[1].split()[0]) if 'z=' in msg else 0
+                                risk = float(msg.split('$')[1].split()[0]) if '$' in msg else 0
+                                log_trades.append({
+                                    'time': time_str,
+                                    'symbol': 'Volatility 100 Index' if '100' in line else 'Volatility 75 Index',
+                                    'direction': direction,
+                                    'entry': entry_price,
+                                    'sl': sl,
+                                    'tp': tp,
+                                    'rr': rr,
+                                    'z_score': z,
+                                    'risk': risk,
+                                    'status': 'OPEN',
+                                    'source': 'EA_LOG',
+                                })
+                            except Exception:
+                                pass
+
+                        # Parse STOP/TARGET/SESSION entries
+                        elif any(kw in line for kw in ['STOP @', 'TARGET @', 'TIME @']):
+                            try:
+                                parts = line.split('\t')
+                                time_str = parts[2].strip() if len(parts) > 2 else ''
+                                msg = line.split('[MITEM]')[1].strip()
+                                # STOP @609.85934 R=-1.026 $-2.67 #trade=1
+                                exit_price = float(msg.split('@')[1].split()[0])
+                                r_mult = float(msg.split('R=')[1].split()[0]) if 'R=' in msg else 0
+                                pnl = float(msg.split('$')[1].split()[0]) if '$' in msg else 0
+                                reason = 'STOP' if 'STOP @' in msg else 'TARGET' if 'TARGET @' in msg else 'TIME'
+                                # Find matching open trade and close it
+                                for ot in reversed(log_trades):
+                                    if ot['status'] == 'OPEN' and ot['symbol'] == ('Volatility 100 Index' if '100' in line else 'Volatility 75 Index'):
+                                        ot['status'] = reason
+                                        ot['exit_price'] = exit_price
+                                        ot['exit_time'] = time_str
+                                        ot['r_multiple'] = r_mult
+                                        ot['pnl'] = pnl
+                                        break
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+    # Merge EA log trades into cache
+    with lock:
+        existing = cache.get('trades', [])
+        existing_times = {(t.get('time', ''), t.get('entry', 0)) for t in existing if t.get('source') == 'EA_LOG'}
+        for lt in log_trades:
+            if (lt['time'], lt.get('entry', 0)) not in existing_times:
+                existing.append(lt)
+        cache['trades'] = existing[-200:]
 
 
 def _compute_metrics():
@@ -254,11 +341,13 @@ def _compute_metrics():
     pf = gp / gl if gl > 0 else 999
     wr = len(wins) / len(completed) * 100 if completed else 0
 
-    # Drawdown
-    eq = 10000
-    pk = 10000
+    # Drawdown — start from actual account balance
+    acct = cache.get('account', {})
+    starting_eq = acct.get('balance', 30.04)
+    eq = starting_eq
+    pk = starting_eq
     mdd = 0
-    eq_curve = [{'equity': 10000, 'trade': 0}]
+    eq_curve = [{'equity': round(starting_eq, 2), 'trade': 0}]
     for i, t in enumerate(completed):
         eq += t.get('pnl', 0)
         pk = max(pk, eq)

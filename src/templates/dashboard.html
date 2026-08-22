@@ -213,6 +213,7 @@
         }
         .journal .action { color: var(--green); }
         .journal .error { color: var(--red); }
+        .journal .info { color: #64748b; }
 
         /* ═══ CHART ═══ */
         .chart-container { position: relative; height: 200px; }
@@ -466,29 +467,33 @@
         <!-- Section: Trades & Journal -->
         <div class="section section-hidden" id="secTrades">
             <div class="card">
-                <h3>Recent Trades</h3>
-                <div class="table-container" style="max-height: 40vh;">
+                <h3>📈 Trade History</h3>
+                <div class="table-container" style="max-height: 45vh;">
                     <table>
                         <thead>
                             <tr>
                                 <th>Time</th>
                                 <th>Symbol</th>
                                 <th>Side</th>
-                                <th>Price</th>
-                                <th>Vol</th>
+                                <th>Entry</th>
+                                <th>Exit</th>
+                                <th>SL</th>
+                                <th>TP</th>
+                                <th>Z</th>
+                                <th>Status</th>
                                 <th>P&L</th>
                             </tr>
                         </thead>
                         <tbody id="tradesBody">
-                            <tr><td colspan="6" class="neutral" style="text-align:center;padding:24px;">No trades yet</td></tr>
+                            <tr><td colspan="10" class="neutral" style="text-align:center;padding:24px;">No trades yet</td></tr>
                         </tbody>
                     </table>
                 </div>
             </div>
 
             <div class="card" style="margin-top: 12px;">
-                <h3>Expert Journal</h3>
-                <div class="journal" id="journal">
+                <h3>📝 Expert Journal</h3>
+                <div class="journal" id="journal" style="max-height:30vh;overflow-y:auto;font-size:11px;">
                     <div class="entry"><span class="time">--</span> Waiting for EA data...</div>
                 </div>
             </div>
@@ -745,21 +750,38 @@
         function updateTrades(trades) {
             const tbody = document.getElementById('tradesBody');
             if (!trades?.length) {
-                tbody.innerHTML = '<tr><td colspan="6" class="neutral" style="text-align:center;padding:24px;">No trades yet</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="neutral" style="text-align:center;padding:24px;">No trades yet — waiting for EA signals</td></tr>';
                 return;
             }
             const recent = trades.slice(-50).reverse();
             tbody.innerHTML = recent.map(t => {
                 const pnl = t.pnl || 0;
-                const badgeClass = t.type?.toLowerCase() === 'buy' ? 'badge-buy' : 'badge-sell';
+                const side = (t.type || t.direction || '').toUpperCase();
+                const badgeClass = side === 'BUY' ? 'badge-buy' : 'badge-sell';
+                const status = t.status || t.entry || '';
+                let statusClass = '';
+                if (status === 'OPEN') statusClass = 'positive';
+                else if (status === 'STOP') statusClass = 'negative';
+                else if (status === 'TARGET') statusClass = 'positive';
+                else if (status === 'TIME') statusClass = 'neutral';
+                const entry = t.entry || t.price || t.entry_price || 0;
+                const exit = t.exit_price || 0;
+                const sl = t.sl || 0;
+                const tp = t.tp || 0;
+                const z = t.z_score || 0;
+                const sym = (t.symbol || '').replace(' Index', '').replace('Volatility', 'Vol');
                 return `
-                    <tr>
-                        <td style="font-size:10px;color:#64748b;">${t.time || '--'}</td>
-                        <td>${(t.symbol || '').replace('Index', '').trim()}</td>
-                        <td><span class="badge ${badgeClass}">${t.type || '--'}</span></td>
-                        <td>${(t.price || t.entry_price || 0).toFixed(2)}</td>
-                        <td>${t.volume || '--'}</td>
-                        <td class="${pnl >= 0 ? 'positive' : 'negative'}">$${pnl.toFixed(2)}</td>
+                    <tr style="border-bottom:1px solid #1e2a3a;">
+                        <td style="font-size:10px;color:#64748b;white-space:nowrap;">${t.time || '--'}</td>
+                        <td style="font-size:11px;">${sym}</td>
+                        <td><span class="badge ${badgeClass}">${side}</span></td>
+                        <td style="font-family:monospace;font-size:11px;">${entry ? entry.toFixed(2) : '--'}</td>
+                        <td style="font-family:monospace;font-size:11px;">${exit ? exit.toFixed(2) : '--'}</td>
+                        <td style="font-family:monospace;font-size:11px;color:#ff4757;">${sl ? sl.toFixed(2) : '--'}</td>
+                        <td style="font-family:monospace;font-size:11px;color:#00d4aa;">${tp ? tp.toFixed(2) : '--'}</td>
+                        <td style="font-family:monospace;font-size:11px;">${z ? z.toFixed(2) : '--'}</td>
+                        <td class="${statusClass}" style="font-size:11px;font-weight:600;">${status || '--'}</td>
+                        <td class="${pnl >= 0 ? 'positive' : 'negative'}" style="font-family:monospace;font-size:11px;font-weight:700;">$${pnl.toFixed(2)}</td>
                     </tr>
                 `;
             }).join('');
@@ -780,10 +802,14 @@
             }
             journal.innerHTML = entries.slice().reverse().map(e => {
                 const text = e.text || e;
-                const isError = text.includes('ERROR') || text.includes('error');
-                const isAction = text.includes('ENTRY') || text.includes('EXIT') || text.includes('DECISION');
-                const cls = isError ? 'error' : isAction ? 'action' : '';
-                return `<div class="entry ${cls}">${text}</div>`;
+                const isError = text.includes('ERROR') || text.includes('ORDER FAIL') || text.includes('error');
+                const isTrade = text.includes('BUY @') || text.includes('SELL @') || text.includes('STOP @') || text.includes('TARGET @');
+                const isInfo = text.includes('[MITEM]');
+                let cls = '';
+                if (isError) cls = 'error';
+                else if (isTrade) cls = 'action';
+                else if (isInfo) cls = 'info';
+                return `<div class="entry ${cls}" style="font-family:monospace;font-size:10px;padding:4px 8px;border-bottom:1px solid #0f172a;">${text}</div>`;
             }).join('');
         }
 
