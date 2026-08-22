@@ -13,13 +13,13 @@ InpBarSec=300
 ; === ENTRY SIGNALS ===
 InpZEntry=1.5
 InpVolGateRatio=1.0
-InpMinRevertSignal=0.02
+InpMinRevertSignal=0.0
 InpEmaPeriod=20
 InpSigmaEmaPeriod=30
 InpWarmupCandles=60
 ;
 ; === STOP & TARGET (price-normalized) ===
-InpStopSigmaMult=0.10
+InpStopSigmaMult=0.15
 InpTargetSigmaMult=0.6
 InpHoldSec=3600
 InpMinTargetRR=1.8
