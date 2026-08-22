@@ -59,7 +59,7 @@ InpFloorGate=false
 InpMaxEdgeDepth=0.0
 ;
 ; === EXECUTION MODE ===
-InpLiveExecution=false
+InpLiveExecution=true
 InpMagic=7788123
 InpMaxSlippagePts=50
 InpMaxSpreadPts=0

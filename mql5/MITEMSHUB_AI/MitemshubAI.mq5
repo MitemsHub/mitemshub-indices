@@ -40,7 +40,7 @@ input double InpTrailFrac        = 0.3;      // trail distance as fraction of AT
 input double InpRiskPerTrade     = 0.005;    // 0.5% of equity per trade
 input double InpMaxDailyLossPct  = 1.0;      // max daily loss before pause
 input double InpMaxEquityDDPct   = 1.0;      // max equity drawdown
-input bool   InpLiveExecution    = false;    // false=paper, true=live
+input bool   InpLiveExecution    = true;    // false=paper, true=live
 input long   InpMagic            = 7788123;  // EA magic number
 input int    InpMaxSlippagePts   = 50;       // max slippage (points)
 input double InpMaxSpreadPts     = 1500.0;   // max spread (points, 0=off)
