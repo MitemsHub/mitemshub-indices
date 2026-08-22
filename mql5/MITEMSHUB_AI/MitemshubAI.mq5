@@ -25,7 +25,7 @@ input double InpMinRevertSignal  = 0.0;     // min mean-reversion signal
 input int    InpEmaPeriod        = 20;       // EMA period for price average
 input int    InpSigmaEmaPeriod   = 30;       // EMA period for sigma smoothing
 input int    InpWarmupCandles    = 60;       // min bars before trading
-input double InpStopSigmaMult    = 1.2;     // stop = mult * price * sigma
+input double InpStopSigmaMult    = 1.5;     // stop = mult * price * sigma
 input double InpTargetSigmaMult  = 2.0;      // target = mult * price * sigma
 input int    InpHoldSec          = 3600;     // max hold time in seconds
 input double InpMinTargetRR      = 1.8;      // min reward:risk ratio
