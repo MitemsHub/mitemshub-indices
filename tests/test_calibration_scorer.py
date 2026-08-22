@@ -344,7 +344,7 @@ def test_score_unresolved_records_from_market_writes_target_hit_and_counts_skip_
     assert result.failed_records == 1
     assert result.skipped_records == 1
     assert written[0]["outcome_label"] == "target_hit"
-    # A supplied client factory means Blueberry-scale scoring (MT5), which
+    # A supplied client factory means Deriv-scale scoring (MT5), which
     # must be stamped so the evidence aggregator can keep Deriv-fallback
     # (wrong-scale) rows out of the gate.
     assert written[0]["scoring_source"] == "mt5"
@@ -548,7 +548,7 @@ def test_score_unresolved_records_from_market_raises_without_client_no_deriv_fal
 ) -> None:
     """A missing client_factory is a hard error — there is no silent Deriv
     fallback.  Deriv 1HZ75V/1HZ100V are on the WRONG price scale vs the call
-    levels (SYN75/SYN100), so scoring without the Blueberry MT5 client must
+    levels (SYN75/SYN100), so scoring without the Deriv MT5 client must
     never produce outcomes."""
     calls_path = tmp_path / "calls.jsonl"
     calls_path.write_text(

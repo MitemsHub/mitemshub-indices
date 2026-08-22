@@ -38,7 +38,7 @@ function VenueBadge({ venue }: { venue: NonNullable<FreshCallResponse["venue"]> 
     return (
       <span
         className="inline-flex items-center gap-1 rounded-full border border-[var(--accent-success)]/40 bg-[var(--accent-success-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--accent-success)]"
-        title="Levels are on the Blueberry SYN price scale"
+        title="Levels are on the Deriv SYN price scale"
       >
         MT5 venue
       </span>
@@ -48,7 +48,7 @@ function VenueBadge({ venue }: { venue: NonNullable<FreshCallResponse["venue"]> 
     return (
       <span
         className="inline-flex items-center gap-1 rounded-full border border-[var(--accent-warn)]/40 bg-[var(--accent-warn-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--accent-warn)]"
-        title="Deriv 1HZ scale — levels are NOT comparable to the Blueberry SYN platform"
+        title="Deriv 1HZ scale — levels are NOT comparable to the Deriv SYN platform"
       >
         Deriv scale
       </span>

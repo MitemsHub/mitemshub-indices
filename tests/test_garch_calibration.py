@@ -18,6 +18,10 @@ from synthetic_trader.models.garch_calibration import (
     load_calibration_result,
     calibrate_from_ticks_csv,
     _params_at_bounds,
+    _degenerate_params,
+    compute_egarch_diagnostics,
+    _fit_candidate_acceptable,
+    _select_best_candidate,
     load_calibrated_garch_state,
 )
 
@@ -268,6 +272,153 @@ class TestParamsAtBounds:
             assert state.beta == 0.88
 
 
+class TestHighPersistenceDiagnostics:
+    """Regression: high-persistence fits (the R_100/R_75 shape) must report
+    an honest long_run_vol / vol_ratio instead of the 1e-05 sqrt floor, and
+    criterion 3 of ``_params_at_bounds`` must actually run for them (the old
+    code skipped the ratio check at persistence >= 0.95)."""
+
+    def _high_persistence_series(self, seed: int = 1234, n: int = 6000) -> np.ndarray:
+        rng = np.random.RandomState(seed)
+        # R_100-shaped EGARCH: persistence ~0.99 (beta 0.856 + alpha 0.134).
+        omega, alpha, beta, gamma = -1.84, 0.134, 0.856, -0.037
+        log_var = math.log(0.0016 ** 2)
+        returns = np.empty(n)
+        for t in range(n):
+            sigma = math.exp(log_var / 2)
+            z = rng.normal()
+            returns[t] = z * sigma
+            shock = abs(z) - 0.7979
+            log_var = max(-30.0, min(5.0, omega + alpha * shock + gamma * z + beta * log_var))
+        return 1000.0 * np.exp(np.cumsum(returns))
+
+    def test_high_persistence_long_run_vol_not_at_floor(self) -> None:
+        result = fit_egarch(self._high_persistence_series(), symbol="R100_SHAPE")
+        # Never pinned at the 1e-05 sqrt floor (the old underflow artifact).
+        assert result.long_run_vol > 1e-4
+        # Anchored on the realized scale -> a healthy, scale-consistent ratio.
+        assert result.realized_vol > 0
+        ratio = result.long_run_vol / result.realized_vol
+        assert 0.02 <= ratio <= 50.0
+        # And the fit must not be rejected as degenerate.
+        assert _params_at_bounds(result) is False
+
+    def test_params_at_bounds_criterion3_runs_for_high_persistence(self) -> None:
+        # persistence >= 0.95 (old code skipped the ratio check): a sane
+        # long-run vol must be accepted...
+        sane = CalibrationResult(
+            symbol="HP", omega=-1.84, alpha=0.134, beta=0.856, gamma=-0.037,
+            n_observations=5000, negative_log_likelihood=1.0, convergence=True,
+            message="ok", persistence=0.9902, half_life=70.0,
+            long_run_vol=0.0016, realized_vol=0.0017,
+        )
+        assert _params_at_bounds(sane) is False
+        # ...and an absurd long-run vol must be rejected, proving the
+        # ratio test now runs for high-persistence fits.
+        absurd = CalibrationResult(
+            symbol="HP", omega=-1.84, alpha=0.134, beta=0.856, gamma=-0.037,
+            n_observations=5000, negative_log_likelihood=1.0, convergence=True,
+            message="ok", persistence=0.9902, half_life=70.0,
+            long_run_vol=1.0, realized_vol=0.0017,
+        )
+        assert _params_at_bounds(absurd) is True
+
+
+class _FakeCandidate:
+    """Minimal stand-in for a scipy OptimizeResult used by the selection tests."""
+
+    def __init__(self, x, fun, success=True):
+        self.x = np.asarray(x, dtype=float)
+        self.fun = fun
+        self.success = success
+
+
+def _returns(seed: int = 3, n: int = 2000, sigma: float = 0.001) -> np.ndarray:
+    rng = np.random.RandomState(seed)
+    prices = 1000.0 * np.exp(np.cumsum(rng.normal(0, sigma, n)))
+    return np.diff(np.log(np.maximum(prices, 1e-10)))
+
+
+class TestDegeneracyGatedSelection:
+    """Regression: the multi-start winner must NEVER be a bound-pinned basin.
+
+    The degenerate R_100 refit on the repaired full-density corpus had the
+    LOWEST raw NLL but alpha/beta pinned at their floors (persistence ~0.01,
+    no vol clustering) — a fit _params_at_bounds rejects.  The winner
+    selection now gates every candidate through the same degeneracy check
+    and only a fit that would be accepted on load can win."""
+
+    def test_acceptance_rejects_measured_degenerate_refit(self) -> None:
+        rets = _returns()
+        # The exact degenerate R_100 refit from the full corpus.
+        degenerate = np.array([-13.014684, 0.001, 0.01, -0.008503])
+        assert _fit_candidate_acceptable(degenerate, rets, "normal", 5.0) is False
+        # The preserved validated R_100 params (high persistence, healthy).
+        healthy = np.array([-1.8412, 0.1345, 0.8557, -0.0374])
+        assert _fit_candidate_acceptable(healthy, rets, "normal", 5.0) is True
+        # The raw-parameter gate agrees with the on-disk CalibrationResult gate.
+        p, _, lrv, rv, _ = compute_egarch_diagnostics(*degenerate, rets)
+        assert _degenerate_params(*degenerate, p, lrv, rv) is True
+        p, _, lrv, rv, _ = compute_egarch_diagnostics(*healthy, rets)
+        assert _degenerate_params(*healthy, p, lrv, rv) is False
+
+    def test_winner_prefers_non_degenerate_over_better_nll(self) -> None:
+        rets = _returns()
+        degenerate = _FakeCandidate([-13.0, 0.001, 0.01, -0.008], fun=-1000.0)  # best raw NLL
+        healthy = _FakeCandidate([-1.84, 0.134, 0.8557, -0.037], fun=-900.0)    # worse NLL, usable
+        winner, fallback = _select_best_candidate([degenerate, healthy], rets, "normal", 5.0)
+        assert winner is healthy
+        assert fallback is degenerate
+
+    def test_all_degenerate_returns_fallback(self) -> None:
+        rets = _returns()
+        d1 = _FakeCandidate([-13.0, 0.001, 0.01, -0.008], fun=-1000.0)
+        d2 = _FakeCandidate([-14.0, 0.001, 0.011, 0.0], fun=-950.0)
+        winner, fallback = _select_best_candidate([d1, d2], rets, "normal", 5.0)
+        assert winner is None
+        assert fallback is d1  # best-NLL degenerate is the explicit fallback
+
+    def test_absurd_nll_candidate_never_wins(self) -> None:
+        """An optimizer blow-up (predicate-clean params but absurd NLL — the
+        measured R_100 full-corpus case: ~+2500 per obs) must not win either."""
+        rets = _returns()
+        blowup = _FakeCandidate([-13.7, 0.222, 0.6427, -0.0563], fun=62_600_728.0)
+        healthy = _FakeCandidate([-1.84, 0.134, 0.8557, -0.037], fun=-900.0)
+        winner, fallback = _select_best_candidate([blowup, healthy], rets, "normal", 5.0)
+        assert winner is healthy
+        assert fallback is blowup
+
+    def test_params_at_bounds_rejects_absurd_nll(self) -> None:
+        # Predicate-clean parameters but an absurd per-obs NLL must be
+        # rejected on load too (defense in depth, not just selection).
+        clean = CalibrationResult(
+            symbol="HP", omega=-13.7, alpha=0.222, beta=0.6427, gamma=-0.0563,
+            n_observations=24693, negative_log_likelihood=62_600_728.0,
+            convergence=True, message="ok", persistence=0.8647, half_life=4.8,
+            long_run_vol=0.001368, realized_vol=0.001398,
+        )
+        assert _params_at_bounds(clean) is True
+
+    def test_converged_fit_never_degenerate(self) -> None:
+        """The end-to-end invariant: a fit reported converged must always be
+        a fit _params_at_bounds accepts (on a healthy synthetic series)."""
+        rng = np.random.default_rng(7)
+        n = 400
+        log_var = math.log(0.0004)
+        omega, alpha, gamma, beta = -1.0, 0.10, -0.04, 0.85
+        returns = np.empty(n)
+        for t in range(n):
+            sigma = math.exp(log_var / 2)
+            z = rng.standard_normal()
+            returns[t] = z * sigma
+            shock = abs(z) - 0.7979
+            log_var = omega + alpha * shock + gamma * z + beta * log_var
+        prices = np.exp(np.cumsum(returns)) * 100
+        result = fit_egarch(prices, symbol="T", initial_params=(-2.0, 0.10, 0.88, -0.04))
+        if result.convergence:
+            assert _params_at_bounds(result) is False
+
+
 class TestSaveLoad:
     """Test calibration result persistence."""
 
@@ -397,3 +548,43 @@ class TestFitEGARCHStudentT:
         assert abs(result.gamma) <= 0.99
         assert result.persistence < 1.0
         assert math.isfinite(result.negative_log_likelihood)
+
+
+class TestFitEgarchInitialParams:
+    """fit_egarch(initial_params=...) must work — it previously crashed with
+    UnboundLocalError because the multi-start guesses referenced sample_var
+    which was only computed on the default path (2026-08-16, R_100 re-check).
+    """
+
+    def test_initial_params_no_crash(self) -> None:
+        rng = np.random.default_rng(7)
+        n = 400
+        log_var = math.log(0.0004)
+        omega, alpha, gamma, beta = -1.0, 0.10, -0.04, 0.85
+        returns = np.empty(n)
+        for t in range(n):
+            sigma = math.exp(log_var / 2)
+            z = rng.standard_normal()
+            returns[t] = z * sigma
+            shock = abs(z) - 0.7979
+            log_var = omega + alpha * shock + gamma * z + beta * log_var
+        prices = np.exp(np.cumsum(returns)) * 100
+
+        # The anchored high-persistence start (the R_100 re-check fix): the
+        # fit must complete without raising and stay in-bounds.
+        result = fit_egarch(prices, symbol="T", initial_params=(-2.0, 0.10, 0.88, -0.04))
+        assert result.convergence is True
+        assert math.isfinite(result.negative_log_likelihood)
+        assert 0.001 <= result.alpha <= 0.95
+        assert 0.01 <= result.beta <= 0.999
+        assert result.persistence < 1.0
+
+    def test_initial_params_respected_as_guess(self) -> None:
+        # Explicitly degenerate guess must not raise and must produce a result
+        # with finite NLL (the fix computes sample_var unconditionally).
+        rng = np.random.default_rng(11)
+        n = 300
+        prices = 100.0 * np.exp(np.cumsum(rng.standard_normal(n) * 0.002))
+        result = fit_egarch(prices, symbol="T", initial_params=(-12.0, 0.05, 0.05, -0.10))
+        assert math.isfinite(result.negative_log_likelihood)
+        assert result.n_observations == n - 1

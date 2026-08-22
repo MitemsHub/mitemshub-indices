@@ -49,7 +49,7 @@ def _fake_mt5(rates):
 
 class Mt5CollectorTests(unittest.TestCase):
     def test_get_venue_symbol_maps_r75_to_syn75(self) -> None:
-        # Verified live on the Blueberry terminal: SYN75/SYN100 are the real
+        # Verified live on the Deriv terminal: SYN75/SYN100 are the real
         # broker symbols, NOT "Volatility 75 Index".
         self.assertEqual(get_venue_symbol("R_75"), "SYN75")
         self.assertEqual(get_venue_symbol("R_100"), "SYN100")

@@ -121,7 +121,7 @@ function buildUnavailableCall(
 }
 
 // The user's symbol choice must survive page reloads.  The engine's focus
-// symbol is R_75 (Blueberry Volatility 75); persist the selection so a
+// symbol is R_75 (Deriv Volatility 75); persist the selection so a
 // refresh never silently snaps back to R_100.
 const ACTIVE_SYMBOL_KEY = "synth-active-symbol";
 
@@ -141,7 +141,7 @@ export function useOperatorWorkspace() {
   const [guardianStatus, setGuardianStatus] = useState<GuardianStatus | null>(null);
   const [history, setHistory] = useState<FreshCallResponse[]>([]);
   const unavailablePropProfile: PropProfileResponse = {
-    profile: "blueberry_2step_funded",
+    profile: "deriv_2step_funded",
     startingBalance: 5000,
     currentBalance: 5000,
     currentEquity: 5000,

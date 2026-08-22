@@ -41,7 +41,7 @@ The platform is intentionally modular so each part can be improved without conta
 
 ## Core Flow
 
-1. `Tick` data enters from MT5 (Blueberry Markets) or Deriv WebSocket
+1. `Tick` data enters from MT5 (Deriv) or Deriv WebSocket
 2. Ticks are stored in CSV files and used to build candles
 3. Feature assembly computes 46 indicators, structure proxies, and volatility regime state
 4. The online model estimates directional probability
@@ -82,7 +82,7 @@ Confluence scoring across timeframes: 3+ aligned trends = 0.9, 2 trends = 0.65-0
 ## Data Sources
 
 ### MT5 (Primary)
-- **Broker**: Blueberry Markets
+- **Broker**: Deriv
 - **Symbols**: Volatility 75 (V75), Volatility 100 (V100)
 - **Data**: Real-time ticks, OHLC candles, account info
 - **Connection**: MetaTrader5 Python package
@@ -91,7 +91,7 @@ Confluence scoring across timeframes: 3+ aligned trends = 0.9, 2 trends = 0.65-0
 - **App ID**: 116450 (default)
 - **Symbols**: R_75, R_100 (continuous contracts)
 - **Data**: Historical ticks, real-time streaming
-- **Note**: Deriv continuous contract prices differ from Blueberry Markets
+- **Note**: Deriv continuous contract prices differ from Deriv
 
 ## Strong Assumptions
 
@@ -111,7 +111,7 @@ These features are useful only if walk-forward evidence proves they add expectan
 Your Computer
 ├── Next.js Dashboard (localhost:3000)
 ├── Python Engine (child process)
-└── MT5 Terminal (Blueberry Markets)
+└── MT5 Terminal (Deriv)
 ```
 
 ### AWS Production
@@ -120,7 +120,7 @@ AWS eu-north-1
 ├── EC2 Instance (Windows Server 2022)
 │   ├── Next.js Dashboard (PM2)
 │   ├── Python Engine (PM2)
-│   └── MT5 Terminal (Blueberry Markets)
+│   └── MT5 Terminal (Deriv)
 ├── Application Load Balancer (HTTP)
 ├── Security Groups (RDP + HTTP)
 └── EBS Volume (50GB encrypted)

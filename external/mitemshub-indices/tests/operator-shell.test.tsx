@@ -68,7 +68,7 @@ function buildSupportResponse(url: string): Promise<Response> | null {
     return Promise.resolve(
       new Response(
         JSON.stringify({
-          profile: "blueberry_2step_funded",
+          profile: "deriv_2step_funded",
           startingBalance: 100000,
           currentBalance: 100200,
           currentEquity: 100100,
@@ -177,7 +177,7 @@ describe("OperatorShell", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              profile: "blueberry_2step_funded",
+              profile: "deriv_2step_funded",
               startingBalance: 100000,
               currentBalance: 100200,
               currentEquity: 100100,
@@ -255,7 +255,7 @@ describe("OperatorShell", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              profile: "blueberry_2step_funded",
+              profile: "deriv_2step_funded",
               startingBalance: 100000,
               currentBalance: 100200,
               currentEquity: 100150,
@@ -276,7 +276,7 @@ describe("OperatorShell", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              profile: "blueberry_2step_funded",
+              profile: "deriv_2step_funded",
               startingBalance: 100000,
               currentBalance: 100200,
               currentEquity: 100100,
@@ -329,7 +329,7 @@ describe("OperatorShell", () => {
     await user.click(screen.getByRole("button", { name: /prop firm/i }));
     await user.click(screen.getByRole("button", { name: /continue in prop mode/i }));
 
-    expect(screen.getByText(/blueberry 2-step funded/i)).toBeInTheDocument();
+    expect(screen.getByText(/deriv 2-step funded/i)).toBeInTheDocument();
     expect(screen.getAllByText(/compliance status/i).length).toBeGreaterThan(0);
   });
 
@@ -536,7 +536,7 @@ describe("OperatorShell", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              profile: "blueberry_2step_funded",
+              profile: "deriv_2step_funded",
               startingBalance: 100000,
               currentBalance: 100200,
               currentEquity: 100100,
@@ -924,7 +924,7 @@ describe("OperatorShell", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              profile: "blueberry_2step_funded",
+              profile: "deriv_2step_funded",
               startingBalance: 120000,
               currentBalance: 119900,
               currentEquity: 119850,
@@ -1048,7 +1048,7 @@ describe("OperatorShell", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              profile: "blueberry_2step_funded",
+              profile: "deriv_2step_funded",
               startingBalance: 100000,
               currentBalance: 100200,
               currentEquity: 100150,
@@ -1069,7 +1069,7 @@ describe("OperatorShell", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              profile: "blueberry_2step_funded",
+              profile: "deriv_2step_funded",
               startingBalance: 100000,
               currentBalance: 100200,
               currentEquity: 100100,
@@ -1144,7 +1144,7 @@ describe("OperatorShell", () => {
           return Promise.resolve(
             new Response(
               JSON.stringify({
-                profile: "blueberry_2step_funded",
+                profile: "deriv_2step_funded",
                 startingBalance: 100000,
                 currentBalance: 100200,
                 currentEquity: 100100,

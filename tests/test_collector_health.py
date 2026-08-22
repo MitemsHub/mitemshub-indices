@@ -90,7 +90,7 @@ class TestVenueLeak:
         )
 
     def test_deriv_scale_tick_flags_venue_leak(self, tmp_path) -> None:
-        # Blueberry SYN75 scale ~1,800; one Deriv 1HZ row at ~6,900 (~3.8x)
+        # Deriv SYN75 scale ~1,800; one Deriv 1HZ row at ~6,900 (~3.8x)
         # mixed in — the exact leak the append guard is supposed to stop.
         self._write_corpus(
             tmp_path, "R_75", [1770.0 + i * 0.5 for i in range(20)] + [6892.07]
@@ -108,7 +108,7 @@ class TestVenueLeak:
         assert report["corpus"]["R_75"]["out_of_scale_ticks"] == 0
 
     def test_duplicate_epoch_leak_is_still_detected(self, tmp_path) -> None:
-        # A leaked Deriv tick whose epoch collides with a real Blueberry row
+        # A leaked Deriv tick whose epoch collides with a real Deriv row
         # must still be flagged — dedupe-by-epoch would otherwise mask it.
         now = time.time()
         csv = tmp_path / "data" / "backfill" / "R_75_ticks.csv"
@@ -141,7 +141,7 @@ class TestCorpusFreshness:
         now = time.time()
         csv = tmp_path / "data" / "backfill" / "R_75_ticks.csv"
         csv.parent.mkdir(parents=True, exist_ok=True)
-        # Last tick 20h ago (stale) at Blueberry scale.
+        # Last tick 20h ago (stale) at Deriv scale.
         csv.write_text(
             "\n".join(
                 f"{now - 20 * 3600 + i * 60},R_75,{1770.0 + i * 0.1}"

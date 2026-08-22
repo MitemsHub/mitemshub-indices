@@ -74,7 +74,7 @@ describe("getCurrentPropProfileForRequest", () => {
     const propProfileSpy = vi
       .spyOn(engineBridge.livePropProfileAdapter, "read")
       .mockResolvedValue({
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 120000,
         currentBalance: 119800,
         currentEquity: 119700,
@@ -113,7 +113,7 @@ describe("getCurrentPropProfileForRequest", () => {
     const propProfileSpy = vi
       .spyOn(engineBridge.livePropProfileAdapter, "read")
       .mockResolvedValue({
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100000,
         currentBalance: 100050,
         currentEquity: 100010,
@@ -155,7 +155,7 @@ describe("getCurrentPropProfileForRequest", () => {
 
     expect(propProfileSpy).not.toHaveBeenCalled();
     expect(profile).toEqual({
-      profile: "blueberry_2step_funded",
+      profile: "deriv_2step_funded",
       startingBalance: 100000,
       currentBalance: 100000,
       currentEquity: 99840,
@@ -245,7 +245,7 @@ function resolveRequestedPropConfig(
       startingBalance: requestedBalance,
       highImpactNewsLockout:
         String(process.env.SYNTHETIC_PROP_NEWS_LOCKOUT ?? "").toLowerCase() === "true",
-      profile: "blueberry_2step_funded",
+      profile: "deriv_2step_funded",
     };
   }
 
@@ -322,7 +322,7 @@ it("POST /api/prop-profiles/current uses the request connection", async () => {
   const profileSpy = vi
     .spyOn(engineBridge, "getCurrentPropProfileForRequest")
     .mockResolvedValue({
-      profile: "blueberry_2step_funded",
+      profile: "deriv_2step_funded",
       startingBalance: 100000,
       currentBalance: 100000,
       currentEquity: 99840,
@@ -395,7 +395,7 @@ it("POST /api/calls/run forwards prop_connection when prop mode is active", asyn
         symbol: "R_100",
         account_mode: "prop_firm",
         prop_account_state: {
-          profile: "blueberry_2step_funded",
+          profile: "deriv_2step_funded",
           startingBalance: 100000,
           currentBalance: 100000,
           currentEquity: 99840,
@@ -602,7 +602,7 @@ it("allows blank submit and switches to prop mode using own-account fallback", a
       return Promise.resolve(
         new Response(
           JSON.stringify({
-            profile: "blueberry_2step_funded",
+            profile: "deriv_2step_funded",
             startingBalance: 100000,
             currentBalance: 100200,
             currentEquity: 100150,
@@ -619,7 +619,7 @@ it("allows blank submit and switches to prop mode using own-account fallback", a
       return Promise.resolve(
         new Response(
           JSON.stringify({
-            profile: "blueberry_2step_funded",
+            profile: "deriv_2step_funded",
             startingBalance: 100000,
             currentBalance: 100200,
             currentEquity: 100100,
@@ -901,7 +901,7 @@ it("sends the selected prop connection when running a symbol in prop mode", asyn
       return Promise.resolve(
         new Response(
           JSON.stringify({
-            profile: "blueberry_2step_funded",
+            profile: "deriv_2step_funded",
             startingBalance: 120000,
             currentBalance: 119900,
             currentEquity: 119850,

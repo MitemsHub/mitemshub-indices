@@ -158,7 +158,7 @@ describe("PropCompliancePanel", () => {
     render(
       <PropCompliancePanel
         profile={{
-          profile: "blueberry_2step_funded",
+          profile: "deriv_2step_funded",
           startingBalance: 100000,
           currentBalance: 100200,
           currentEquity: 100100,

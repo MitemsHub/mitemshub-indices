@@ -337,8 +337,8 @@ TS test files.
 Deriv's WebSocket API cannot serve multi-day **tick** history (proven: paged
 `ticks_history` requests all return the same rolling ~5k-tick buffer, ignoring
 `end`), and its candle symbols (1HZ75V / 1HZ100V) trade at **different price
-levels** than the Blueberry instruments the user actually trades.  The correct
-source is the Blueberry MT5 terminal itself: `copy_rates_range` returns
+levels** than the Deriv instruments the user actually trades.  The correct
+source is the Deriv MT5 terminal itself: `copy_rates_range` returns
 server-backed M1 OHLC going back days.
 
 New `backfill-mt5` subcommand: `collect_mt5_candle_history()` resolves the real
@@ -350,7 +350,7 @@ resolved with the same registry/Program-Files scan the live path uses
 (`_resolve_mt5_terminal_path`).  Also fixed `_resolve_mt5_symbol` to try
 SYN75/SYN100 first so the live MT5 path can resolve the real instruments.
 
-**Result: 7 full days, correct Blueberry scale, per symbol:**
+**Result: 7 full days, correct Deriv scale, per symbol:**
 
 | Symbol | Venue | Span | Min → Max | Ticks |
 |---|---|---|---|---|
@@ -363,7 +363,7 @@ duplicates, zero out-of-order rows.
 ### Critical data-quality finding
 
 The pre-existing `data/R_75_ticks.csv` was **polluted with two price scales**
-(Blueberry ~1,700 body + Deriv ~7,800 tail from the API fallback path).  This
+(Deriv ~1,700 body + Deriv ~7,800 tail from the API fallback path).  This
 pollution explains Phase 5's 0.995 EGARCH persistence: a scale jump reads as
 **extreme** volatility persistence.  On 7 days of clean, correct-scale data the
 squared-return ACF is essentially zero (sum ≈ −0.012 to +0.050 at 60s/300s) and
@@ -479,7 +479,7 @@ A long-running service that appends real ticks to `data/backfill/{symbol}_ticks.
 across days/sessions — the same clean-corpus files the WFO and forecast-horizon
 dashboard already read.
 
-- **Correct source.** Blueberry MT5 terminal only (`Mt5TickClient.latest_tick()`
+- **Correct source.** Deriv MT5 terminal only (`Mt5TickClient.latest_tick()`
   added to `execution/mt5_data.py`, returning the terminal's real `time_msc`
   epoch).  The Deriv WebSocket fallback is never used — its 1HZ75V trades at
   ~7,000 vs SYN75 ~1,500 and would corrupt the corpus.
@@ -504,7 +504,7 @@ dashboard already read.
 
 ```bash
 python -m synthetic_trader.cli collect-live-ticks --symbols R_75,R_100
-# or: collect-live-ticks.bat   (launcher; keep the Blueberry terminal open)
+# or: collect-live-ticks.bat   (launcher; keep the Deriv terminal open)
 ```
 
 ### `tick-coverage` — `src/synthetic_trader/scripts/tick_coverage_stats.py` (NEW)
@@ -803,7 +803,7 @@ fade entry filter, not more data volume alone.
 and the corpus previously stopped growing the moment nobody ran
 `backfill-mt5` by hand. `capture-m1` keeps `data/backfill/{symbol}_ticks.csv`
 compounding in the background by reusing the exact `backfill-mt5` machinery
-(`fetch_m1_candles` — server-backed M1 OHLC from the Blueberry MT5 terminal at
+(`fetch_m1_candles` — server-backed M1 OHLC from the Deriv MT5 terminal at
 the correct SYN75/SYN100 scale).
 
 **How it works.**
@@ -1282,7 +1282,7 @@ caveat printing, unknown-gate rejection, determinism).  Docs: this section.
 
 ### The problem
 
-The corpus only compounds if the Blueberry MT5 collector actually runs every
+The corpus only compounds if the Deriv MT5 collector actually runs every
 day.  Manual launches get forgotten; a raw daily task pointed at
 `collect-live-ticks.bat` would block forever on `WaitForExit`, so Task
 Scheduler would skip every trigger after the first.  The fix is a
@@ -1342,7 +1342,7 @@ days` with usable windows per timeframe/horizon.
   contains “Synthetic Indices Bot”) needs `\"…\"` escaped quotes.
 - **cwd**: Task Scheduler runs the action from `C:\Windows\System32`, so the
   verification passes `--engine-root` explicitly.
-- **Note**: the collector exits cleanly if the Blueberry MT5 terminal is not
+- **Note**: the collector exits cleanly if the Deriv MT5 terminal is not
   open (writes the error to `data/live_tick_collector.json`) — the task
   still succeeds; the corpus just doesn't grow that day.  Keep the terminal
   logged in for the scheduled runs to append.
@@ -2098,8 +2098,8 @@ Keep the §34 geometry; treat the gate's stable band as **abs 1.2–2.0 ×
 ## 36. NO FALLBACK — the system knows what it is connected to
 
 The live path previously used **MT5 first → Deriv WebSocket fallback** when
-the Blueberry terminal was down.  Deriv's `1HZ75V`/`1HZ100V` trade at a
-completely different price scale than Blueberry `SYN75`/`SYN100` (R_75
+the Deriv terminal was down.  Deriv's `1HZ75V`/`1HZ100V` trade at a
+completely different price scale than Deriv `SYN75`/`SYN100` (R_75
 ~7,000 vs ~1,542), so the fallback silently produced wrong-scale prices,
 calls and scored outcomes.  The fallback is now **removed everywhere**:
 
@@ -2114,14 +2114,14 @@ calls and scored outcomes.  The fallback is now **removed everywhere**:
   after `MAX_CONSECUTIVE_ERRORS`.
 - `calibration_scorer.score_unresolved_records_from_market`: a missing
   `client_factory` is a hard `RuntimeError` — the Deriv path is deleted.
-- `cli score-live-calibration`: resolves the Blueberry MT5 client first;
+- `cli score-live-calibration`: resolves the Deriv MT5 client first;
   prints `error=scoring_unavailable` and exits 1 otherwise.
 - **Venue honesty**: every `run_live_snapshot` result is stamped
   `venue` = `mt5` | `deriv` | `csv`, surfaced in the operator call payload
   as an MT5-venue / Deriv-scale / CSV-venue badge (`contracts.ts`,
   `engine-bridge.ts` `normalizeVenue`, `primary-call-panel.tsx`
   `VenueBadge`).  The MT5-down stand-aside now says "MT5 unavailable — no
-  Deriv fallback; start the Blueberry MT5 terminal".
+  Deriv fallback; start the Deriv MT5 terminal".
 
 **CSV corruption cleaned (with backups):**
 
@@ -2138,7 +2138,7 @@ without MT5, the watch surviving an MT5-down baseline, and the `venue`
 stamp.
 
 **Operator impact:** no call/outcome is ever produced on the wrong price
-scale again.  If the Blueberry MT5 terminal is not running, the dashboard
+scale again.  If the Deriv MT5 terminal is not running, the dashboard
 shows a clear stand-aside ("MT5 unavailable — no fallback") instead of a
 Deriv-scale trade plan — and the DERIV feed is still usable explicitly via
 `--app-id` (venue badge shows "Deriv scale") for monitoring only.
@@ -2366,7 +2366,7 @@ forecast + ADWIN drift gate + z_entry price-extension fade) and the live
 live and measured geometry cannot diverge.  The breakeven trail (stop to
 entry once MFE ≥ 0.3 × target distance) is now also in the live guardian.
 
-**R_75 head-to-head verdict (9.5-day Blueberry SYN75 corpus, 300s,
+**R_75 head-to-head verdict (9.5-day Deriv SYN75 corpus, 300s,
 calibrated EGARCH, 5-tick slippage + $0.10/trade fee):**
 
 | strategy | trades | WR | expectancy R | net |
@@ -2445,7 +2445,7 @@ filter, ranking, determinism) — all pass; the full affected set
    becomes a month unattended.  **§25b adds the morning alert** — schedule
    `check-tick-task-health.ps1` (or `tick-task-health` directly) daily and
    it warns when the corpus stops growing for 48h.  Remaining: keep the
-   Blueberry MT5 terminal logged in (the check currently fires — the corpus
+   Deriv MT5 terminal logged in (the check currently fires — the corpus
    has been flat since Aug 3 because the terminal isn't running).
 2. **✅ DONE — vol-targeting overlay, both regimes (§9 fade, §14 momentum,
    §23 gate variants).**  Re-validated on the corrected EGARCH engine: the
@@ -2699,7 +2699,7 @@ morning by the daily task):
 - ``venue_leak`` — **data-integrity failure, highest priority**: any tick in
 the MT5 corpus whose price deviates from the corpus median by more than the
 append-time scale guard (``SCALE_GUARD_MAX_RATIO = 2.5``) — i.e. Deriv
-1HZ-scale prices (~3.7-4.0x Blueberry SYN scale) got appended despite the
+1HZ-scale prices (~3.7-4.0x Deriv SYN scale) got appended despite the
 venue guard.  The report names the symbol, count, and a sample price, and
 **exits non-zero** so the morning task logs ``collector-health failed (...)``
 instead of ``ok``.  The scan reads raw CSV rows (not deduped) so a leaked

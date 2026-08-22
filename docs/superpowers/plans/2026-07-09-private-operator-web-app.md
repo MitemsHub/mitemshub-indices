@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the first private operator website in the `mitemshub-indices` repo, backed by a local bridge that wraps the current Python engine and supports both `Own Account` and Blueberry `2-Step funded` prop-firm modes.
+**Goal:** Build the first private operator website in the `mitemshub-indices` repo, backed by a local bridge that wraps the current Python engine and supports both `Own Account` and `Deriv 2-Step funded` prop-firm modes.
 
 **Architecture:** The app lives in the empty `mitemshub-indices` repo as a Next.js product with App Router. The browser talks only to local API routes, and those routes call a small server-side bridge that wraps the existing Synthetic Indices engine and returns structured JSON. Prop compliance is a separate policy layer applied after the market call is produced, so market logic and account-mode policy stay cleanly separated.
 
@@ -39,7 +39,7 @@ All implementation paths below are relative to the root of the target website re
 - `src/lib/contracts.ts`
   - Shared Zod schemas and TypeScript types for API payloads.
 - `src/lib/prop-policy.ts`
-  - Blueberry 2-Step funded compliance calculations.
+  - Deriv 2-Step funded compliance calculations.
 - `src/lib/engine-bridge.ts`
   - Server-side adapter that wraps the current Python engine.
 - `src/lib/mock-data.ts`
@@ -238,7 +238,7 @@ git add package.json next.config.ts tsconfig.json app/layout.tsx app/globals.css
 git commit -m "feat: scaffold operator app contracts"
 ```
 
-### Task 2: Implement Blueberry Prop Policy
+### Task 2: Implement Deriv Prop Policy
 
 **Files:**
 - Create: `mitemshub-indices/src/lib/prop-policy.ts`
@@ -262,7 +262,7 @@ describe("evaluatePropCompliance", () => {
         reward_risk: 2,
       },
       accountState: {
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100000,
         currentBalance: 101200,
         currentEquity: 100800,
@@ -288,7 +288,7 @@ describe("evaluatePropCompliance", () => {
         reward_risk: 1.8,
       },
       accountState: {
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100000,
         currentBalance: 96500,
         currentEquity: 95050,
@@ -310,11 +310,11 @@ describe("evaluatePropCompliance", () => {
 Run: `npm run test -- tests/prop-policy.test.ts`
 Expected: FAIL because `src/lib/prop-policy.ts` does not exist.
 
-- [ ] **Step 3: Implement the minimal Blueberry 2-Step policy layer**
+- [ ] **Step 3: Implement the minimal Deriv 2-Step policy layer**
 
 ```ts
 export type PropAccountState = {
-  profile: "blueberry_2step_funded";
+  profile: "deriv_2step_funded";
   startingBalance: number;
   currentBalance: number;
   currentEquity: number;
@@ -431,7 +431,7 @@ Expected: PASS
 
 ```bash
 git add src/lib/contracts.ts src/lib/prop-policy.ts tests/prop-policy.test.ts
-git commit -m "feat: add blueberry prop policy layer"
+git commit -m "feat: add deriv prop policy layer"
 ```
 
 ### Task 3: Build The Engine Bridge And API Routes
@@ -471,7 +471,7 @@ describe("runFreshCall", () => {
       symbol: "R_75",
       accountMode: "prop_firm",
       propAccountState: {
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100000,
         currentBalance: 100200,
         currentEquity: 100100,
@@ -624,7 +624,7 @@ describe("OperatorShell", () => {
 
     await user.click(screen.getByRole("button", { name: /prop firm/i }));
 
-    expect(screen.getByText(/blueberry 2-step funded/i)).toBeInTheDocument();
+    expect(screen.getByText(/deriv 2-step funded/i)).toBeInTheDocument();
     expect(screen.getByText(/compliance status/i)).toBeInTheDocument();
   });
 
@@ -808,7 +808,7 @@ Expected: Next.js dev server starts and the operator workspace loads at `http://
 
 Run these checks in the browser:
 - click `R_75` in `Own Account` mode and confirm a fresh call appears
-- switch to `Prop Firm` mode and confirm the Blueberry compliance panel appears
+- switch to `Prop Firm` mode and confirm the Deriv compliance panel appears
 - click `R_100` and confirm the prop compliance state renders
 - confirm review/system and history panels render without layout breakage
 

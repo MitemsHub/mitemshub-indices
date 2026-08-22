@@ -7,12 +7,14 @@
 - MT5 terminal path:
 - Rollout artifact:
 - Dry-run journal:
+- Armed-live consent recorded (artifact `armed_confirmation=True` + `--armed-live` on the invocation):
 
 ## Readiness Checks
 
 - [ ] MT5 runtime ready
 - [ ] Venue symbol mapping verified
-- [ ] Rollout artifact reviewed
+- [ ] Rollout artifact reviewed (includes `armed_confirmation`)
+- [ ] Armed-live consent explicitly recorded
 - [ ] Fail-closed stop conditions reviewed
 
 ## Pilot Configuration

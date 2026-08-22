@@ -44,7 +44,7 @@ class Mt5ClientHardeningTests(unittest.TestCase):
         self._env = patch.dict(
             os.environ,
             {
-                "SYNTHETIC_MT5_SERVER": "BlueberryMarketsSVG-Live",
+                "SYNTHETIC_MT5_SERVER": "DerivSVG-Server-03",
                 "SYNTHETIC_MT5_LOGIN": "12345",
                 "SYNTHETIC_MT5_PASSWORD": "secret",
                 "SYNTHETIC_MT5_TERMINAL_PATH": str(Path(self._tmp) / "terminal64.exe"),
@@ -142,6 +142,63 @@ class Mt5ClientHardeningTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].epoch, 1_700_000_000.123)
         self.assertEqual(result[0].price, 1830.5)
+
+    def test_subscribe_ticks_stamps_terminal_clock_not_local(self) -> None:
+        """Live ticks must carry the terminal's time_msc (broker server
+        clock) — the SAME clock ticks_history/latest_tick and the research
+        corpus use.  The old time.time() stamp put live candles 3h behind
+        the warmup's server-stamped candles (Deriv server = UTC+3),
+        producing non-monotonic journal epochs and shifting the entry gate
+        3h late vs the backtest's "UTC 18-24h" edge.  A time_msc == 0
+        struct falls back to the local clock."""
+        fake = _fake_mt5([True])
+        # Two connects in this test — initialize must succeed every time,
+        # not consume a one-shot side_effect list.
+        fake.initialize = MagicMock(return_value=True)
+        t_msc = 1_753_000_000_000  # some server epoch, in ms
+        infos = [
+            types.SimpleNamespace(time_msc=t_msc + i * 1000, bid=1830.0 + i, ask=1831.0 + i)
+            for i in range(3)
+        ]
+        fake.symbol_info = MagicMock(return_value=object())
+        fake.symbol_info_tick = MagicMock(side_effect=infos)
+        with patch.dict(sys.modules, {"MetaTrader5": fake}):
+            client = Mt5TickClient()
+
+            async def _run():
+                await client.__aenter__()
+                out = []
+                async for t in client.subscribe_ticks("R_75", timeout=0.3):
+                    out.append(t)
+                    if len(out) >= 3:
+                        break
+                return out
+
+            out = asyncio.run(_run())
+
+        self.assertEqual(len(out), 3)
+        for i, t in enumerate(out):
+            self.assertEqual(t.epoch, (t_msc + i * 1000) / 1000.0)
+            self.assertEqual(t.price, 1830.0 + i)
+
+        # time_msc == 0 (uninitialised struct) -> local clock fallback
+        import time
+
+        fake.symbol_info_tick = MagicMock(
+            return_value=types.SimpleNamespace(time_msc=0, bid=1840.0, ask=1841.0)
+        )
+        with patch.dict(sys.modules, {"MetaTrader5": fake}):
+            client2 = Mt5TickClient()
+
+            async def _run2():
+                await client2.__aenter__()
+                async for t in client2.subscribe_ticks("R_75", timeout=0.3):
+                    return t
+                return None
+
+            t2 = asyncio.run(_run2())
+        self.assertIsNotNone(t2)
+        self.assertLess(abs(t2.epoch - time.time()), 5.0)
 
     def test_terminal_path_cache_is_env_aware(self) -> None:
         """The module-global terminal-path cache must not leak a resolution

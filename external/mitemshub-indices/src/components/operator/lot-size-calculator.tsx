@@ -11,7 +11,7 @@ type LotSizeCalculatorProps = {
 };
 
 /**
- * Built-in lot size calculator for Blueberry Markets prop accounts.
+ * Built-in lot size calculator for Deriv prop accounts.
  *
  * Automatically calculates the correct lot size based on:
  * - Account equity
@@ -54,7 +54,7 @@ export function LotSizeCalculator({
     if (!tpEdited) setCustomTP(takeProfit?.toString() ?? "");
   }, [takeProfit, tpEdited]);
 
-  // Blueberry Markets synthetic index contract size: 100 units per lot
+  // Deriv synthetic index contract size: 100 units per lot
   // 1 lot = 100 units, so a 1-point move = $100 P&L per lot
   const contractSize = 100;
 
@@ -71,7 +71,7 @@ export function LotSizeCalculator({
 
     const riskAmount = equity * (riskPct / 100);
     // Lot size = risk_amount / (stop_distance * contract_size)
-    // For Blueberry: 1 lot = 100 units, so 1 point = $100 P&L per lot
+    // For Deriv: 1 lot = 100 units, so 1 point = $100 P&L per lot
     const lotSize = riskAmount / (stopDistance * contractSize);
 
     // Round down to nearest 0.01 lot
@@ -118,7 +118,7 @@ export function LotSizeCalculator({
           Lot Size Calculator
         </p>
         <span className="text-[10px] text-[var(--text-muted)] font-mono">
-          Blueberry Markets
+          Deriv
         </span>
       </div>
 

@@ -1,7 +1,7 @@
 """Tests for the synthetic backtesting framework.
 
 Covers:
-1. Synthetic price generator (EGARCH, CSPRNG, multi-dataset, Blueberry Markets)
+1. Synthetic price generator (EGARCH, CSPRNG, multi-dataset, Deriv)
 2. Statistical validation (ADF, Hurst, volatility clustering, kurtosis, Ljung-Box)
 3. Backtest runner (episode execution, curve-fitting detection)
 """
@@ -13,9 +13,9 @@ import unittest
 
 from synthetic_trader.backtest.synthetic_generator import (
     BrokerType,
-    BlueberryIndexType,
-    BlueberryIndexConfig,
-    BLUEBERRY_INDICES,
+    DerivIndexType,
+    DerivIndexConfig,
+    DERIV_INDICES,
     DerivCSPRNG,
     GARCHParams,
     SpreadModel,
@@ -106,26 +106,26 @@ class TestSpreadModel(unittest.TestCase):
         self.assertGreater(off_peak_spread, peak_spread)
 
 
-class TestBlueberryIndices(unittest.TestCase):
-    """Test Blueberry Markets index configurations."""
+class TestDerivIndices(unittest.TestCase):
+    """Test Deriv index configurations."""
 
     def test_all_indices_configured(self):
-        """All Blueberry index types should be configured."""
+        """All Deriv index types should be configured."""
         expected = {"SYN50", "SYN75", "SYN100", "SURGE50", "SURGE75", "SURGE100",
                     "DROP50", "DROP75", "DROP100", "LEAP50", "LEAP75", "LEAP100"}
-        self.assertEqual(set(BLUEBERRY_INDICES.keys()), expected)
+        self.assertEqual(set(DERIV_INDICES.keys()), expected)
 
-    def test_from_blueberry_config(self):
-        """Should create config from Blueberry symbol."""
-        config = SyntheticIndexConfig.from_blueberry("SYN100")
-        self.assertEqual(config.broker, BrokerType.BLUEBERRY)
+    def test_from_deriv_config(self):
+        """Should create config from Deriv symbol."""
+        config = SyntheticIndexConfig.from_deriv("SYN100")
+        self.assertEqual(config.broker, BrokerType.DERIV)
         self.assertEqual(config.symbol, "SYN100")
         self.assertEqual(config.initial_price, 10000.0)
 
-    def test_from_blueberry_unknown_symbol(self):
-        """Should raise ValueError for unknown Blueberry symbol."""
+    def test_from_deriv_unknown_symbol(self):
+        """Should raise ValueError for unknown Deriv symbol."""
         with self.assertRaises(ValueError):
-            SyntheticIndexConfig.from_blueberry("UNKNOWN")
+            SyntheticIndexConfig.from_deriv("UNKNOWN")
 
     def test_deriv_config(self):
         """Should create config from Deriv symbol."""
@@ -201,12 +201,12 @@ class TestSyntheticPriceGenerator(unittest.TestCase):
                 self.assertGreater(acf1, -0.5)
 
 
-class TestBlueberrySyntheticGenerator(unittest.TestCase):
-    """Test Blueberry Markets-specific synthetic generation."""
+class TestDerivSyntheticGenerator(unittest.TestCase):
+    """Test Deriv-specific synthetic generation."""
 
     def test_syn100_generation(self):
         """SYN100 should generate valid ticks."""
-        config = SyntheticIndexConfig.from_blueberry("SYN100")
+        config = SyntheticIndexConfig.from_deriv("SYN100")
         gen = SyntheticPriceGenerator(config=config, seed=42)
         ticks = gen.generate_ticks(100)
         self.assertEqual(len(ticks), 100)
@@ -215,28 +215,28 @@ class TestBlueberrySyntheticGenerator(unittest.TestCase):
 
     def test_surge_momentum(self):
         """SURGE indices should show momentum bias."""
-        config = SyntheticIndexConfig.from_blueberry("SURGE100")
+        config = SyntheticIndexConfig.from_deriv("SURGE100")
         self.assertGreater(config.momentum_bias, 0)
 
     def test_drop_crash_probability(self):
         """DROP indices should have crash probability."""
-        config = SyntheticIndexConfig.from_blueberry("DROP100")
+        config = SyntheticIndexConfig.from_deriv("DROP100")
         self.assertGreater(config.crash_probability, 0)
         self.assertGreater(config.recovery_speed, 0)
 
     def test_leap_trending(self):
         """LEAP indices should be trending."""
-        config = SyntheticIndexConfig.from_blueberry("LEAP100")
+        config = SyntheticIndexConfig.from_deriv("LEAP100")
         self.assertGreater(config.momentum_bias, 0)
 
-    def test_blueberry_spread_model(self):
-        """Blueberry indices should have spread model configured."""
-        config = SyntheticIndexConfig.from_blueberry("SYN100")
+    def test_deriv_spread_model(self):
+        """Deriv indices should have spread model configured."""
+        config = SyntheticIndexConfig.from_deriv("SYN100")
         self.assertGreater(config.spread.base_spread_pct, 0)
 
     def test_drop_crash_behavior(self):
         """DROP indices should occasionally produce crashes."""
-        config = SyntheticIndexConfig.from_blueberry("DROP100")
+        config = SyntheticIndexConfig.from_deriv("DROP100")
         gen = SyntheticPriceGenerator(config=config, seed=42)
         ticks = gen.generate_ticks(5000)
         # Check that price dropped significantly at some point

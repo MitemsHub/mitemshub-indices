@@ -75,7 +75,7 @@ export function PropConnectionModal({
               value={server}
               onChange={(event) => setServer(event.target.value)}
               className="mt-1.5 w-full rounded-xl border border-[var(--line-subtle)] bg-[var(--bg-panel-strong)] px-3.5 py-2 text-sm transition focus:border-[var(--accent-ink)] focus:ring-1 focus:ring-[var(--accent-ink)] outline-none"
-              placeholder="e.g. BlueberryMarkets-Demo"
+              placeholder="e.g. Deriv-Demo"
             />
           </label>
           <label className="block">

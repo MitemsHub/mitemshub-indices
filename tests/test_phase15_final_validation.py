@@ -40,6 +40,36 @@ class Phase15ValidationPayloadTests(unittest.TestCase):
         self.assertEqual(snapshot["symbol"], "R_75")
         self.assertEqual(snapshot["final_equity"], 1002.5)
         self.assertEqual(snapshot["latency_total_ms"], 2.5)
+        # Consent is recorded in the snapshot (defaults to False) so the final
+        # validation JSON carries it as replayable evidence.
+        self.assertFalse(snapshot["armed_confirmation"])
+
+    def test_build_validation_snapshot_records_armed_confirmation(self) -> None:
+        summary = LivePaperSummary(
+            symbol="R_75",
+            live_ticks=10,
+            warmup_ticks=5,
+            signals=2,
+            approved_signals=1,
+            rejected_signals=1,
+            closed_trades=1,
+            shutdown_closed_trades=1,
+            open_positions_before_shutdown=1,
+            unresolved_positions=0,
+            finalized=True,
+            session_resets=0,
+            final_equity=1002.5,
+            model_version="unit-test",
+        )
+
+        snapshot = build_validation_snapshot(
+            venue="mt5",
+            mode="armed-live",
+            live_summary=summary,
+            armed_confirmation=True,
+        )
+
+        self.assertTrue(snapshot["armed_confirmation"])
 
 
 class Phase15ValidationRenderingTests(unittest.TestCase):
@@ -51,6 +81,7 @@ class Phase15ValidationRenderingTests(unittest.TestCase):
                 "venue": "mt5",
                 "mode": "dry-run-live",
                 "symbol": "R_75",
+                "armed_confirmation": True,
                 "finalized": True,
                 "final_equity": 1001.5,
                 "latency_total_ms": 2.0,
@@ -59,6 +90,7 @@ class Phase15ValidationRenderingTests(unittest.TestCase):
 
         self.assertIn("validation_venue=mt5", rendered)
         self.assertIn("validation_mode=dry-run-live", rendered)
+        self.assertIn("validation_armed_confirmation=True", rendered)
         self.assertIn("validation_final_equity=1001.5", rendered)
         self.assertIn("validation_latency_total_ms=2.0", rendered)
 
@@ -120,6 +152,7 @@ class Phase15ValidationCliTests(unittest.TestCase):
                                 "validate-system",
                                 "--symbol",
                                 "R_75",
+                                "--armed-live",
                                 "--artifact-output",
                                 str(artifact_path),
                             ]
@@ -137,7 +170,9 @@ class Phase15ValidationCliTests(unittest.TestCase):
         live_runner.assert_awaited_once_with(symbol="R_75", duration_sec=0, max_live_ticks=0)
         self.assertIsNotNone(artifact)
         self.assertIn("validation_symbol=R_75", output.getvalue())
+        self.assertIn("validation_armed_confirmation=True", output.getvalue())
         self.assertEqual(artifact["symbol"], "R_75")
+        self.assertTrue(artifact["armed_confirmation"])
 
 
 if __name__ == "__main__":

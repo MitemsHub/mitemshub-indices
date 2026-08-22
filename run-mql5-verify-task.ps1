@@ -14,8 +14,13 @@
     3. Logs to .data/mql5_verify_task.log (same convention as the tick
        collector) and persists the last output + state.
     4. Emails the PASS/FAIL table when a verification actually ran (never on
-       a gate skip).  SMTP is configured via MQL5_VERIFY_SMTP_* environment
-       variables, falling back to the inline block below; empty = disabled.
+       a gate skip).  The subject is parsed from verify_all.ps1's
+       machine-readable `[VERIFY] summary ok=...` line (so a red row like
+       the P10-A STRICT trade-count breach is named without scraping the
+       table), falling back to the human summary text when the machine line
+       is absent (e.g. a pre-flight throw).  SMTP is configured via
+       MQL5_VERIFY_SMTP_* environment variables, falling back to the inline
+       block below; empty = disabled.
 
   Install with setup-mql5-verify-task.ps1 (registers the scheduled task and a
   post-commit git hook that fires it after every commit).
@@ -141,9 +146,40 @@ function Send-ResultEmail {
     return
   }
   $subject = "MQL5 VERIFY: $Status"
-  if ($Table -match "(\d+) suite\(s\) NOT green") { $subject += " - $($Matches[1]) suite(s) not green" }
+  # Machine-readable [VERIFY] summary line wins when present (printed by
+  # verify_all.ps1 on every full run): ok=1 -> all green, ok=0 -> red rows
+  # named inline (failed=SuiteA,SuiteB).  Falls back to the human text for
+  # runs that never reached the summary (pre-flight throw / wrapper error).
+  if ($Table -match "\[VERIFY\] summary ok=(\d+) rows=\d+ green=\d+ red=(\d+) skip=\d+(?: failed=([^\s]+))?") {
+    if ($Matches[1] -eq "0") {
+      $subject += " - $($Matches[2]) suite(s) not green"
+      if ($Matches[3]) { $subject += ": $($Matches[3])" }
+    } else {
+      $subject += " - all green"
+    }
+  }
+  elseif ($Table -match "(\d+) suite\(s\) NOT green") { $subject += " - $($Matches[1]) suite(s) not green" }
   elseif ($Table -match "PRE-FLIGHT FAILED")     { $subject += " - pre-flight failed" }
   elseif ($Table -match "ALL SUITES PASSED")     { $subject += " - all green" }
+  # The tick-collector task emits the SAME parseable format family
+  # ([COLLECT] summary ok=... steps=... green=... red=... skip=... failed=...)
+  # from its own daily schedule; scan its task log for the latest line and
+  # append the collector's health to the subject so one email covers both
+  # schedulers.
+  $collectorLog = Join-Path $stateDir "live_tick_task.log"
+  if (Test-Path $collectorLog) {
+    $lastCollect = (Get-Content $collectorLog -ErrorAction SilentlyContinue |
+      Select-String -Pattern '\[COLLECT\] summary ok=\d+ steps=\d+ green=\d+ red=\d+ skip=\d+' |
+      Select-Object -Last 1).Line
+    if ($lastCollect -match '\[COLLECT\] summary ok=(\d+) steps=\d+ green=\d+ red=(\d+) skip=\d+(?: failed=(\S+))?') {
+      if ($Matches[1] -eq "0") {
+        $subject += " | COLLECT: $($Matches[2]) step(s) red"
+        if ($Matches[3]) { $subject += " ($($Matches[3]))" }
+      } else {
+        $subject += " | COLLECT: all steps green"
+      }
+    }
+  }
   $bodyLines = @(
     "MQL5 MITEMSHUB_AI continuous verification - $Status",
     "ran:   $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",

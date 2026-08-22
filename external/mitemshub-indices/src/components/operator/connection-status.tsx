@@ -172,7 +172,7 @@ export function ConnectionStatus({
 
   // Build a detailed MT5 status message for the tooltip
   const mt5Tooltip = mt5Ok
-    ? "Blueberry Markets MT5 terminal is running"
+    ? "Deriv MT5 terminal is running"
     : mt5ConfiguredOnly
       ? mt5Error
         ? `MT5 credentials configured but terminal disconnected: ${mt5Error}`

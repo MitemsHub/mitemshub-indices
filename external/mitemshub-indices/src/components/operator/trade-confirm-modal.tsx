@@ -9,7 +9,7 @@ import type { ExecutionMode, FreshCallResponse } from "../../lib/contracts";
 const MT5_ERROR_MESSAGES: Record<number, { title: string; fix: string }> = {
   10026: {
     title: "AutoTrading disabled by broker",
-    fix: "Contact Blueberry Markets support to enable automated/EAs trading on your account. Also verify you are using the Master Password, not the Investor (read-only) password.",
+    fix: "Contact Deriv support to enable automated/EAs trading on your account. Also verify you are using the Master Password, not the Investor (read-only) password.",
   },
   10027: {
     title: "AutoTrading disabled in MT5 terminal",
@@ -364,7 +364,7 @@ export function TradeConfirmModal({
                   ⚠ Live MT5 Execution
                 </p>
                 <p className="mt-1 text-xs leading-5 text-[var(--text-body)]">
-                  This will place a real order on your Blueberry Markets MT5 account.
+                  This will place a real order on your Deriv MT5 account.
                   Make sure you have verified the entry, stop loss, and take profit levels.
                 </p>
               </div>

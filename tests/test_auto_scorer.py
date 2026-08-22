@@ -168,7 +168,7 @@ def test_loop_writes_status_even_when_sweep_fails(tmp_path: Path, monkeypatch) -
 
 
 def test_sweep_once_prefers_mt5_client_when_configured(tmp_path: Path, monkeypatch) -> None:
-    """When SYNTHETIC_MT5_* is configured, scoring must use the Blueberry MT5
+    """When SYNTHETIC_MT5_* is configured, scoring must use the Deriv MT5
     terminal so outcomes are measured on the same SYN75/SYN100 scale as the
     call levels -- never the Deriv 1HZ75V fallback (~7,000 vs ~1,542)."""
     captured: dict = {}
@@ -202,7 +202,7 @@ def test_sweep_once_prefers_mt5_client_when_configured(tmp_path: Path, monkeypat
 def test_sweep_once_errors_when_mt5_unavailable_no_deriv_fallback(tmp_path: Path, monkeypatch) -> None:
     """Without MT5 config the sweep must FAIL — there is no Deriv fallback.
     Deriv's 1HZ75V/1HZ100V are on the WRONG price scale vs the call levels
-    (SYN75/SYN100), so scoring without the Blueberry terminal is a hard
+    (SYN75/SYN100), so scoring without the Deriv terminal is a hard
     error, never a warning, and the scorer is never invoked."""
     called: dict = {}
 

@@ -126,7 +126,7 @@ function buildSupportResponse(url: string): Promise<Response> | null {
     return Promise.resolve(
       new Response(
         JSON.stringify({
-          profile: "blueberry_2step_funded",
+          profile: "deriv_2step_funded",
           startingBalance: 100000,
           currentBalance: 100200,
           currentEquity: 100100,
@@ -1087,7 +1087,7 @@ describe("useOperatorWorkspace", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              profile: "blueberry_2step_funded",
+              profile: "deriv_2step_funded",
               startingBalance: 5000,
               currentBalance: 5000,
               currentEquity: 5000,
@@ -1192,7 +1192,7 @@ describe("useOperatorWorkspace", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              profile: "blueberry_2step_funded",
+              profile: "deriv_2step_funded",
               startingBalance: 5000,
               currentBalance: 5000,
               currentEquity: 5000,
@@ -1362,7 +1362,7 @@ describe("useOperatorWorkspace", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              profile: "blueberry_2step_funded",
+              profile: "deriv_2step_funded",
               startingBalance: 5000,
               currentBalance: 5000,
               currentEquity: 5000,

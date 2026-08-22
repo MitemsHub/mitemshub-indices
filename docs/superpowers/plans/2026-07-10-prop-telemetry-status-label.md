@@ -54,7 +54,7 @@ it("labels dedicated prop reads as live confirmed", async () => {
   vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
 
   vi.spyOn(engineBridge.livePropProfileAdapter, "read").mockResolvedValue({
-    profile: "blueberry_2step_funded",
+    profile: "deriv_2step_funded",
     startingBalance: 120000,
     currentBalance: 119800,
     currentEquity: 119700,
@@ -84,7 +84,7 @@ it("labels blank prop credentials as own-account fallback when live fallback suc
   vi.stubEnv("SYNTHETIC_MT5_PASSWORD", "env-secret");
 
   vi.spyOn(engineBridge.livePropProfileAdapter, "read").mockResolvedValue({
-    profile: "blueberry_2step_funded",
+    profile: "deriv_2step_funded",
     startingBalance: 100000,
     currentBalance: 100050,
     currentEquity: 100010,
@@ -156,7 +156,7 @@ export type PropProfileResponse = z.infer<typeof propProfileResponseSchema>;
 
 ```ts
 export const mockCurrentPropProfile: PropProfileResponse = {
-  profile: "blueberry_2step_funded",
+  profile: "deriv_2step_funded",
   startingBalance: 100200,
   currentBalance: 100200,
   currentEquity: 100100,
@@ -235,7 +235,7 @@ Expected: PASS
 ```ts
 it("POST /api/prop-profiles/current returns telemetry status", async () => {
   vi.spyOn(engineBridge, "getCurrentPropProfileForRequest").mockResolvedValue({
-    profile: "blueberry_2step_funded",
+    profile: "deriv_2step_funded",
     startingBalance: 100000,
     currentBalance: 100000,
     currentEquity: 100100,
@@ -284,7 +284,7 @@ it("renders the backend-truth telemetry label above the prop panel", async () =>
 
     if (url.includes("/api/prop-profiles/current") && init?.method === "POST") {
       return Promise.resolve(new Response(JSON.stringify({
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100000,
         currentBalance: 100200,
         currentEquity: 100150,
@@ -300,7 +300,7 @@ it("renders the backend-truth telemetry label above the prop panel", async () =>
 
     if (url.includes("/api/prop-profiles/current")) {
       return Promise.resolve(new Response(JSON.stringify({
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100200,
         currentBalance: 100200,
         currentEquity: 100100,

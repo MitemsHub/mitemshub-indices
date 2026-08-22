@@ -6,18 +6,32 @@ $ErrorActionPreference = 'Stop'
 $ps1 = Join-Path $PSScriptRoot 'verify_all.ps1'
 $text = Get-Content $ps1 -Raw
 
+# The depth/vol gate patterns interpolate the shared number token ($NumTok —
+# optional sign + exponent form, defined once in verify_all.ps1).  Define it
+# here too, exactly as the other fixture harnesses do, or the extracted
+# function's `${NumTok}` interpolates to empty and every depth row fails to
+# parse (the drift class this harness exists to catch).
+$NumTok = [regex]::Match($text, '(?m)^\$NumTok = ''([^'']+)''').Groups[1].Value
+if (-not $NumTok) { throw 'cannot extract $NumTok from verify_all.ps1' }
+
 # Extract the Test-DepthSplit function (balanced braces).
 $start = $text.IndexOf('function Test-DepthSplit')
 if ($start -lt 0) { throw 'Test-DepthSplit not found' }
-$depth = 0; $i = $start; $inStr = $false; $strCh = ''
+# Comment-aware brace scan (apostrophes in # comments must not flip string mode).
+$depth = 0; $i = $start; $inStr = $false; $strCh = ''; $inComment = $false
 for (; $i -lt $text.Length; $i++) {
   $ch = $text[$i]
+  if ($inComment) {
+    if ($ch -eq [char]10) { $inComment = $false }
+    continue
+  }
   if ($inStr) {
     if ($ch -eq $strCh) {
       if ($i + 1 -lt $text.Length -and $text[$i + 1] -eq $strCh) { $i++ } else { $inStr = $false }
     }
     continue
   }
+  if ($ch -eq '#') { $inComment = $true; continue }
   if ($ch -eq "'" -or $ch -eq '"') { $inStr = $true; $strCh = $ch; continue }
   if ($ch -eq '{') { $depth++ }
   elseif ($ch -eq '}') { $depth--; if ($depth -eq 0) { break } }

@@ -22,7 +22,7 @@ describe("runFreshCall", () => {
       symbol: "R_75",
       accountMode: "prop_firm",
       propAccountState: {
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100000,
         currentBalance: 100200,
         currentEquity: 100100,
@@ -379,14 +379,14 @@ describe("runFreshCall engine config", () => {
   it("uses live MT5 prop telemetry when configured", async () => {
     vi.stubEnv("SYNTHETIC_ENGINE_ROOT", "c:\\engine-root");
     vi.stubEnv("SYNTHETIC_PROP_STARTING_BALANCE", "100000");
-    vi.stubEnv("SYNTHETIC_MT5_SERVER", "Blueberry");
+    vi.stubEnv("SYNTHETIC_MT5_SERVER", "Deriv");
     vi.stubEnv("SYNTHETIC_MT5_LOGIN", "123456");
     vi.stubEnv("SYNTHETIC_MT5_PASSWORD", "secret");
 
     const propProfileSpy = vi
       .spyOn(engineBridge.livePropProfileAdapter, "read")
       .mockResolvedValue({
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100000,
         currentBalance: 101250,
         currentEquity: 100950,
@@ -418,7 +418,7 @@ describe("getCurrentPropProfileForRequest", () => {
     const propProfileSpy = vi
       .spyOn(engineBridge.livePropProfileAdapter, "read")
       .mockResolvedValue({
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 120000,
         currentBalance: 119800,
         currentEquity: 119700,
@@ -459,7 +459,7 @@ describe("getCurrentPropProfileForRequest", () => {
     const propProfileSpy = vi
       .spyOn(engineBridge.livePropProfileAdapter, "read")
       .mockResolvedValue({
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100000,
         currentBalance: 100050,
         currentEquity: 100010,
@@ -503,7 +503,7 @@ describe("getCurrentPropProfileForRequest", () => {
 
     expect(propProfileSpy).not.toHaveBeenCalled();
     expect(profile).toEqual({
-      profile: "blueberry_2step_funded",
+      profile: "deriv_2step_funded",
       startingBalance: 100000,
       currentBalance: 100200,
       currentEquity: 100100,

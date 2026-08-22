@@ -13,6 +13,11 @@ This runbook defines the exact operator flow for the MT5-first supervised rollou
 5. Confirm `rollout_mt5_runtime_ready=True`.
 6. Confirm no unresolved stop condition is active before session start.
 
+> Escalation to `armed-live` requires the EXPLICIT consent flag `--armed-live` on
+> both `mt5-rollout-check` and `paper-live` — consent is never implied by
+> `--live-mode armed-live` alone, and is recorded as `armed_confirmation` in the
+> preflight artifact (see the R_100 armed-live pilot runbook, Step 4).
+
 ## Dry-Run Session
 
 Run:

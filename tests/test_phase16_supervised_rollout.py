@@ -28,6 +28,7 @@ class Phase16RolloutSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["rollout_stage"], "dry-run-preflight")
         self.assertEqual(snapshot["venue"], "mt5")
         self.assertEqual(snapshot["symbol"], "R_75")
+        self.assertFalse(snapshot["armed_confirmation"])
         self.assertTrue(snapshot["readiness_ok"])
         self.assertTrue(snapshot["validation_finalized"])
         self.assertEqual(snapshot["validation_final_equity"], 1003.25)
@@ -205,6 +206,169 @@ class Phase16RolloutCliTests(unittest.TestCase):
             self.assertEqual(payload["symbol"], "R_100")
             self.assertEqual(payload["venue"], "mt5")
             self.assertTrue(payload["readiness_ok"])
+
+    def test_mt5_rollout_check_armed_live_requires_confirmation(self) -> None:
+        import contextlib
+        import io
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from synthetic_trader.cli import main
+        from synthetic_trader.execution.mt5 import Mt5RuntimeStatus
+
+        runtime_status = Mt5RuntimeStatus(
+            ready=True,
+            failures=(),
+            venue_symbol="Volatility 100 Index",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = Path(tmpdir) / "rollout_armed_r100.json"
+            output = io.StringIO()
+            with patch("synthetic_trader.cli.evaluate_mt5_runtime", return_value=runtime_status):
+                with patch("synthetic_trader.cli.mt5_dependency_available", return_value=True):
+                    with contextlib.redirect_stdout(output):
+                        # armed-live WITHOUT the consent flag: must record the
+                        # missing_armed_confirmation failure and stay fail-closed.
+                        exit_code = main(
+                            [
+                                "mt5-rollout-check",
+                                "--symbol",
+                                "R_100",
+                                "--live-mode",
+                                "armed-live",
+                                "--mt5-server",
+                                "server",
+                                "--mt5-login",
+                                "123456",
+                                "--mt5-password",
+                                "secret",
+                                "--mt5-symbol",
+                                "Volatility 100 Index",
+                                "--artifact-output",
+                                str(artifact_path),
+                            ]
+                        )
+
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            # armed-live without consent must exit NONZERO (fail-closed) so a
+            # wrapper script cannot proceed on a non-consenting artifact.
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(payload["armed_confirmation"])
+            self.assertFalse(payload["readiness_ok"])
+            self.assertIn("missing_armed_confirmation", payload["readiness_failures"])
+            self.assertIn("rollout_armed_confirmation=False", output.getvalue())
+            self.assertIn("rollout_exit=1 fail_closed=armed-live-readiness-failed", output.getvalue())
+            self.assertIn("missing_armed_confirmation", output.getvalue())
+
+    def test_mt5_rollout_check_armed_live_fails_closed_on_runtime_not_ready(self) -> None:
+        import contextlib
+        import io
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from synthetic_trader.cli import main
+        from synthetic_trader.execution.mt5 import Mt5RuntimeStatus
+
+        # Consent IS given, but the MT5 runtime itself is not ready — the
+        # armed-live preflight must still fail closed (exit 1).
+        runtime_status = Mt5RuntimeStatus(
+            ready=False,
+            failures=("terminal not connected",),
+            venue_symbol="Volatility 100 Index",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = Path(tmpdir) / "rollout_armed_r100.json"
+            output = io.StringIO()
+            with patch("synthetic_trader.cli.evaluate_mt5_runtime", return_value=runtime_status):
+                with patch("synthetic_trader.cli.mt5_dependency_available", return_value=True):
+                    with contextlib.redirect_stdout(output):
+                        exit_code = main(
+                            [
+                                "mt5-rollout-check",
+                                "--symbol",
+                                "R_100",
+                                "--live-mode",
+                                "armed-live",
+                                "--armed-live",
+                                "--mt5-server",
+                                "server",
+                                "--mt5-login",
+                                "123456",
+                                "--mt5-password",
+                                "secret",
+                                "--mt5-symbol",
+                                "Volatility 100 Index",
+                                "--artifact-output",
+                                str(artifact_path),
+                            ]
+                        )
+
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 1)
+            self.assertTrue(payload["armed_confirmation"])
+            self.assertFalse(payload["readiness_ok"])
+            self.assertIn("terminal not connected", payload["readiness_failures"])
+            self.assertIn("rollout_exit=1 fail_closed=armed-live-readiness-failed", output.getvalue())
+
+    def test_mt5_rollout_check_armed_live_records_confirmation(self) -> None:
+        import contextlib
+        import io
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from synthetic_trader.cli import main
+        from synthetic_trader.execution.mt5 import Mt5RuntimeStatus
+
+        runtime_status = Mt5RuntimeStatus(
+            ready=True,
+            failures=(),
+            venue_symbol="Volatility 100 Index",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = Path(tmpdir) / "rollout_armed_r100.json"
+            output = io.StringIO()
+            with patch("synthetic_trader.cli.evaluate_mt5_runtime", return_value=runtime_status):
+                with patch("synthetic_trader.cli.mt5_dependency_available", return_value=True):
+                    with contextlib.redirect_stdout(output):
+                        # armed-live WITH the explicit consent flag: the gate passes
+                        # and the snapshot/artifact record the operator's consent.
+                        exit_code = main(
+                            [
+                                "mt5-rollout-check",
+                                "--symbol",
+                                "R_100",
+                                "--live-mode",
+                                "armed-live",
+                                "--armed-live",
+                                "--mt5-server",
+                                "server",
+                                "--mt5-login",
+                                "123456",
+                                "--mt5-password",
+                                "secret",
+                                "--mt5-symbol",
+                                "Volatility 100 Index",
+                                "--artifact-output",
+                                str(artifact_path),
+                            ]
+                        )
+
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(payload["armed_confirmation"])
+            self.assertTrue(payload["readiness_ok"])
+            self.assertEqual(payload["readiness_failures"], [])
+            self.assertIn("rollout_armed_confirmation=True", output.getvalue())
+            self.assertNotIn("missing_armed_confirmation", output.getvalue())
 
 
 if __name__ == "__main__":

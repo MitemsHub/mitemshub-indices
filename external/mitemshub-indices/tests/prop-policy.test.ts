@@ -12,7 +12,7 @@ describe("evaluatePropCompliance", () => {
         reward_risk: 2,
       },
       accountState: {
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100000,
         currentBalance: 101200,
         currentEquity: 100800,
@@ -38,7 +38,7 @@ describe("evaluatePropCompliance", () => {
         reward_risk: 1.8,
       },
       accountState: {
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100000,
         currentBalance: 96500,
         currentEquity: 95050,

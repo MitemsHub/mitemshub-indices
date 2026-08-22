@@ -13,7 +13,7 @@ export const propComplianceSchema = z.enum([
 ]);
 
 export const propAccountStateSchema = z.object({
-  profile: z.literal("blueberry_2step_funded"),
+  profile: z.literal("deriv_2step_funded"),
   startingBalance: z.number(),
   currentBalance: z.number(),
   currentEquity: z.number(),
@@ -266,7 +266,7 @@ export const freshCallResponseSchema = z.object({
   size_multiplier: z.number().nullable().optional(),
   position_sizing_empirical: z.string().nullable().optional(),
   stage3: stage3BlockSchema.nullable().optional(),
-  // Data venue the levels came from: "mt5" (Blueberry SYN scale),
+  // Data venue the levels came from: "mt5" (Deriv SYN scale),
   // "deriv" (1HZ scale — NOT execution-comparable), or "csv" (local file).
   venue: z.enum(["mt5", "deriv", "csv"]).nullable().optional(),
   // Call geometry that produced the levels: "band" (vol-band from the
@@ -327,7 +327,7 @@ export const runCallRequestSchema = z.object({
   account_mode: z.enum(["own_account", "prop_firm"]),
   trading_mode: tradingModeSchema.nullable().optional(),
   prop_account_state: z.object({
-    profile: z.literal("blueberry_2step_funded"),
+    profile: z.literal("deriv_2step_funded"),
     startingBalance: z.number(),
     currentBalance: z.number(),
     currentEquity: z.number(),

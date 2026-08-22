@@ -7,6 +7,7 @@ from pathlib import Path
 from synthetic_trader.data.tick_store import (
     SCALE_GUARD_MAX_RATIO,
     _apply_scale_guard,
+    _capped_rewrite,
     append_ticks_csv,
     inspect_ticks,
     normalize_ticks,
@@ -54,7 +55,7 @@ class TickStoreTests(unittest.TestCase):
 
     def test_scale_guard_rejects_wrong_venue_ticks(self) -> None:
         """Deriv 1HZ75V ticks (~7,400) must never be appended into a
-        Blueberry SYN75 corpus (~1,770) — a 4.2x price-scale mismatch that
+        Deriv SYN75 corpus (~1,770) — a 4.2x price-scale mismatch that
         would silently poison the compounding corpus."""
         existing = [Tick("R_75", 1_700_000_000 + i, 1770.0 + (i % 5)) for i in range(50)]
         incoming = [
@@ -68,7 +69,7 @@ class TickStoreTests(unittest.TestCase):
 
         self.assertEqual([t.price for t in kept], [1791.55, 1812.03])
         # The guard MUST catch the real-world Deriv/MT5 mismatch: Deriv's R_75
-        # ~6,900-7,400 vs Blueberry SYN75 ~1,800-1,980 is only ~3.7x — a 4.0
+        # ~6,900-7,400 vs Deriv SYN75 ~1,800-1,980 is only ~3.7x — a 4.0
         # threshold was too loose and let the exact pollution it was built to
         # stop sail through (observed in data/R_75_ticks.csv).  The threshold
         # must be well under 3.7x while staying far above real intraday range
@@ -78,7 +79,7 @@ class TickStoreTests(unittest.TestCase):
 
     def test_scale_guard_catches_real_deriv_ratio(self) -> None:
         """The exact live mismatch — Deriv R_75 ~6,920 appended into a
-        Blueberry SYN75 corpus ~1,855 (3.73x) — must be dropped."""
+        Deriv SYN75 corpus ~1,855 (3.73x) — must be dropped."""
         existing = [Tick("R_75", 1_700_000_000 + i, 1855.0 + (i % 7)) for i in range(50)]
         incoming = [
             Tick("R_75", 1_700_000_100 + i, 6917.0 + i) for i in range(5)
@@ -116,6 +117,31 @@ class TickStoreTests(unittest.TestCase):
             append_ticks_csv(path, good)
             content = path.read_text(encoding="utf-8").strip().splitlines()
             self.assertEqual(len(content), 36)  # header + 30 base + 5 good
+
+    def test_capped_rewrite_keeps_last_max_ticks_beyond_1_5mb(self) -> None:
+        """Regression: the old backward-chunked read was hard-capped at 1.5MB
+        of tail bytes, so a corpus larger than that was silently truncated to
+        whatever fit in its last 1.5MB (~24k rows) REGARDLESS of max_ticks — a
+        merged ~20MB corpus lost all history older than the last 1.5MB.  The
+        rewrite must keep the last max_ticks rows in full."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "big.csv"
+            n = 50_000  # ~3MB of rows — well past the old 1.5MB tail cap
+            ticks = [Tick("R_75", 1_700_000_000 + i, 1500.0 + (i % 100)) for i in range(n)]
+            write_ticks_csv(path, ticks)
+            self.assertGreater(path.stat().st_size, 1.5 * 1024 * 1024,
+                               "precondition: file must exceed the old 1.5MB tail cap")
+
+            _capped_rewrite(path, max_ticks=10_000)
+
+            rows = path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(rows), 10_000 + 1)  # header + exactly max_ticks
+            first_epoch = float(rows[1].split(",")[0])
+            last_epoch = float(rows[-1].split(",")[0])
+            self.assertEqual(first_epoch, 1_700_000_000 + (n - 10_000),
+                             "first surviving row must be the max_ticks-th from the end")
+            self.assertEqual(last_epoch, 1_700_000_000 + n - 1,
+                             "newest row must survive")
 
     def test_normalize_drops_junk_rows_from_copy_rates_range(self) -> None:
         """MT5's copy_rates_range can return uninitialised rows (epoch ~0 or

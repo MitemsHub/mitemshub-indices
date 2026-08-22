@@ -795,7 +795,7 @@ describe("PropCompliancePanel", () => {
     render(
       <PropCompliancePanel
         profile={{
-          profile: "blueberry_2step_funded",
+          profile: "deriv_2step_funded",
           startingBalance: 100000,
           currentBalance: 100200,
           currentEquity: 100100,
@@ -1191,12 +1191,12 @@ describe("HealthDashboard", () => {
   it("shows a collapsed summary with MT5 timing and tick velocity via initialData", () => {
     const mockMetrics = {
       mt5_configured: true,
-      mt5_server: "BlueberryMarkets-Demo",
+      mt5_server: "Deriv-Demo",
       mt5_error: null,
       mt5_timing: { init_ms: 12, login_ms: 9, total_ms: 21, timestamp: Date.now() / 1000 },
       mt5_process_running: true,
       mt5_last_connected_at: new Date().toISOString(),
-      mt5_last_test: { success: true, error: null, server: "BlueberryMarkets-Demo", terminal_path: null, duration_ms: 21, account_name: "Demo", account_balance: 10000, tested_at: new Date().toISOString() },
+      mt5_last_test: { success: true, error: null, server: "Deriv-Demo", terminal_path: null, duration_ms: 21, account_name: "Demo", account_balance: 10000, tested_at: new Date().toISOString() },
       csv_size_bytes: 2048000,
       csv_ticks: { R_75: 180000, R_100: 186387 },
       engine_version: "0.1.0",
@@ -1232,12 +1232,12 @@ describe("HealthDashboard", () => {
   it("expands to show MT5 timing gauges, CSV pipeline, and engine info via initialData", () => {
     const mockMetrics = {
       mt5_configured: true,
-      mt5_server: "BlueberryMarkets-Demo",
+      mt5_server: "Deriv-Demo",
       mt5_error: null,
       mt5_timing: { init_ms: 15, login_ms: 10, total_ms: 25, timestamp: Date.now() / 1000 },
       mt5_process_running: true,
       mt5_last_connected_at: new Date().toISOString(),
-      mt5_last_test: { success: true, error: null, server: "BlueberryMarkets-Demo", terminal_path: null, duration_ms: 25, account_name: "Demo", account_balance: 10000, tested_at: new Date().toISOString() },
+      mt5_last_test: { success: true, error: null, server: "Deriv-Demo", terminal_path: null, duration_ms: 25, account_name: "Demo", account_balance: 10000, tested_at: new Date().toISOString() },
       csv_size_bytes: 1048576,
       csv_ticks: { R_75: 180000, R_100: 186387 },
       engine_version: "0.1.0",
@@ -1291,7 +1291,7 @@ describe("HealthDashboard", () => {
   it("shows a fallback message when MT5 timing data is not yet available via initialData", () => {
     const mockMetrics = {
       mt5_configured: true,
-      mt5_server: "BlueberryMarkets-Demo",
+      mt5_server: "Deriv-Demo",
       mt5_error: null,
       mt5_timing: null,
       mt5_process_running: false,
@@ -1339,7 +1339,7 @@ describe("HealthDashboard", () => {
   it("shows MT5 error message in the expanded view when an mt5 error exists via initialData", () => {
     const mockMetrics = {
       mt5_configured: true,
-      mt5_server: "BlueberryMarkets-Demo",
+      mt5_server: "Deriv-Demo",
       mt5_error: "Connection refused",
       mt5_timing: null,
       mt5_process_running: false,

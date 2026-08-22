@@ -177,7 +177,7 @@ function IntelTabContent({
                     wordBreak: "break-all",
                     margin: 0,
                   }}
-                >{`python -m synthetic_trader backtest-synth --symbol R_100 --episodes 20 --ticks 5000 --prop-firm blueberry_2step --artifact-output data/curve_fitting_report.json`}</pre>
+                >{`python -m synthetic_trader backtest-synth --symbol R_100 --episodes 20 --ticks 5000 --prop-firm deriv_2step --artifact-output data/curve_fitting_report.json`}</pre>
               </div>
             )}
           </CollapsiblePanel>

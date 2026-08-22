@@ -816,7 +816,7 @@ class LiveSnapshotDataTests(unittest.TestCase):
     def test_collect_live_snapshot_ticks_raises_when_mt5_down_no_deriv_fallback(self) -> None:
         """When MT5 is configured but the terminal fails, the collector must
         RAISE — it must not silently swap to Deriv WebSocket (whose 1HZ75V
-        prices are on the WRONG scale vs the Blueberry SYN75 call levels)."""
+        prices are on the WRONG scale vs the Deriv SYN75 call levels)."""
 
         class _BrokenMt5:
             async def __aenter__(self):
@@ -867,7 +867,7 @@ class LiveSnapshotDataTests(unittest.TestCase):
 
     def test_run_live_snapshot_stamps_venue_mt5_when_configured(self) -> None:
         """run_live_snapshot must report which venue the levels came from so
-        the operator always knows the price scale (mt5 = Blueberry SYN-scale)."""
+        the operator always knows the price scale (mt5 = Deriv SYN-scale)."""
         ticks = [
             Tick(symbol="R_75", epoch=epoch, price=100.0 + epoch / 100.0)
             for epoch in range(1, 37)
@@ -917,7 +917,7 @@ class LiveSnapshotDataTests(unittest.TestCase):
     def test_run_live_snapshot_deriv_path_never_appends_to_mt5_corpus(self) -> None:
         """When a snapshot subprocess runs the Deriv path (MT5 env not
         visible), its ~7,000-scale ticks must NEVER be appended into the
-        Blueberry MT5 corpus — the venue gate is the root fix for the
+        Deriv MT5 corpus — the venue gate is the root fix for the
         3.7x-wrong prices seen in data/R_75_ticks.csv."""
         ticks = [
             Tick(symbol="R_75", epoch=epoch, price=6900.0 + epoch)

@@ -2449,7 +2449,7 @@ function getConfiguredLivePropProfile(): LivePropProfileConfig | null {
     startingBalance,
     highImpactNewsLockout:
       String(process.env.SYNTHETIC_PROP_NEWS_LOCKOUT ?? "").toLowerCase() === "true",
-    profile: "blueberry_2step_funded",
+    profile: "deriv_2step_funded",
   };
 }
 
@@ -2477,7 +2477,7 @@ function resolveRequestedPropConfig(
       startingBalance: requestedStartingBalance,
       highImpactNewsLockout:
         String(process.env.SYNTHETIC_PROP_NEWS_LOCKOUT ?? "").toLowerCase() === "true",
-      profile: "blueberry_2step_funded",
+      profile: "deriv_2step_funded",
     };
   }
 
@@ -2583,10 +2583,10 @@ from pathlib import Path
 ${MT5_CTX}
 try:
     with _mt5(tp=${JSON.stringify(configuredTerminal || null)},lg=int(${configuredLogin}),pw=${JSON.stringify(configuredPassword)},sv=${JSON.stringify(configuredServer)}):
-        # Resolve MT5 symbol — try Blueberry Markets name first, then fallbacks
+        # Resolve MT5 symbol — try Deriv name first, then fallbacks
         _vol = "75" if "${symbol}" == "R_75" else "100"
         _candidates = [
-            f"Blueberry Volatility {_vol}",
+            f"Deriv Volatility {_vol}",
             f"Volatility {_vol} Index",
             f"Volatility {_vol}",
             f"Vol {_vol} Index",
@@ -3282,7 +3282,7 @@ print(json.dumps({
 
 function buildUnavailablePropProfile(): PropProfileResponse {
   return {
-    profile: "blueberry_2step_funded",
+    profile: "deriv_2step_funded",
     startingBalance: 5000,
     currentBalance: 5000,
     currentEquity: 5000,
@@ -3437,10 +3437,10 @@ except Exception as e:
   const configuredLogin = process.env.SYNTHETIC_MT5_LOGIN?.trim() ?? "";
   const configuredPassword = process.env.SYNTHETIC_MT5_PASSWORD?.trim() ?? "";
   const configuredTerminal = process.env.SYNTHETIC_MT5_TERMINAL_PATH?.trim() ?? "";
-  // Blueberry Markets uses 'Blueberry Volatility X' — try multiple names for compatibility
+  // Deriv uses 'Deriv Volatility X' — try multiple names for compatibility
   const volNum = symbol === "R_75" ? "75" : "100";
   const mt5SymbolCandidates = [
-    `Blueberry Volatility ${volNum}`,
+    `Deriv Volatility ${volNum}`,
     `Volatility ${volNum} Index`,
     `Volatility ${volNum}`,
     `Vol ${volNum} Index`,
@@ -3456,7 +3456,7 @@ ${MT5_CTX}
 
 try:
     with _mt5(tp=${JSON.stringify(configuredTerminal || null)},lg=${configuredLogin},pw=${JSON.stringify(configuredPassword)},sv=${JSON.stringify(configuredServer)}):
-        # Resolve MT5 symbol — try Blueberry Markets name first, then fallbacks
+        # Resolve MT5 symbol — try Deriv name first, then fallbacks
         _candidates = ${JSON.stringify(mt5SymbolCandidates)}
         mt5_symbol = None
         for _name in _candidates:

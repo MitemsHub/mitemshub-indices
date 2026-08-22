@@ -10,7 +10,7 @@ export const propComplianceSchema = z.enum([
 ]);
 
 export const propAccountStateSchema = z.object({
-  profile: z.literal("blueberry_2step_funded"),
+  profile: z.literal("deriv_2step_funded"),
   startingBalance: z.number(),
   currentBalance: z.number(),
   currentEquity: z.number(),

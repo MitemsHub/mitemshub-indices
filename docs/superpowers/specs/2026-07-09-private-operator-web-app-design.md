@@ -273,7 +273,7 @@ In `Prop Firm` mode:
 
 For version 1, the prop-firm mode should target:
 
-- Blueberry Funded `2-Step funded`
+- Deriv Funded `2-Step funded`
 
 This should be modeled as a concrete risk-policy profile, not as a vague "prop firm" concept.
 
@@ -449,7 +449,7 @@ The backend bridge should expose structured review and system fields such as:
 
 ### Prop Compliance Semantics
 
-When `account_mode=prop_firm`, the backend bridge must evaluate the market call against the Blueberry 2-Step funded policy layer and return a compliance result such as:
+When `account_mode=prop_firm`, the backend bridge must evaluate the market call against the Deriv 2-Step funded policy layer and return a compliance result such as:
 
 - `allowed`
 - `allowed_with_adjustment`
@@ -548,7 +548,7 @@ The frontend should remain substantially stable across these phases.
 - private operator app
 - fresh-call actions for `R_75` and `R_100`
 - account-mode toggle for `Own Account` and `Prop Firm`
-- Blueberry 2-Step funded prop compliance layer
+- Deriv 2-Step funded prop compliance layer
 - primary call panel
 - trade instruction panel
 - prop compliance visibility

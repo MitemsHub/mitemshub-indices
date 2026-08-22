@@ -403,7 +403,7 @@ export function PropCompliancePanel({ call, profile }: PropCompliancePanelProps)
         Compliance status
       </h3>
       <p className="mt-4 text-sm text-[var(--text-body)]">
-        Blueberry 2-Step funded
+        Deriv 2-Step funded
       </p>
       ...
       <p className="utility-copy mt-6 text-[11px] uppercase tracking-[0.24em]">

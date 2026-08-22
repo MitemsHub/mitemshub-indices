@@ -314,7 +314,7 @@ def test_log_live_call_and_score_live_calibration_commands_work_together_with_re
         "synthetic_trader.cli.run_score_unresolved_records_from_market",
         fake_run_score_unresolved_records_from_market,
     )
-    # The CLI resolves the Blueberry MT5 client before scoring (no Deriv
+    # The CLI resolves the Deriv MT5 client before scoring (no Deriv
     # fallback); pretend it resolved so the mocked scorer is reached.
     monkeypatch.setattr(
         "synthetic_trader.live.auto_scorer._resolve_scoring_client_factory",

@@ -13,7 +13,7 @@
 
 This is not another one-indicator Expert Advisor. Synthetic AI Trader is a **modular, research-first trading platform** that separates market data ingestion, multi-timeframe feature engineering, probabilistic modeling, decision fusion, risk controls, and execution into independent, testable components.
 
-Built for **Volatility 75 (V75)** and **Volatility 100 (V100)** on Blueberry Markets via MT5.
+Built for **Volatility 75 (V75)** and **Volatility 100 (V100)** on Deriv via MT5.
 
 ### Key Design Principles
 
@@ -191,7 +191,7 @@ Synthetic Indices Bot/
 
 - Python 3.11+
 - Node.js 20+
-- MT5 Terminal (Blueberry Markets) — for live data
+- MT5 Terminal (Deriv) — for live data
 - Git
 
 ### 1. Clone the Repository
@@ -231,10 +231,10 @@ cp external/mitemshub-indices/.env.example external/mitemshub-indices/.env.local
 Edit `.env.local` with your MT5 server, login, and password:
 
 ```
-SYNTHETIC_MT5_SERVER=BlueberryMarketsSVG-Live
+SYNTHETIC_MT5_SERVER=DerivSVG-Server-03
 SYNTHETIC_MT5_LOGIN=your_login
 SYNTHETIC_MT5_PASSWORD=your_password
-SYNTHETIC_MT5_TERMINAL_PATH=C:\Program Files\Blueberry Markets MetaTrader 5\terminal64.exe
+SYNTHETIC_MT5_TERMINAL_PATH=C:\Program Files\MetaTrader 5 Terminal\terminal64.exe
 ```
 
 ### 5. Start the Dashboard
@@ -341,7 +341,7 @@ aws_access_key    = "your-access-key"
 aws_secret_key    = "your-secret-key"
 aws_region        = "eu-north-1"
 admin_ip          = "your.public.ip"
-mt5_server        = "BlueberryMarketsSVG-Live"
+mt5_server        = "DerivSVG-Server-03"
 mt5_login         = "your_login"
 mt5_password      = "your_password"
 ```
@@ -441,7 +441,7 @@ Do not create or restore a nested `.git` directory inside `external/mitemshub-in
 | **Dashboard** | Next.js 15, React 18, TypeScript 5, Tailwind CSS |
 | **Backend** | Python 3.11+, Online ML, NumPy, Pandas, scikit-learn |
 | **Bridge** | Python child_process ↔ Next.js API routes |
-| **Data** | MT5 Terminal (Blueberry Markets), Deriv WebSocket API |
+| **Data** | MT5 Terminal (Deriv), Deriv WebSocket API |
 | **Infrastructure** | Terraform, AWS EC2 (t3.large), ALB, PM2 |
 | **Testing** | pytest (313 tests), Vitest (88 tests) |
 

@@ -433,7 +433,7 @@ describe("API routes", () => {
     const payload = await response.json();
 
     expect(response.status).toBe(200);
-    expect(payload.profile).toBe("blueberry_2step_funded");
+    expect(payload.profile).toBe("deriv_2step_funded");
     expect(payload.telemetry.status).toBe("live_unavailable");
   });
 
@@ -441,7 +441,7 @@ describe("API routes", () => {
     const profileSpy = vi
       .spyOn(engineBridge, "getCurrentPropProfileForRequest")
       .mockResolvedValue({
-        profile: "blueberry_2step_funded",
+        profile: "deriv_2step_funded",
         startingBalance: 100000,
         currentBalance: 100000,
         currentEquity: 100100,
@@ -539,7 +539,7 @@ describe("API routes", () => {
           symbol: "R_100",
           account_mode: "prop_firm",
           prop_account_state: {
-            profile: "blueberry_2step_funded",
+            profile: "deriv_2step_funded",
             startingBalance: 100000,
             currentBalance: 100000,
             currentEquity: 100100,

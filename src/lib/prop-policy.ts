@@ -1,7 +1,7 @@
 import type { FreshCallResponse, PropCompliance } from "./contracts";
 
 export type PropAccountState = {
-  profile: "blueberry_2step_funded";
+  profile: "deriv_2step_funded";
   startingBalance: number;
   currentBalance: number;
   currentEquity: number;

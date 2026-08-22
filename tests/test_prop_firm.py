@@ -7,8 +7,8 @@ import math
 import pytest
 
 from synthetic_trader.backtest.prop_firm import (
-    BLUEBERRY_FUNDED_2STEP,
-    BLUEBERRY_SYNTHETIC,
+    DERIV_FUNDED_2STEP,
+    DERIV_SYNTHETIC,
     PropFirmBreachTracker,
     PropFirmProfile,
     get_prop_firm_profile,
@@ -18,9 +18,9 @@ from synthetic_trader.backtest.prop_firm import (
 class TestPropFirmProfile:
     """Test PropFirmProfile dataclass."""
 
-    def test_blueberry_2step_defaults(self) -> None:
-        p = BLUEBERRY_FUNDED_2STEP
-        assert p.name == "Blueberry Funded 2-Step"
+    def test_deriv_2step_defaults(self) -> None:
+        p = DERIV_FUNDED_2STEP
+        assert p.name == "Deriv Funded 2-Step"
         assert p.max_daily_loss_pct == 0.05
         assert p.max_overall_drawdown_pct == 0.10
         assert p.profit_target_phase1_pct == 0.10
@@ -31,15 +31,15 @@ class TestPropFirmProfile:
         assert p.min_trading_days_phase2 == 3
         assert p.allow_synthetic_indices is True
 
-    def test_blueberry_synthetic_stricter_daily_loss(self) -> None:
-        p = BLUEBERRY_SYNTHETIC
+    def test_deriv_synthetic_stricter_daily_loss(self) -> None:
+        p = DERIV_SYNTHETIC
         assert p.max_daily_loss_pct == 0.04
         assert p.max_overall_drawdown_pct == 0.10
         assert p.leverage == 30
         assert p.allow_synthetic_indices is True
 
     def test_profile_is_frozen(self) -> None:
-        p = BLUEBERRY_FUNDED_2STEP
+        p = DERIV_FUNDED_2STEP
         with pytest.raises(AttributeError):
             p.max_daily_loss_pct = 0.10  # type: ignore[misc]
 
@@ -67,22 +67,22 @@ class TestPropFirmProfile:
 class TestGetPropFirmProfile:
     """Test prop firm profile lookup."""
 
-    def test_lookup_blueberry_2step(self) -> None:
-        p = get_prop_firm_profile("blueberry_2step")
+    def test_lookup_deriv_2step(self) -> None:
+        p = get_prop_firm_profile("deriv_2step")
         assert p is not None
-        assert p.name == "Blueberry Funded 2-Step"
+        assert p.name == "Deriv Funded 2-Step"
 
-    def test_lookup_blueberry_synthetic(self) -> None:
-        p = get_prop_firm_profile("blueberry_synthetic")
+    def test_lookup_deriv_synthetic(self) -> None:
+        p = get_prop_firm_profile("deriv_synthetic")
         assert p is not None
-        assert p.name == "Blueberry Funded Synthetic"
+        assert p.name == "Deriv Funded Synthetic"
 
     def test_lookup_case_insensitive(self) -> None:
-        p = get_prop_firm_profile("Blueberry_2Step")
+        p = get_prop_firm_profile("Deriv_2Step")
         assert p is not None
 
     def test_lookup_with_hyphens(self) -> None:
-        p = get_prop_firm_profile("blueberry-2step")
+        p = get_prop_firm_profile("deriv-2step")
         assert p is not None
 
     def test_lookup_unknown_returns_none(self) -> None:
@@ -175,7 +175,7 @@ class TestRiskEnginePropFirm:
 
         config = RiskConfig(starting_equity=100_000, risk_per_trade=0.01)
         tracker = PropFirmBreachTracker(initial_balance=100_000)
-        engine = RiskEngine(config, prop_firm=BLUEBERRY_FUNDED_2STEP, breach_tracker=tracker)
+        engine = RiskEngine(config, prop_firm=DERIV_FUNDED_2STEP, breach_tracker=tracker)
 
         # Simulate a day starting at 100k, equity dropped to 94.5k (5.5% loss > 5% limit)
         engine.state.day_start_equity = 100_000
@@ -193,7 +193,7 @@ class TestRiskEnginePropFirm:
 
         config = RiskConfig(starting_equity=100_000, risk_per_trade=0.01, max_daily_loss_fraction=0.15)
         tracker = PropFirmBreachTracker(initial_balance=100_000)
-        engine = RiskEngine(config, prop_firm=BLUEBERRY_FUNDED_2STEP, breach_tracker=tracker)
+        engine = RiskEngine(config, prop_firm=DERIV_FUNDED_2STEP, breach_tracker=tracker)
 
         # Simulate equity dropped to 89.5k (10.5% overall drawdown > 10% limit)
         # Set day_start_equity to 89.5k so daily loss = 0% (avoids triggering daily_loss first)
@@ -213,7 +213,7 @@ class TestRiskEnginePropFirm:
 
         config = RiskConfig(starting_equity=100_000, risk_per_trade=0.05)  # 5% risk per trade
         tracker = PropFirmBreachTracker(initial_balance=100_000)
-        engine = RiskEngine(config, prop_firm=BLUEBERRY_FUNDED_2STEP, breach_tracker=tracker)
+        engine = RiskEngine(config, prop_firm=DERIV_FUNDED_2STEP, breach_tracker=tracker)
 
         signal = self._make_signal()
         decision = engine.evaluate(signal)
@@ -230,7 +230,7 @@ class TestRiskEnginePropFirm:
 
         config = RiskConfig(starting_equity=100_000, risk_per_trade=0.01)
         tracker = PropFirmBreachTracker(initial_balance=100_000)
-        engine = RiskEngine(config, prop_firm=BLUEBERRY_FUNDED_2STEP, breach_tracker=tracker)
+        engine = RiskEngine(config, prop_firm=DERIV_FUNDED_2STEP, breach_tracker=tracker)
 
         # Simulate daily loss
         engine.state.day_start_equity = 100_000
@@ -253,7 +253,7 @@ class TestRiskEnginePropFirm:
 
         # Use a generous daily loss fraction so the base engine doesn't block
         config = RiskConfig(starting_equity=100_000, risk_per_trade=0.01, max_daily_loss_fraction=0.10)
-        engine = RiskEngine(config, prop_firm=BLUEBERRY_FUNDED_2STEP)
+        engine = RiskEngine(config, prop_firm=DERIV_FUNDED_2STEP)
 
         # Equity at 98k (2% loss < 5% daily limit, 2% drawdown < 10%)
         engine.state.initial_balance = 100_000
@@ -269,7 +269,7 @@ class TestRiskEnginePropFirm:
         from synthetic_trader.risk.engine import RiskEngine
 
         config = RiskConfig(starting_equity=100_000, risk_per_trade=0.01)
-        engine = RiskEngine(config, prop_firm=BLUEBERRY_FUNDED_2STEP)
+        engine = RiskEngine(config, prop_firm=DERIV_FUNDED_2STEP)
 
         signal = self._make_signal()
         decision = engine.evaluate(signal)

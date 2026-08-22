@@ -70,6 +70,34 @@ Confirm the following before armed-live:
 
 Proceed only after all prior steps pass.
 
+1. **Refresh the armed-live preflight WITH the explicit consent flag** (read-only;
+   this is what records the operator's consent in the artifact):
+
+   ```bash
+   python -m synthetic_trader.cli mt5-rollout-check --symbol R_100 --live-mode armed-live --armed-live \
+     --mt5-server "$env:MT5_SERVER" --mt5-login "$env:MT5_LOGIN" --mt5-password "$env:MT5_PASSWORD" \
+     --mt5-symbol "Volatility 100 Index" --artifact-output artifacts/rollout_armed_r100.json
+   ```
+
+   Pass criteria: the preflight **exits 0** AND the artifact records
+   `rollout_readiness_ok=True` AND `rollout_armed_confirmation=True` with no
+   `missing_armed_confirmation` in `rollout_readiness_failures`.  The command
+   exits `1` with `rollout_exit=1 fail_closed=armed-live-readiness-failed`
+   when the armed gate is not ready (missing `--armed-live` consent or the
+   MT5 runtime not ready) — treat any nonzero exit as a STOP, never proceed
+   on a stale or non-consenting artifact.  Consent must be explicit and
+   recorded, never implied by `--live-mode armed-live` alone.
+
+2. **Run the bounded supervised armed-live session** (same flag; `paper-live`
+   exits nonzero before any order path if the armed gate fails):
+
+   ```bash
+   python -m synthetic_trader.cli paper-live --symbol R_100 --venue mt5 --live-mode armed-live --armed-live \
+     --duration-sec <bounded> --journal journals/mt5_analytics_r100_armed.jsonl \
+     --mt5-server "$env:MT5_SERVER" --mt5-login "$env:MT5_LOGIN" --mt5-password "$env:MT5_PASSWORD" \
+     --mt5-symbol "Volatility 100 Index"
+   ```
+
 Recommended pilot shape:
 
 - symbol: `R_100`
@@ -77,6 +105,8 @@ Recommended pilot shape:
 - bounded duration
 - operator present for the full session
 - fail-closed on any sync or symbol anomaly
+- the session record must note the `--armed-live` confirmation and the
+  artifact's `armed_confirmation=True` line
 
 ## Hard Stop Conditions
 

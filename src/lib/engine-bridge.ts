@@ -543,7 +543,7 @@ function getConfiguredLivePropProfile(): LivePropProfileConfig | null {
     startingBalance,
     highImpactNewsLockout:
       String(process.env.SYNTHETIC_PROP_NEWS_LOCKOUT ?? "").toLowerCase() === "true",
-    profile: "blueberry_2step_funded",
+    profile: "deriv_2step_funded",
   };
 }
 
@@ -571,7 +571,7 @@ function resolveRequestedPropConfig(
       startingBalance: requestedStartingBalance,
       highImpactNewsLockout:
         String(process.env.SYNTHETIC_PROP_NEWS_LOCKOUT ?? "").toLowerCase() === "true",
-      profile: "blueberry_2step_funded",
+      profile: "deriv_2step_funded",
     };
   }
 

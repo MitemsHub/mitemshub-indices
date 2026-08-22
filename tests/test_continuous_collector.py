@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +14,8 @@ from synthetic_trader.data.continuous_collector import (
     MAX_CONSECUTIVE_ERRORS,
     RolloverCalendar,
     TickCollector,
+    VERIFY_PAUSE_STALE_SEC,
+    _verify_pause_state,
     collect_live_ticks,
 )
 from synthetic_trader.data.tick_store import inspect_ticks
@@ -62,6 +66,43 @@ class FakeClient:
         if self.read_calls <= self._errors_before_ticks:
             raise ConnectionError("simulated terminal error")
         return self._queue.pop(0) if self._queue else None
+
+
+class VerifyPauseStateTests(unittest.TestCase):
+    """Stateless tests of the verify-loop pause marker helper."""
+
+    def _flag(self, td: str) -> Path:
+        return Path(td) / "verify_pause.flag"
+
+    def test_absent_marker_is_not_paused(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            self.assertIsNone(_verify_pause_state(self._flag(td)))
+
+    def test_fresh_marker_is_paused(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            flag = self._flag(td)
+            flag.write_text(
+                json.dumps({"started": time.time(), "pid": 1234, "reason": "verify_all.ps1"}),
+                encoding="utf-8",
+            )
+            self.assertEqual(_verify_pause_state(flag), "verify_all.ps1")
+
+    def test_stale_marker_is_ignored(self) -> None:
+        """A crashed verify leaves the marker behind; the pause must self-heal."""
+        with tempfile.TemporaryDirectory() as td:
+            flag = self._flag(td)
+            flag.write_text(
+                json.dumps({"started": time.time() - VERIFY_PAUSE_STALE_SEC - 60}),
+                encoding="utf-8",
+            )
+            self.assertIsNone(_verify_pause_state(flag))
+
+    def test_malformed_marker_is_ignored(self) -> None:
+        """A broken marker must never stand the collector down forever."""
+        with tempfile.TemporaryDirectory() as td:
+            flag = self._flag(td)
+            flag.write_text("not json at all", encoding="utf-8")
+            self.assertIsNone(_verify_pause_state(flag))
 
 
 class TickCollectorTests(unittest.IsolatedAsyncioTestCase):
@@ -156,6 +197,65 @@ class TickCollectorTests(unittest.IsolatedAsyncioTestCase):
             collector = TickCollector("R_75", Path(tmp), poll_interval_sec=0.001, flush_interval_sec=0.0)
             with self.assertRaisesRegex(RuntimeError, "consecutive read errors"):
                 await collector.run(client)
+
+    async def test_verify_pause_stands_down_and_resumes(self) -> None:
+        """While verify_all.ps1's marker is fresh the collector must not touch
+        the terminal at all; once the marker is removed it resumes collecting
+        without an immediate stall/reconnect from the pre-pause tick gap."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            flag = output / "verify_pause.flag"
+            client = FakeClient(
+                ticks=[
+                    Tick(symbol="R_75", epoch=1000.0, price=1500.0),
+                    Tick(symbol="R_75", epoch=1000.5, price=1500.5),
+                ]
+            )
+            collector = TickCollector(
+                "R_75",
+                output,
+                poll_interval_sec=0.001,
+                flush_interval_sec=0.0,
+                # Thresholds FAR below the pause duration: without the
+                # stall-timer reset on resume, the hours-old pre-pause tick
+                # would trip an immediate stall/reconnect here.
+                stall_warn_sec=0.05,
+                stall_reconnect_sec=0.15,
+                pause_path=flag,
+            )
+            stop = asyncio.Event()
+
+            async def pause_then_release() -> tuple[int, int]:
+                # Let the collector pick up tick 1, then simulate verify_all.ps1
+                # starting (marker written) and ending (marker removed).
+                await asyncio.sleep(0.05)
+                flag.write_text(
+                    json.dumps({"started": time.time(), "reason": "verify_all.ps1"}),
+                    encoding="utf-8",
+                )
+                await asyncio.sleep(0.05)  # settle: collector notices the pause
+                reads_a = client.read_calls
+                await asyncio.sleep(0.1)  # several poll cycles while paused
+                reads_b = client.read_calls
+                flag.unlink()  # verify finished, terminal restored
+                while client._queue:
+                    await asyncio.sleep(0.005)
+                await asyncio.sleep(0.02)
+                stop.set()
+                return reads_a, reads_b
+
+            stats, (reads_a, reads_b) = await asyncio.gather(
+                collector.run(client, stop_event=stop),
+                pause_then_release(),
+            )
+
+            # No terminal reads while paused; both ticks collected after resume;
+            # no residual pause state; and the run completed without raising the
+            # stall-reconnect that the pre-pause gap would have triggered.
+            self.assertEqual(reads_b, reads_a)
+            self.assertEqual(stats.ticks_collected, 2)
+            self.assertIsNone(stats.paused_by)
+            self.assertEqual(stats.reconnect_attempts, 0)
 
     async def test_flush_batch_size_triggers_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
