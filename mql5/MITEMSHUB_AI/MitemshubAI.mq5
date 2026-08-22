@@ -28,7 +28,7 @@ input int    InpWarmupCandles    = 60;       // min bars before trading
 input double InpStopSigmaMult    = 1.5;     // stop = mult * price * sigma
 input double InpTargetSigmaMult  = 2.0;      // target = mult * price * sigma
 input int    InpHoldSec          = 3600;     // max hold time in seconds
-input double InpMinTargetRR      = 1.8;      // min reward:risk ratio
+input double InpMinTargetRR      = 1.0;      // min reward:risk ratio
 input double InpMaxStopPct       = 0.015;    // max stop as % of price
 input int    InpGarchMode        = 0;        // 0=online SGD, 1=fixed calibrated
 input double InpGarchOmega       = -1.884103;
