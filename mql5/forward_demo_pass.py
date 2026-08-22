@@ -2,7 +2,7 @@
 """Forward-demo paper pass: UTC 18-24h & |range_z_50| < 1.5 on the sniper leg.
 
 Runs the LIVE DecisionEngine (sniper mode; entry gate UTC [18,24) &
-|range_z_50| < 1.5, the strongest measured cell) on REAL Blueberry MT5
+|range_z_50| < 1.5, the strongest measured cell) on REAL Deriv MT5
 ticks (venue=MT5 — the MT5-first rule; paper fills via
 SimulatedExecutionBackend, no orders are ever sent to the terminal),
 journaling every signal/rejection/outcome to
@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", "src"))
 
 # ── MT5 venue env: the mt5_data discovery caches on a fingerprint, so set
 # these BEFORE importing anything that touches MT5.  Load .env.local if it
-# exists (plain KEY=VALUE), then default the Blueberry terminal path.
+# exists (plain KEY=VALUE), then default the Deriv terminal path.
 _env_local = os.path.join(_ROOT, ".env.local")
 if os.path.exists(_env_local):
     with open(_env_local, encoding="utf-8") as _fh:
@@ -47,7 +47,7 @@ if os.path.exists(_env_local):
             os.environ.setdefault(_k.strip(), _v.strip().strip('\"').strip("'"))
 if not os.getenv("SYNTHETIC_MT5_TERMINAL_PATH"):
     os.environ["SYNTHETIC_MT5_TERMINAL_PATH"] = (
-        r"C:\Program Files\Blueberry Markets MetaTrader 5\terminal64.exe"
+        r"C:\Program Files\MetaTrader 5 Terminal\terminal64.exe"
     )
 
 from synthetic_trader.config import LiveMode, TraderConfig, Venue  # noqa: E402
@@ -101,7 +101,7 @@ def main() -> None:
         flush=True,
     )
     print(
-        f"[FWD] venue=MT5 (Blueberry) live ticks, paper fills, "
+        f"[FWD] venue=MT5 (Deriv) live ticks, paper fills, "
         f"chunk={args.chunk_sec}s hard_cap={args.hard_cap_sec}s journal={journal}",
         flush=True,
     )

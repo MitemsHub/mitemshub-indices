@@ -231,7 +231,7 @@ check("ATR percentile high after expansion", ve2.atr_percentile(30) > 0.7,
 check("RealizedVol positive", ve2.realized_vol(10) > 0.0,
       f"rv={ve2.realized_vol(10):.6f}")
 
-print("[PHASE1] --- SymbolAdapter (real Blueberry fixtures) ---")
+print("[PHASE1] --- SymbolAdapter (real Deriv fixtures) ---")
 syn75 = {
     "point": 0.001, "digits": 3, "tick_size": 0.001, "tick_value": 0.1,
     "contract_size": 100.0, "volume_min": 0.01, "volume_max": 100.0,

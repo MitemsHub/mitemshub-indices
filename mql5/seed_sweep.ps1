@@ -31,13 +31,19 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptRoot 'seed_sweep'
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-# Blueberry terminal data folder (same discovery as verify_all.ps1)
+# Machine-line numeric token (same convention as verify_all.ps1): optional
+# sign + fixed-point/exponent form, so a positive exp (the BandBackTests
+# emitter forces '%+' today) or a %g/%e format switch cannot break the parse.
+# One capturing group, so downstream group indexes are unchanged.
+$NumTok = '([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)'
+
+# Deriv terminal data folder (same discovery as verify_all.ps1)
 $termBase = Join-Path $env:APPDATA 'MetaQuotes\Terminal'
 $td = Get-ChildItem $termBase -Directory -ErrorAction SilentlyContinue | Where-Object {
   $o = Join-Path $_.FullName 'origin.txt'
-  (Test-Path $o) -and ((Get-Content $o -Raw -ErrorAction SilentlyContinue) -match 'Blueberry')
+  (Test-Path $o) -and ((Get-Content $o -Raw -ErrorAction SilentlyContinue) -match 'Deriv')
 } | Select-Object -First 1
-if (-not $td) { throw 'Cannot discover the Blueberry terminal data folder' }
+if (-not $td) { throw 'Cannot discover the Deriv terminal data folder' }
 $testerLog = Join-Path $td.FullName ("Tester\logs\" + (Get-Date).ToString('yyyyMMdd') + '.log')
 
 # Distinct name — see the NOTE above about [string]-param type constraints.
@@ -68,12 +74,12 @@ foreach ($seed in $seedList) {
   if ($startIdx -ge 0) { $lines = @($lines[$startIdx..($lines.Count - 1)]) }
   $d125 = $null; $d200 = $null; $d300 = $null; $vhi = $null
   foreach ($ln in $lines) {
-    $m = [regex]::Match($ln, 'depth <= ([\d.]+):\s+n=\s*(\d+)\s+hit=([\d.]+)%\s+exp=([+-][\d.]+)R')
+    $m = [regex]::Match($ln, "depth <= ([\d.]+):\s+n=\s*(\d+)\s+hit=([\d.]+)%\s+exp=${NumTok}R")
     if ($m.Success) {
       $c = [pscustomobject]@{ cap = [double]$m.Groups[1].Value; n = [long]$m.Groups[2].Value; hit = [double]$m.Groups[3].Value; exp = [double]$m.Groups[4].Value }
       if ($c.cap -eq 1.25) { $d125 = $c } elseif ($c.cap -eq 2.00) { $d200 = $c } elseif ($c.cap -eq 3.00) { $d300 = $c }
     }
-    $mv = [regex]::Match($ln, 'vol(<=1\.25|>1\.25)\s+n=\s*(\d+)\s+hit=\s*([\d.]+)%\s+exp=([+-][\d.]+)R')
+    $mv = [regex]::Match($ln, "vol(<=1\.25|>1\.25)\s+n=\s*(\d+)\s+hit=\s*([\d.]+)%\s+exp=${NumTok}R")
     if ($mv.Success -and $mv.Groups[1].Value -eq '>1.25') {
       $vhi = [pscustomobject]@{ n = [long]$mv.Groups[2].Value; exp = [double]$mv.Groups[4].Value }
     }

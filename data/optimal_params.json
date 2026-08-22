@@ -1,0 +1,28 @@
+{
+  "version": "v0821",
+  "params": {
+    "z_entry": 1.8,
+    "vol_ratio": 1.03,
+    "min_revert": 0.02,
+    "stop_mult": 0.1,
+    "target_mult": 0.8,
+    "min_rr": 1.8,
+    "hold_bars": 12,
+    "trail_be_r": 1.0,
+    "trail_behind_r": 0.3,
+    "cooldown_bars": 5
+  },
+  "stats": {
+    "trades": 56,
+    "wins": 22,
+    "win_rate": 39.285714285714285,
+    "total_pnl": 6585.660279728011,
+    "max_dd": 0.044268316420528725,
+    "score": 43.286914012370104,
+    "configs_tested": 3000
+  },
+  "timestamp": "2026-08-21T23:01:16.391752",
+  "data_period": "2026-07-22 to 2026-08-21",
+  "previous_score": 28.300131577821396,
+  "improved": true
+}
