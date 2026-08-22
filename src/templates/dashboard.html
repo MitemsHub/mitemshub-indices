@@ -764,8 +764,10 @@
                 else if (status === 'STOP') statusClass = 'negative';
                 else if (status === 'TARGET') statusClass = 'positive';
                 else if (status === 'TIME') statusClass = 'neutral';
-                const entry = t.entry || t.price || t.entry_price || 0;
-                const exit = t.exit_price || 0;
+                const rawEntry = t.entry || t.price || t.entry_price || 0;
+                const entry = (typeof rawEntry === 'number' && rawEntry > 1) ? rawEntry : null;
+                const rawExit = t.exit_price || t.price || 0;
+                const exit = (typeof rawExit === 'number' && rawExit > 1) ? rawExit : null;
                 const sl = t.sl || 0;
                 const tp = t.tp || 0;
                 const z = t.z_score || 0;
@@ -781,7 +783,7 @@
                         <td style="font-family:monospace;font-size:11px;color:#00d4aa;">${tp ? tp.toFixed(2) : '--'}</td>
                         <td style="font-family:monospace;font-size:11px;">${z ? z.toFixed(2) : '--'}</td>
                         <td class="${statusClass}" style="font-size:11px;font-weight:600;">${status || '--'}</td>
-                        <td class="${pnl >= 0 ? 'positive' : 'negative'}" style="font-family:monospace;font-size:11px;font-weight:700;">$${pnl.toFixed(2)}</td>
+                        <td class="${pnl >= 0 ? 'positive' : 'negative'}" style="font-family:monospace;font-size:11px;font-weight:700;">$${(pnl || 0).toFixed(2)}</td>
                     </tr>
                 `;
             }).join('');

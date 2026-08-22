@@ -178,7 +178,7 @@ def _read_journal():
                     text = content.decode('utf-16-le', errors='replace')
                     for line in text.split('\n'):
                         line = line.strip()
-                        if any(kw in line for kw in ['[MITEM]', 'MITEMSHUB', 'DECISION', 'ENTRY', 'EXIT', 'TRAIL', 'STOP', 'TARGET', 'BUY @', 'SELL @', 'ORDER FAIL']):
+                        if '[MITEM]' in line or 'ORDER FAIL' in line:
                             entries.append({'text': line[:150], 'time': line[:19] if len(line) > 19 else ''})
                             if len(entries) >= 50:
                                 return entries
@@ -327,10 +327,13 @@ def _compute_metrics():
             }
         return
 
-    # Filter to completed trades (have pnl)
-    completed = [t for t in trades if 'pnl' in t and t.get('entry') in ('OUT', None)]
+    # Filter to completed trades (have pnl and are closed)
+    completed = [t for t in trades if t.get('pnl', 0) != 0 and
+                 (t.get('entry') in ('OUT',) or
+                  t.get('status') in ('STOP', 'TARGET', 'TIME') or
+                  (t.get('status') not in ('OPEN', None) and 'pnl' in t))]
     if not completed:
-        completed = [t for t in trades if 'pnl' in t]
+        completed = [t for t in trades if t.get('pnl', 0) != 0]
 
     wins = [t for t in completed if t.get('pnl', 0) > 0]
     losses = [t for t in completed if t.get('pnl', 0) <= 0]
