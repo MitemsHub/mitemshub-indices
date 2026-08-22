@@ -69,7 +69,7 @@ def _log_z2_expectation(distribution: str, dof: float) -> float:
             from scipy.special import digamma
 
             if dof > 2.0:
-                return _NORMAL_LOG_Z2_EXPECTATION - digamma(dof / 2.0) + math.log(dof - 2.0)
+                return float(_NORMAL_LOG_Z2_EXPECTATION - digamma(dof / 2.0) + math.log(dof - 2.0))
         except Exception:
             pass
         return _NORMAL_LOG_Z2_EXPECTATION
@@ -523,11 +523,13 @@ def score_horizon_forecast(
         fitted_p50 = _quantile(train_std, 0.5)
         fitted_p90 = _quantile(train_std, 0.9)
 
+    _fp50: float = float(fitted_p50) if fitted_p50 is not None else RANGE_P50_MULT
+    _fp90: float = float(fitted_p90) if fitted_p90 is not None else RANGE_P90_MULT
     windows = len(holdout_std)
-    covered_p50 = sum(1 for s in holdout_std if s <= fitted_p50)
-    covered_p90 = sum(1 for s in holdout_std if s <= fitted_p90)
-    over_forecast = sum(1 for s in holdout_std if s > fitted_p90)
-    ratios = [s / fitted_p50 for s in holdout_std] if fitted_p50 > 0 else [0.0] * windows
+    covered_p50 = sum(1 for s in holdout_std if s <= _fp50)
+    covered_p90 = sum(1 for s in holdout_std if s <= _fp90)
+    over_forecast = sum(1 for s in holdout_std if s > _fp90)
+    ratios = [s / _fp50 for s in holdout_std] if _fp50 > 0 else [0.0] * windows
 
     return HorizonValidation(
         symbol=symbol,
@@ -540,8 +542,8 @@ def score_horizon_forecast(
         mean_realized_ratio=sum(ratios) / max(len(ratios), 1),
         over_forecast_pct=over_forecast / max(windows, 1),
         drift_events=drift_events,
-        fitted_p50_mult=float(fitted_p50),
-        fitted_p90_mult=float(fitted_p90),
+        fitted_p50_mult=_fp50,
+        fitted_p90_mult=_fp90,
     )
 
 

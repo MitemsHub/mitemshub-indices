@@ -1,4 +1,4 @@
-# Daily scheduled-task action for the live tick collector (Blueberry MT5).
+# Daily scheduled-task action for the live tick collector (Deriv MT5).
 #
 # This script is what Task Scheduler runs every day.  It is deliberately
 # SHORT-LIVED: it kills yesterday's collector instance, starts a fresh one
@@ -85,6 +85,19 @@ function Stop-PreviousCollector {
     Write-TaskLog "restart guard: no previous collector running"
   }
   Start-Sleep -Milliseconds 800
+  return $true
+}
+
+# Map a step's return value to the shared status vocabulary used by the
+# [VERIFY] / [COLLECT] summary lines: $true -> ok (green), $false -> red,
+# $null -> skipped.  Each step function returns $null when python is missing
+# or the step is otherwise intentionally skipped, $false only on a real
+# failure, $true on success.
+function Convert-StepStatus {
+  param([object]$Result)
+  if ($null -eq $Result) { return 'skip' }
+  if ($Result) { return 'ok' }
+  return 'red'
 }
 
 # ── Start collector DETACHED ───────────────────────────────────────────
@@ -122,7 +135,7 @@ function Write-ScoringSweep {
   $python = Get-PythonRunner
   if (-not $python) {
     Write-TaskLog "scoring sweep skipped: python not found on PATH"
-    return $false
+    return $null   # skipped, not failed
   }
   $callsJournal = Join-Path $appDir "journals\live_calibration_calls.jsonl"
   $outcomesJournal = Join-Path $appDir "journals\live_calibration_outcomes.jsonl"
@@ -181,7 +194,7 @@ function Write-BandRevalidate {
   $python = Get-PythonRunner
   if (-not $python) {
     Write-TaskLog "band-revalidate skipped: python not found on PATH"
-    return $false
+    return $null   # skipped, not failed
   }
   $errFile = Join-Path $verifyDir "band_revalidate_stderr.txt"
   $prevEAP = $ErrorActionPreference
@@ -223,7 +236,7 @@ function Write-HeadToHeadVerify {
   $python = Get-PythonRunner
   if (-not $python) {
     Write-TaskLog "headtohead-verify skipped: python not found on PATH"
-    return $false
+    return $null   # skipped, not failed
   }
   $errFile = Join-Path $verifyDir "headtohead_verify_stderr.txt"
   $prevEAP = $ErrorActionPreference
@@ -262,7 +275,7 @@ function Write-CollectorHealth {
   $python = Get-PythonRunner
   if (-not $python) {
     Write-TaskLog "collector-health skipped: python not found on PATH"
-    return $false
+    return $null   # skipped, not failed
   }
   $prevEAP = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
@@ -327,23 +340,45 @@ function Write-CoverageVerification {
 
 try {
   Write-TaskLog "task action starting (daily collector restart + scoring sweep)"
-  Stop-PreviousCollector
-  Start-CollectorDetached
+  # Each step's outcome feeds the machine-readable [COLLECT] summary line at
+  # the end (same parseable format family as the verifier's [VERIFY] line, so
+  # the email loop / dashboard parse both with one pattern).
+  $stepResult = [ordered]@{}
+  $stepResult['restart']          = if (Stop-PreviousCollector)   { 'ok' } else { 'red' }
+  $stepResult['start']            = if (Start-CollectorDetached)  { 'ok' } else { 'red' }
   Start-Sleep -Seconds 3
   $verified = Write-CoverageVerification
+  $stepResult['coverage'] = Convert-StepStatus $verified
   # Score any newly-settled live calls so the outcomes journal (and the
   # calibration health panel / Stage-3 gate) compounds on the same daily
   # schedule as the tick corpus.  Non-fatal - see the function comment.
-  $null = Write-ScoringSweep
+  $stepResult['scoring']          = Convert-StepStatus (Write-ScoringSweep)
   # Re-validate the band geometry weekly (internal growth/elapsed gates
   # skip most days cheaply).  Non-fatal - see the function comment.
-  $null = Write-BandRevalidate
+  $stepResult['band_revalidate']  = Convert-StepStatus (Write-BandRevalidate)
   # Re-run the full head-to-head at the 14-day milestone (internal span/
   # growth gates skip until then).  Non-fatal - see the function comment.
-  $null = Write-HeadToHeadVerify
+  $stepResult['headtohead']       = Convert-StepStatus (Write-HeadToHeadVerify)
   # Log the 48h IPC-timeout recurrence verdict each morning.  Non-fatal.
-  $null = Write-CollectorHealth
+  $stepResult['health']           = Convert-StepStatus (Write-CollectorHealth)
   Write-TaskLog "task action complete"
+
+  # Machine-readable status line — mirrors the [VERIFY] summary shape
+  # (ok=/green=/red=/skip= + failed=names) so a single parse pattern covers
+  # both schedulers.  ok=0 if ANY step went red (the line is the full health
+  # picture; the exit code below stays policy: only coverage + hard errors
+  # are Task-Scheduler-fatal, per the non-fatal step comments above).
+  $nGreen = @($stepResult.Values | Where-Object { $_ -eq 'ok' }).Count
+  $nRed   = @($stepResult.Values | Where-Object { $_ -eq 'red' }).Count
+  $nSkip  = @($stepResult.Values | Where-Object { $_ -eq 'skip' }).Count
+  $nSteps = $stepResult.Count
+  $collectLine = "[COLLECT] summary ok=$(if ($nRed -eq 0) { 1 } else { 0 }) steps=$nSteps green=$nGreen red=$nRed skip=$nSkip"
+  if ($nRed -gt 0) {
+    $failedNames = @($stepResult.GetEnumerator() | Where-Object { $_.Value -eq 'red' } | ForEach-Object { $_.Key }) -join ','
+    $collectLine += " failed=$failedNames"
+  }
+  Write-Host $collectLine
+  Write-TaskLog $collectLine
   # Surface verification failures in Task Scheduler's Last Result so a
   # silent corpus stall is visible from the task list, not just the log.
   if (-not $verified) {

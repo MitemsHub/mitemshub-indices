@@ -250,7 +250,7 @@ class MissedTradeTracker:
                 record.resolved = True
                 record.outcome = outcome
                 record.resolved_at = now
-                record.resolved_price = prices[-1] if prices else None
+                record.resolved_price = prices[-1][1] if prices else None
                 record.price_move_atr = price_move_atr
                 newly_resolved.append(record)
 
@@ -430,8 +430,8 @@ class MissedTradeTracker:
                     "features_summary": record.features_summary,
                 })
             with self._path.open("w", encoding="utf-8") as f:
-                for record in records_to_write:
-                    f.write(json.dumps(record) + "\n")
+                for entry in records_to_write:
+                    f.write(json.dumps(entry) + "\n")
         except Exception as exc:
             logger.debug("[missed_trade] failed to persist pending records: %s", exc)
 

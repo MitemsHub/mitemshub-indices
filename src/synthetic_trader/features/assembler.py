@@ -41,7 +41,7 @@ def _get_garch_forecaster(symbol: str) -> ArchGarchForecaster:
     converged during MLE fitting, the forecaster is initialized with
     those market-calibrated parameters instead of the generic defaults.
     This means the online forecaster starts with priors that reflect
-    actual Blueberry Markets synthetic index behavior.
+    actual Deriv synthetic index behavior.
 
     The arch library's ArchGarchForecaster provides:
     - EWMA online volatility (fast, no dependencies)
@@ -160,7 +160,7 @@ def build_snapshot(
             # When the regime classifier returns UNKNOWN (too few candles),
             # inherit the parent timeframe's regime.  If parent is also UNKNOWN,
             # fall back to RANGE as the safest actionable default.
-            effective_regime = extra_regime if extra_regime != Regime.UNKNOWN else regime
+            effective_regime = extra_regime if extra_regime != Regime.UNKNOWN else regime  # type: ignore[assignment]
             if effective_regime == Regime.UNKNOWN:
                 effective_regime = Regime.RANGE
             features[f"{prefix}_regime_{effective_regime.value}"] = 1.0

@@ -1,240 +1,317 @@
-"""Collector health report: does the MT5 single-flight guard stop IPC timeouts?
+"""Collector health check — monitors the tick collector and alerts if it stops.
 
-The guard (§44) serializes ``mt5.initialize()`` across the collector, the
-dashboard warmup, and CLI runs.  To measure whether IPC timeouts still
-recur, the collector appends every reconnect/init-failure/feed-loss event to
-``.data/mt5_events.jsonl`` (see :mod:`synthetic_trader.data.continuous_collector`).
-This module turns that history into a windowed verdict:
+Checks:
+1. Collector process status (is it running?)
+2. Data freshness (are new ticks being written?)
+3. Collector status file (any errors or stalls?)
+4. CSV file integrity (reasonable size, no corruption?)
 
-- ``needs_re_tune`` — ≥ :data:`IPC_RE_TUNE_THRESHOLD` IPC-timeout init
-  failures in the window: the guard didn't eliminate the race, so the
-  reconnect backoff needs re-tuning.
-- ``attention`` — 1–2 IPC timeouts, or repeated feed-loss/read-error events
-  (terminal-side), or a stale corpus (no fresh ticks for 12h+).
-- ``ok`` — no IPC timeouts in the window.
-
-Run it manually after the 48h window, and the daily collector task logs a
-one-line summary each morning (non-fatal).
-
-CLI: ``python -m synthetic_trader.cli collector-health-report --hours 48``
+Usage:
+    python -m synthetic_trader.scripts.collector_health          # quick check
+    python -m synthetic_trader.scripts.collector_health --watch   # continuous monitoring
+    python -m synthetic_trader.scripts.collector_health --restart # auto-restart if dead
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
+import subprocess
+import sys
 import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
-from synthetic_trader.backtest.engine import load_ticks_csv
-from synthetic_trader.backtest.vol_reversion import dedupe_ticks
-from synthetic_trader.data.tick_store import SCALE_GUARD_MAX_RATIO
-
-# ── Verdict thresholds (48h window) ────────────────────────────────────
-# ≥ this many IPC-timeout init failures in the window -> re-tune backoff.
-IPC_RE_TUNE_THRESHOLD = 3
-# 1..(threshold-1) IPC timeouts -> attention (single incidents may be the
-# terminal's own, not the guard's).
-IPC_ATTENTION_THRESHOLD = 1
-# Feed-loss / read-error counts that also flag attention (terminal-side).
-EVENT_ATTENTION_THRESHOLD = 3
-# No fresh tick for this long (outside rollover) -> corpus is stale.
-STALE_TICK_AGE_SEC = 12 * 3600.0
-# ANY tick in the MT5 corpus whose price deviates more than the append-time
-# scale guard from the corpus median is a venue leak: Deriv 1HZ-scale
-# prices (~3.7-4.0x Blueberry SYN scale) got appended despite the guard.
-# This is the loudest verdict — polluted data corrupts every downstream
-# verdict, so it outranks IPC/reconnect concerns.
-
-DEFAULT_EVENTS_PATH = Path(".data") / "mt5_events.jsonl"
 
 
-def _load_events(engine_root: str | Path) -> list[dict[str, Any]]:
-    path = Path(engine_root) / DEFAULT_EVENTS_PATH
-    events: list[dict[str, Any]] = []
+# ── Configuration ──────────────────────────────────────────────────────
+STATUS_PATH = Path("data/live_tick_collector.json")
+COLLECTOR_OUTPUT = Path("data/collector_output.log")
+TICK_FILES = {
+    "R_75": Path("data/backfill/R_75_ticks.csv"),
+    "R_100": Path("data/backfill/R_100_ticks.csv"),
+}
+
+# Alert thresholds
+STALE_THRESHOLD_SEC = 120        # 2 minutes without new ticks = warning
+DEAD_THRESHOLD_SEC = 300         # 5 minutes = collector likely dead
+CSV_MAX_AGE_SEC = 600            # 10 minutes = data too old
+CHECK_INTERVAL_SEC = 30          # how often to check in --watch mode
+
+
+@dataclass
+class HealthStatus:
+    """Collector health assessment."""
+    collector_running: bool = False
+    data_fresh: bool = False
+    csv_sizes: dict[str, int] = field(default_factory=dict)
+    last_tick_age_sec: float = 0.0
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    status_file_valid: bool = False
+
+    @property
+    def healthy(self) -> bool:
+        return self.collector_running and self.data_fresh and len(self.errors) == 0
+
+    @property
+    def status_emoji(self) -> str:
+        if self.healthy:
+            return "OK"
+        elif self.collector_running:
+            return "WARN"
+        else:
+            return "FAIL"
+
+    def summary(self) -> str:
+        lines = []
+        lines.append(f"Collector:  {'RUNNING' if self.collector_running else 'STOPPED'}")
+        lines.append(f"Data:       {'FRESH' if self.data_fresh else 'STALE'}")
+        lines.append(f"Status:     {self.status_emoji}")
+
+        for sym, size in self.csv_sizes.items():
+            lines.append(f"  {sym}: {size:,} bytes")
+
+        if self.last_tick_age_sec > 0:
+            age_min = self.last_tick_age_sec / 60
+            lines.append(f"Last tick:  {age_min:.1f} min ago")
+
+        if self.errors:
+            lines.append("ERRORS:")
+            for e in self.errors:
+                lines.append(f"  - {e}")
+
+        if self.warnings:
+            lines.append("WARNINGS:")
+            for w in self.warnings:
+                lines.append(f"  - {w}")
+
+        return "\n".join(lines)
+
+
+def check_collector_process() -> tuple[bool, list[str]]:
+    """Check if the collector process is running."""
+    errors = []
+    running = False
+
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                events.append(json.loads(line))
-            except ValueError:
-                continue
-    except OSError:
-        return []
-    return events
-
-
-def _scan_corpus(
-    engine_root: str | Path, symbol: str
-) -> dict[str, Any]:
-    """Load a symbol's corpus once; report freshness AND venue-scale leaks.
-
-    Returns ``{"last_tick_epoch", "out_of_scale_ticks", "out_of_scale_samples"}``.
-    A tick is flagged as out-of-scale when its price deviates from the corpus
-    median by more than ``SCALE_GUARD_MAX_RATIO`` (the same rule the append
-    guard uses) — Deriv 1HZ prices are ~3.7-4.0x the Blueberry SYN scale, so
-    any leak lands far outside the band while genuine intraday range never
-    does.
-    """
-    root = Path(engine_root)
-    for candidate in (
-        root / "data" / "backfill" / f"{symbol}_ticks.csv",
-        root / "data" / f"{symbol.lower()}_ticks.csv",
-        root / "data" / f"{symbol}_ticks.csv",
-    ):
-        if not (candidate.exists() and candidate.stat().st_size > 0):
-            continue
-        try:
-            ticks = load_ticks_csv(candidate, default_symbol=symbol)
-        except Exception:
-            return {"last_tick_epoch": None, "out_of_scale_ticks": 0, "out_of_scale_samples": []}
-        if not ticks:
-            return {"last_tick_epoch": None, "out_of_scale_ticks": 0, "out_of_scale_samples": []}
-        # Scan the RAW rows — not ``dedupe_ticks`` output.  Dedupe drops
-        # exact-duplicate epochs, and a leaked Deriv tick could (in theory)
-        # share an epoch with a real row and be silently masked; the scale
-        # check must see every row in the file.
-        prices = sorted(t.price for t in ticks if t.price and t.price > 0)
-        median = prices[len(prices) // 2] if prices else 0.0
-        out_of_scale: list[dict[str, Any]] = []
-        if median > 0:
-            for t in ticks:
-                if t.price <= 0:
-                    continue
-                ratio = t.price / median
-                if ratio > SCALE_GUARD_MAX_RATIO or ratio < 1.0 / SCALE_GUARD_MAX_RATIO:
-                    out_of_scale.append({"epoch": t.epoch, "price": t.price})
-                    if len(out_of_scale) >= 5:
-                        break
-        # Freshness uses the sorted-deduped tail (max epoch across all rows).
-        last_epoch = max(float(t.epoch) for t in ticks)
-        return {
-            "last_tick_epoch": last_epoch,
-            "out_of_scale_ticks": len(out_of_scale),
-            "out_of_scale_samples": out_of_scale,
-        }
-    return {"last_tick_epoch": None, "out_of_scale_ticks": 0, "out_of_scale_samples": []}
-
-
-def _corpus_last_tick(engine_root: str | Path, symbol: str) -> float | None:
-    return _scan_corpus(engine_root, symbol)["last_tick_epoch"]
-
-
-def run_collector_health(
-    engine_root: str | Path = ".",
-    hours: float = 48.0,
-    now: float | None = None,
-) -> dict[str, Any]:
-    """Summarize MT5 events over the window and return the verdict."""
-    now_ts = now if now is not None else time.time()
-    window_start = now_ts - hours * 3600.0
-    events = [e for e in _load_events(engine_root) if e.get("ts", 0) >= window_start]
-
-    by_kind: dict[str, int] = {}
-    ipc_timeouts = 0
-    last_ts = 0.0
-    samples: list[dict[str, Any]] = []
-    for e in events:
-        kind = e.get("kind", "reconnect")
-        by_kind[kind] = by_kind.get(kind, 0) + 1
-        msg = str(e.get("message", ""))
-        if "ipc timeout" in msg.lower():
-            ipc_timeouts += 1
-        if e.get("ts", 0) > last_ts:
-            last_ts = float(e["ts"])
-        if len(samples) < 8:
-            samples.append({"ts": e.get("ts"), "kind": kind, "message": msg[:140]})
-
-    # Corpus freshness + venue-scale leaks per symbol (one load each).
-    corpus: dict[str, Any] = {}
-    for symbol in ("R_75", "R_100"):
-        scan = _scan_corpus(engine_root, symbol)
-        last = scan["last_tick_epoch"]
-        corpus[symbol] = {
-            "last_tick_epoch": last,
-            "last_tick_age_sec": round(max(0.0, now_ts - last), 1) if last else None,
-            "out_of_scale_ticks": scan["out_of_scale_ticks"],
-            "out_of_scale_samples": scan["out_of_scale_samples"],
-        }
-
-    stale = any(
-        c.get("last_tick_age_sec") is not None
-        and c["last_tick_age_sec"] > STALE_TICK_AGE_SEC
-        for c in corpus.values()
-    )
-    leaked = [(sym, c) for sym, c in corpus.items() if c.get("out_of_scale_ticks", 0) > 0]
-
-    # ── Verdict ────────────────────────────────────────────────────────
-    # A venue leak outranks everything: wrong-scale prices in the corpus
-    # poison every backtest and live verdict until cleaned, so it must be
-    # the loudest morning signal.
-    reason: str
-    if leaked:
-        verdict = "venue_leak"
-        bits = []
-        for sym, c in leaked:
-            s = c["out_of_scale_samples"][0]
-            bits.append(
-                f"{sym}: {c['out_of_scale_ticks']}+ tick(s) outside {1 / SCALE_GUARD_MAX_RATIO:.1f}x-"
-                f"{SCALE_GUARD_MAX_RATIO:.1f}x the corpus median "
-                f"(e.g. price {s['price']:.2f} vs median scale) — Deriv 1HZ data leaked "
-                "into the MT5 corpus; quarantine the rows (see tick_store venue guard)"
+        if os.name == "nt":
+            # Windows: check for python processes running collector
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq python.exe", "/FO", "CSV"],
+                capture_output=True, text=True, timeout=5
             )
-        reason = "VENUE LEAK — " + "; ".join(bits)
-    elif ipc_timeouts >= IPC_RE_TUNE_THRESHOLD:
-        verdict = "needs_re_tune"
-        reason = (
-            f"{ipc_timeouts} IPC-timeout init failures in {hours:.0f}h — "
-            "the single-flight guard did not eliminate the race; re-tune the "
-            "reconnect backoff (RECONNECT_BACKOFF_SEC / MAX_RECONNECTS / "
-            "STALL_RECONNECT_SEC in continuous_collector.py)"
-        )
-    elif ipc_timeouts >= IPC_ATTENTION_THRESHOLD:
-        verdict = "attention"
-        reason = f"{ipc_timeouts} IPC-timeout init failure(s) in {hours:.0f}h — monitor; single incidents may be terminal-side"
-    elif stale:
-        verdict = "attention"
-        reason = "no fresh ticks for 12h+ — collector may be down (not an IPC-timeout issue)"
-    elif any(
-        by_kind.get(k, 0) >= EVENT_ATTENTION_THRESHOLD
-        for k in ("feed_lost", "read_errors", "reconnect")
-    ):
-        verdict = "attention"
-        reason = "repeated feed-loss/read-error reconnects — terminal-side stalls, no IPC timeouts"
+            for line in result.stdout.splitlines():
+                if "python" in line.lower():
+                    running = True
+                    break
+        else:
+            # Unix: check for collector process
+            result = subprocess.run(
+                ["pgrep", "-f", "collect-live-ticks"],
+                capture_output=True, text=True, timeout=5
+            )
+            running = result.returncode == 0
+    except Exception as e:
+        errors.append(f"Process check failed: {e}")
+
+    return running, errors
+
+
+def check_data_freshness() -> tuple[bool, dict[str, int], float, list[str]]:
+    """Check if tick data is being written."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    sizes = {}
+    last_age = 0.0
+    fresh = False
+
+    for sym, path in TICK_FILES.items():
+        if not path.exists():
+            warnings.append(f"{sym}: CSV file not found")
+            continue
+
+        size = path.stat().st_size
+        sizes[sym] = size
+
+        # Check file modification time
+        mtime = path.stat().st_mtime
+        age = time.time() - mtime
+        last_age = max(last_age, age)
+
+        if age < STALE_THRESHOLD_SEC:
+            fresh = True
+        elif age > CSV_MAX_AGE_SEC:
+            warnings.append(f"{sym}: CSV is {age/60:.1f} min old")
+
+    return fresh, sizes, last_age, errors + warnings
+
+
+def check_status_file() -> tuple[bool, list[str], list[str]]:
+    """Check the collector status JSON file."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    valid = False
+
+    if not STATUS_PATH.exists():
+        warnings.append("Status file not found")
+        return valid, errors, warnings
+
+    try:
+        data = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+        valid = True
+
+        # Check update time
+        updated_at = data.get("updated_at", 0)
+        age = time.time() - updated_at
+        if age > DEAD_THRESHOLD_SEC:
+            warnings.append(f"Status file is {age/60:.1f} min old")
+
+        # Check collector stats
+        collectors = data.get("collectors", {})
+        for sym, stats in collectors.items():
+            if stats.get("errors"):
+                errors.append(f"{sym}: {stats['errors'][-1]}")
+
+    except Exception as e:
+        errors.append(f"Status file parse error: {e}")
+
+    return valid, errors, warnings
+
+
+def run_health_check() -> HealthStatus:
+    """Run all health checks and return status."""
+    status = HealthStatus()
+
+    # Check process
+    running, proc_errors = check_collector_process()
+    status.collector_running = running
+    status.errors.extend(proc_errors)
+
+    # Check data freshness
+    fresh, sizes, last_age, fresh_warnings = check_data_freshness()
+    status.data_fresh = fresh
+    status.csv_sizes = sizes
+    status.last_tick_age_sec = last_age
+    status.warnings.extend(fresh_warnings)
+
+    # Check status file
+    valid, stat_errors, stat_warnings = check_status_file()
+    status.status_file_valid = valid
+    status.errors.extend(stat_errors)
+    status.warnings.extend(stat_warnings)
+
+    return status
+
+
+def restart_collector() -> bool:
+    """Attempt to restart the collector."""
+    try:
+        if os.name == "nt":
+            # Windows: start collector in background
+            subprocess.Popen(
+                [sys.executable, "-m", "synthetic_trader.cli", "collect-live-ticks",
+                 "--symbols", "R_75,R_100"],
+                stdout=open(COLLECTOR_OUTPUT, "w"),
+                stderr=subprocess.STDOUT,
+                creationflags=0x00000008  # DETACHED_PROCESS
+            )
+        else:
+            # Unix: start with nohup
+            subprocess.Popen(
+                [sys.executable, "-m", "synthetic_trader.cli", "collect-live-ticks",
+                 "--symbols", "R_75,R_100"],
+                stdout=open(COLLECTOR_OUTPUT, "w"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True
+            )
+        return True
+    except Exception as e:
+        print(f"Failed to restart collector: {e}")
+        return False
+
+
+def watch_mode():
+    """Continuous monitoring with alerts."""
+    print("Collector Health Monitor (Ctrl+C to stop)")
+    print("=" * 50)
+
+    while True:
+        try:
+            status = run_health_check()
+
+            # Clear screen (works on most terminals)
+            os.system("cls" if os.name == "nt" else "clear")
+
+            # Print status
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            print(f"[{now}] Collector Health Monitor")
+            print("=" * 50)
+            print(status.summary())
+
+            # Alert if unhealthy
+            if not status.healthy:
+                print("\n" + "!" * 50)
+                if not status.collector_running:
+                    print("ALERT: Collector is NOT running!")
+                if not status.data_fresh:
+                    print("ALERT: Data is STALE!")
+                if status.errors:
+                    print(f"ALERT: {len(status.errors)} error(s) found!")
+                print("!" * 50)
+
+            time.sleep(CHECK_INTERVAL_SEC)
+
+        except KeyboardInterrupt:
+            print("\nStopping monitor...")
+            break
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Collector health check")
+    parser.add_argument("--watch", action="store_true",
+                        help="Continuous monitoring mode")
+    parser.add_argument("--restart", action="store_true",
+                        help="Auto-restart collector if dead")
+    parser.add_argument("--json", action="store_true",
+                        help="Output as JSON")
+    args = parser.parse_args()
+
+    if args.watch:
+        watch_mode()
+        return
+
+    # Single check
+    status = run_health_check()
+
+    if args.json:
+        import json as json_mod
+        output = {
+            "healthy": status.healthy,
+            "collector_running": status.collector_running,
+            "data_fresh": status.data_fresh,
+            "csv_sizes": status.csv_sizes,
+            "last_tick_age_sec": status.last_tick_age_sec,
+            "errors": status.errors,
+            "warnings": status.warnings,
+        }
+        print(json_mod.dumps(output, indent=2))
     else:
-        verdict = "ok"
-        reason = f"no IPC timeouts in {hours:.0f}h — the single-flight guard is holding"
+        print(status.summary())
 
-    return {
-        "window_hours": hours,
-        "generated_at": now_ts,
-        "verdict": verdict,
-        "verdict_reason": reason,
-        "events": {"by_kind": by_kind, "total": len(events), "ipc_timeouts": ipc_timeouts},
-        "first_event_ts": events[0]["ts"] if events else None,
-        "last_event_ts": last_ts if events else None,
-        "samples": samples,
-        "corpus": corpus,
-    }
+    # Auto-restart if requested
+    if args.restart and not status.collector_running:
+        print("\nAttempting to restart collector...")
+        if restart_collector():
+            print("Collector restarted successfully")
+        else:
+            print("Failed to restart collector")
+            sys.exit(1)
+
+    # Exit code: 0 = healthy, 1 = unhealthy
+    sys.exit(0 if status.healthy else 1)
 
 
-def print_collector_health(report: dict[str, Any]) -> None:
-    w = report["window_hours"]
-    print(f"== collector health (last {w:.0f}h) ==")
-    print(f"events: total={report['events']['total']} "
-          f"ipc_timeouts={report['events']['ipc_timeouts']} "
-          f"by_kind={report['events']['by_kind']}")
-    for symbol, c in report["corpus"].items():
-        age = c["last_tick_age_sec"]
-        age_s = f"{age / 3600:.1f}h" if age is not None else "n/a"
-        oos = c.get("out_of_scale_ticks", 0)
-        oos_s = f" — VENUE LEAK: {oos}+ out-of-scale tick(s)" if oos else ""
-        print(f"  {symbol}: last tick {age_s} ago{oos_s}")
-    if report["samples"]:
-        print("  recent events:")
-        for s in report["samples"][-4:]:
-            print(f"    [{s.get('kind')}] {s.get('message', '')[:120]}")
-    print(f"verdict: {report['verdict']}")
-    print(f"reason: {report['verdict_reason']}")
+if __name__ == "__main__":
+    main()

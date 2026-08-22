@@ -2,7 +2,7 @@
 #
 # Registers `run-live-tick-collector-task.ps1` (which in turn launches
 # `collect-live-ticks.bat`) as a Windows scheduled task that fires once a
-# day.  Each firing restarts the Blueberry MT5 tick collector (killing the
+# day.  Each firing restarts the Deriv MT5 tick collector (killing the
 # previous day's instance first — the daily-restart guard), verifies the
 # corpus is compounding via `tick-coverage --json`, and runs a
 # `score-live-loop --once` sweep so the Stage-3 outcomes journal (and the
@@ -15,15 +15,27 @@
 #   .\setup-live-tick-task.ps1 -Unregister      # remove the task
 #   .\setup-live-tick-task.ps1 -VerifyOnly      # just run tick-coverage --json
 #   .\setup-live-tick-task.ps1 -SkipBaseline    # register without the coverage run
+#   .\setup-live-tick-task.ps1 -RunAnytime      # + StartWhenAvailable + battery-tolerant
 #
 # Requires: Task Scheduler service + permissions to create a task for the
 # current user (no admin needed for a per-user task with /RU current user).
+#
+# -RunAnytime: schtasks /Create does NOT expose StartWhenAvailable or the
+# power settings, so a plain registration leaves the task at the fragile
+# defaults (Stop On Battery Mode, no catch-up for a missed run) — a laptop
+# asleep or on battery at StartTime silently skips the daily collector
+# restart.  With this switch the script post-processes the registration via
+# the ScheduledTasks module (Set-ScheduledTask) to add StartWhenAvailable
+# (a missed run fires as soon as the machine is next awake) + battery-
+# tolerant power (AllowStartIfOnBatteries / DontStopIfGoingOnBatteries), so
+# a FUTURE re-registration keeps the settings instead of reverting them.
 param(
   [string]$TaskName = "SyntheticIndicesLiveTickCollector",
   [string]$StartTime = "00:30",
   [switch]$Unregister,
   [switch]$VerifyOnly,
-  [switch]$SkipBaseline
+  [switch]$SkipBaseline,
+  [switch]$RunAnytime
 )
 
 $ErrorActionPreference = "Stop"
@@ -129,6 +141,27 @@ if ($createExit -ne 0) {
 }
 
 Write-Host "Task '$TaskName' registered." -ForegroundColor Green
+
+# -RunAnytime: overlay the settings schtasks cannot express.  Set-ScheduledTask
+# -Settings replaces the WHOLE settings set, so build it from
+# New-ScheduledTaskSettingsSet (defaults for everything else, incl. the 72h
+# execution-time limit the schtasks registration already uses) with only the
+# three knobs that matter.  If the module or the apply fails, exit 1 — the
+# user explicitly asked for these settings, so a silent revert to the
+# battery-fragile defaults is not an acceptable outcome.
+if ($RunAnytime) {
+  try {
+    $runAnytimeSettings = New-ScheduledTaskSettingsSet `
+      -StartWhenAvailable `
+      -AllowStartIfOnBatteries `
+      -DontStopIfGoingOnBatteries
+    Set-ScheduledTask -TaskName $TaskName -Settings $runAnytimeSettings | Out-Null
+    Write-Host "RunAnytime settings applied: StartWhenAvailable + battery-tolerant (AllowStartIfOnBatteries / DontStopIfGoingOnBatteries)." -ForegroundColor Green
+  } catch {
+    Write-Host "ERROR: could not apply -RunAnytime settings to task '$TaskName': $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+  }
+}
 
 # ── Verify the registration + baseline corpus state ────────────────────
 Write-Host "`nVerifying registration:" -ForegroundColor Cyan

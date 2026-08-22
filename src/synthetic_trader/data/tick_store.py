@@ -53,8 +53,13 @@ def normalize_ticks(ticks: list[Tick]) -> tuple[list[Tick], int]:
         # return uninitialised rows (epoch 0, price 0.0/1.0/4.0) while the
         # terminal is still downloading history; without this filter those
         # rows get merged into the compounding corpus (mirrors the existing
-        # epoch>1e9 guard in backfill_derived_columns).
-        if tick.epoch < 1_000_000_000 or tick.epoch > time.time() + 3600:
+        # epoch>1e9 guard in backfill_derived_columns).  The 4h window (not
+        # 1h) matters: the Deriv terminal stamps ticks in SERVER time,
+        # which runs +3h ahead of the local clock (UTC+3) — a live
+        # server-stamped tick is legitimately "in the future" vs time.time(),
+        # and a 1h window silently dropped every real-time tick.  Junk rows
+        # are still caught: they are epochs ~0 or year-13000.
+        if tick.epoch < 1_000_000_000 or tick.epoch > time.time() + 14400:
             dropped_junk += 1
             continue
         if not (tick.price > 0.0):
@@ -357,16 +362,16 @@ def _read_full_ticks(csv_path: Path, symbol: str) -> list[Tick]:
 
 # Price-scale guard: a wrong-scale venue must never pollute the compounding
 # corpus.  Synthetic indices trade on DIFFERENT numeric scales per venue:
-# Blueberry SYN75 ~1,500-2,000 vs Deriv 1HZ75V ~7,000-8,000 (R_100: SYN100
+# Deriv SYN75 ~1,500-2,000 vs Deriv 1HZ75V ~7,000-8,000 (R_100: SYN100
 # ~350-400 vs 1HZ100V ~1,800-1,900).  The MT5-first venue rule already forbids
 # Deriv fallback when MT5 is configured, but a process without MT5 env vars
 # (diagnostic runs, dev shells, mis-configured collectors) can still append
 # wrong-scale ticks.  We guard the append itself: any tick whose price is more
 # than SCALE_GUARD_MAX_RATIO away from the existing corpus median is dropped
 # with a loud warning instead of being merged into the corpus.
-# Deriv's 1HZ synthetic indices are quoted ~3.7-4.0x the Blueberry MT5
+# Deriv's 1HZ synthetic indices are quoted ~3.7-4.0x the Deriv MT5
 # SYN scale for the same underlying (e.g. Deriv R_75 ~6,900-7,400 vs
-# Blueberry SYN75 ~1,800-1,980).  A 4.0 threshold was TOO LOOSE: it let
+# Deriv SYN75 ~1,800-1,980).  A 4.0 threshold was TOO LOOSE: it let
 # the exact pollution it was built to stop (6920/1855 = 3.73x) sail
 # through.  Real SYN75/SYN100 never deviate more than ~1.4x from the
 # corpus median even across a multi-day backfill, so 2.5x catches every
@@ -417,7 +422,7 @@ def append_ticks_csv(path: str | Path, ticks: list[Tick]) -> None:
     New ticks are enriched with spread/direction/volume_proxy derived from
     the last existing tick in the CSV before writing.  A price-scale guard
     rejects ticks on a wildly different price scale (e.g. Deriv 1HZ75V ~7,000
-    appended into a Blueberry SYN75 corpus ~1,770) so wrong-venue data can
+    appended into a Deriv SYN75 corpus ~1,770) so wrong-venue data can
     never pollute the compounding corpus.
     """
     if not ticks:
@@ -465,37 +470,21 @@ def _prune_csv(path: str | Path, max_ticks: int = MAX_TICKS_PER_CSV) -> None:
 
 
 def _capped_rewrite(target: Path, max_ticks: int) -> None:
-    BUFFER_SIZE = 256 * 1024
-    file_size = target.stat().st_size
-    tail_chunks: list[bytes] = []
-    accumulated = 0
-    pos = file_size
-    while pos > 0 and accumulated < BUFFER_SIZE * 6:
-        read = min(BUFFER_SIZE, pos)
-        pos -= read
-        with target.open("rb") as fh:
-            fh.seek(pos)
-            data = fh.read(read)
-        tail_chunks.append(data)
-        accumulated += read
-        if data.startswith(b"\n") and accumulated > BUFFER_SIZE:
-            break
-    tail_bytes = b"".join(reversed(tail_chunks))
-    if tail_bytes.startswith(b"\n"):
-        tail_bytes = tail_bytes[1:]
-    first_newline = tail_bytes.find(b"\n")
+    # Whole-file read.  The old backward-chunked reader was hard-capped at
+    # 6 x 256KB = 1.5MB of tail bytes, so ANY corpus file larger than that
+    # was silently truncated to whatever fit in its last 1.5MB (~24k rows)
+    # regardless of max_ticks — a merged ~20MB file lost all history older
+    # than the last 1.5MB.  A corpus is at most ~20MB (MAX_CSV_SIZE_TRIGGER),
+    # so reading it whole is cheap and keeps the last max_ticks rows without
+    # dropping history.
+    raw = target.read_bytes()
+    if raw.startswith(b"\n"):
+        raw = raw[1:]
+    first_newline = raw.find(b"\n")
     if first_newline > 0:
-        tail_bytes = tail_bytes[first_newline + 1:]
-    lines = tail_bytes.decode("utf-8", errors="replace").splitlines()
-    last_lines: list[str] = []
-    for line in reversed(lines):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        last_lines.append(stripped)
-        if len(last_lines) >= max_ticks + 1:
-            break
-    last_lines.reverse()
+        raw = raw[first_newline + 1:]
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    last_lines = [ln.strip() for ln in lines if ln.strip()][-max_ticks:]
     if not last_lines:
         return
     if last_lines[0].startswith("epoch"):

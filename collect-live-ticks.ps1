@@ -1,7 +1,7 @@
-# Continuous live tick collection service launcher (Blueberry MT5 terminal).
+# Continuous live tick collection service launcher (Deriv MT5 terminal).
 # Appends real SYN75/SYN100 ticks to data/backfill/ across days/sessions.
 #
-# Run with the Blueberry MT5 terminal open and logged in.  Stops with Ctrl+C
+# Run with the Deriv MT5 terminal open and logged in.  Stops with Ctrl+C
 # or via the stop-live-tick-collector.ps1 script.
 $ErrorActionPreference = "Stop"
 
@@ -38,7 +38,7 @@ if (Test-Path $pidFile) {
 }
 
 Write-Host "Starting live tick collection (SYN75/SYN100 -> data/backfill/)..."
-Write-Host "Keep the Blueberry MT5 terminal open. Press Ctrl+C to stop."
+Write-Host "Keep the Deriv MT5 terminal open. Press Ctrl+C to stop."
 
 $proc = Start-Process -FilePath $python -ArgumentList @(
   "-m", "synthetic_trader.cli", "collect-live-ticks",

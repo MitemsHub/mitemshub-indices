@@ -96,7 +96,7 @@ def resolve_wfo_csv(symbol: str) -> Path | None:
     """Pick the best tick CSV for WFO: the clean backfill corpus first.
 
     The continuous collector appends to ``data/backfill/{symbol}_ticks.csv``
-    (correct Blueberry scale).  Fall back to the legacy ``data/`` files only
+    (correct Deriv scale).  Fall back to the legacy ``data/`` files only
     when no backfill exists — those may contain the old Deriv-scale rows.
     """
     backfill = DATA_DIR / "backfill" / f"{symbol}_ticks.csv"

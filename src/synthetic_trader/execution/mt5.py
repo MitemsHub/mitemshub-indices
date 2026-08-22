@@ -102,7 +102,7 @@ def build_mt5_credentials(config: Mt5Config) -> Mt5Credentials:
 
 def mt5_dependency_available() -> bool:
     try:
-        import MetaTrader5  # type: ignore  # noqa: F401
+        import MetaTrader5  # noqa: F401
     except ImportError:
         return False
     return True
@@ -118,7 +118,7 @@ def evaluate_mt5_runtime(
     module = mt5_module
     if module is None:
         try:
-            import MetaTrader5 as module  # type: ignore
+            import MetaTrader5 as module
         except ImportError:
             return Mt5RuntimeStatus(
                 ready=False,

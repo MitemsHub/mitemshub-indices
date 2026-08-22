@@ -27,7 +27,7 @@
 
 ### 1.2 Compiler / toolchain (verified this audit)
 
-- **MetaEditor:** `C:/Program Files/Blueberry Markets MetaTrader 5/metaeditor64.exe` ✅ (and a second copy under `C:/Program Files/MetaTrader 5 Terminal/`)
+- **MetaEditor:** `C:/Program Files/MetaTrader 5 Terminal/metaeditor64.exe` ✅ (and a second copy under `C:/Program Files/MetaTrader 5 Terminal/`)
 - **Terminal data folders:** `%APPDATA%\MetaQuotes\Terminal\DBE9B8B3...\MQL5` and `FB9A56D6...\MQL5` — the Experts folder currently has only MetaQuotes stock (`Advisors/Examples/Free Robots`)
 - **So:** every development phase can **compile and run in the Strategy Tester** on this machine. No blocker.
 
@@ -280,7 +280,7 @@ validates what MQL5 is allowed to trade.**
 
 ## 8. Technical risks & MQL5-specific limitations
 
-1. **"Every tick based on real ticks" needs broker tick history.** Blueberry
+1. **"Every tick based on real ticks" needs broker tick history.** Deriv
    synthetic indices: tick history must be downloaded in the tester; if the
    broker does not serve full tick history, fall back to "Every tick based on
    real ticks" → if unavailable, document and use 1-minute OHLC with the

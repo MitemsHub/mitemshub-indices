@@ -6,7 +6,7 @@ import math
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 
 @dataclass
@@ -77,7 +77,7 @@ class ExperienceReplayBuffer:
             return []
         return self._rng.sample(self._buffer, k)
 
-    def replay_updates(self, model: object, n_steps: int | None = None) -> int:
+    def replay_updates(self, model: Any, n_steps: int | None = None) -> int:
         """Replay mini-batches through the model's ``update`` method.
 
         Replayed samples never feed the model's drift detector: they

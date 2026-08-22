@@ -7,7 +7,7 @@ from synthetic_trader.domain import Candle, Tick
 logger = logging.getLogger(__name__)
 
 # Maximum allowed price deviation from the running median before a tick
-# is treated as a corrupt outlier.  20% catches the Deriv→Blueberry
+# is treated as a corrupt outlier.  20% catches the Deriv→Deriv
 # price mismatch (~7000 vs ~258) while allowing normal volatility.
 MAX_PRICE_DEVIATION_RATIO = 0.20
 
@@ -59,7 +59,7 @@ class CandleBuilder:
         # ── Price outlier guard ────────────────────────────────
         # Reject ticks whose price is wildly different from the running
         # median.  This prevents corrupt data (e.g. old Deriv API prices
-        # mixed with Blueberry MT5 prices) from creating candles with
+        # mixed with Deriv MT5 prices) from creating candles with
         # impossible ranges that break ATR, swing detection, and trade
         # level calculations.
         if self._is_outlier(tick.price):

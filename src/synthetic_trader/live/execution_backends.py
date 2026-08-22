@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 import time as _time
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from synthetic_trader.config import LiveMode, Mt5Config, PaperExecutionConfig, Venue
-from synthetic_trader.domain import Candle, Direction, OrderIntent, TradeOutcome
+from synthetic_trader.domain import Candle, Direction, OrderIntent, TradeOutcome, TradeSignal
 from synthetic_trader.execution.mt5 import (
     Mt5CloseRequest,
     Mt5ModifyRequest,
@@ -27,7 +27,7 @@ from synthetic_trader.journal.signal_feedback import SignalFeedbackTracker, make
 class SubmitResult:
     accepted: bool
     position_id: str | None = None
-    metadata: dict[str, object] | None = None
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ class ShutdownResult:
 class TrackedMt5Position:
     ticket: int
     venue_symbol: str
-    signal: object
+    signal: TradeSignal
     stake: float
     volume: float
 
@@ -192,6 +192,12 @@ class Mt5LiveExecutionBackend:
         return outcomes
 
     def open_positions_count(self) -> int:
+        # Fresh query — the cached submit-time snapshot goes stale the moment
+        # a mid-session close fires (a stop/target close removes the broker
+        # position but not the cached count).  The paper backend counts its
+        # live dict; parity demands the live side count the broker's actual
+        # positions.
+        self._last_sync = self._sync_positions()
         return len(self._last_sync.positions)
 
     def shutdown(self, candle: Candle | None) -> ShutdownResult:
@@ -591,7 +597,7 @@ def build_execution_backend(
     journal,
 ) -> ExecutionBackend:
     if venue is Venue.MT5 and live_mode is LiveMode.ARMED_LIVE:
-        import MetaTrader5  # type: ignore
+        import MetaTrader5
 
         return Mt5LiveExecutionBackend(
             mt5_config=mt5_config,

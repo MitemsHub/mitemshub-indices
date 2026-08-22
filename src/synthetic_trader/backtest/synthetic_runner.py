@@ -26,6 +26,7 @@ Reference:
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -205,7 +206,7 @@ class SyntheticBacktestRunner:
     def run(
         self,
         symbol: str,
-        progress_callback: tuple | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> CurveFittingReport:
         """Run the full synthetic backtest.
 
@@ -243,7 +244,7 @@ class SyntheticBacktestRunner:
             # Fresh model for each episode (prevents cross-contamination)
             model = self.base_model.clone()
             breach_tracker = PropFirmBreachTracker(
-                initial_balance=self.config.paper.initial_balance,
+                initial_balance=getattr(self.config.paper, 'initial_balance', 1000.0),
             ) if self.prop_firm else None
             engine = BacktestEngine(
                 config=self.config,

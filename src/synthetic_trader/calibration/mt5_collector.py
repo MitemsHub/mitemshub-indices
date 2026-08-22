@@ -1,6 +1,6 @@
 """MT5 tick data collector for EGARCH calibration.
 
-Collects real tick data from Blueberry Markets via MT5 IPC connection
+Collects real tick data from Deriv via MT5 IPC connection
 and saves it to CSV for EGARCH parameter fitting.
 
 Usage:
@@ -229,7 +229,7 @@ def collect_ticks_from_mt5(
 
 
 # Symbol mapping: internal name → MT5 venue symbol
-BLUEBERRY_SYMBOL_MAP: dict[str, str] = {
+DERIV_SYMBOL_MAP: dict[str, str] = {
     "SYN50": "SYN50",
     "SYN75": "SYN75",
     "SYN100": "SYN100",
@@ -245,7 +245,7 @@ BLUEBERRY_SYMBOL_MAP: dict[str, str] = {
 }
 
 DERIV_SYMBOL_MAP: dict[str, str] = {
-    # Verified live on the Blueberry Markets MT5 terminal (2026-08):
+    # Verified live on the Deriv MT5 terminal (2026-08):
     # "Volatility 75 Index" / "Volatility 100 Index" do NOT exist on the
     # broker; the real symbols are SYN75 / SYN100 (matches the chart the
     # user trades).  Keep the old names as fallback candidates.
@@ -259,8 +259,8 @@ DERIV_SYMBOL_MAP: dict[str, str] = {
 def get_venue_symbol(symbol: str) -> str:
     """Resolve internal symbol to MT5 venue symbol."""
     upper = symbol.upper()
-    if upper in BLUEBERRY_SYMBOL_MAP:
-        return BLUEBERRY_SYMBOL_MAP[upper]
+    if upper in DERIV_SYMBOL_MAP:
+        return DERIV_SYMBOL_MAP[upper]
     if symbol in DERIV_SYMBOL_MAP:
         return DERIV_SYMBOL_MAP[symbol]
     return symbol  # Pass through as-is
@@ -274,7 +274,7 @@ def fetch_m1_candles(
     terminal_path: str | None = None,
     max_rates: int = 100_000,
 ) -> list[dict[str, float]]:
-    """Fetch closed M1 OHLC candles from the Blueberry MT5 terminal.
+    """Fetch closed M1 OHLC candles from the Deriv MT5 terminal.
 
     Returns candles (each ``{'epoch', 'open', 'high', 'low', 'close'}``)
     ascending by epoch, covering ``[since_epoch, now]``.  The still-forming
@@ -288,7 +288,7 @@ def fetch_m1_candles(
     loop (``data.m1_capture``).  When ``terminal_path`` is omitted, the
     terminal is resolved with the same registry/Program-Files scan the
     live MT5 path uses (``mt5_data._resolve_mt5_terminal_path``) so the
-    Blueberry terminal is preferred over other MT5 installs on the machine.
+    Deriv terminal is preferred over other MT5 installs on the machine.
     """
     try:
         import MetaTrader5 as mt5
@@ -371,9 +371,9 @@ def collect_mt5_candle_history(
 
     Deriv's WebSocket API only serves a rolling ~5000-tick buffer and its
     candle symbols (1HZ75V / 1HZ100V) trade at DIFFERENT price levels than
-    Blueberry Markets instruments (SYN75 / SYN100).  The only correct
+    Deriv instruments (SYN75 / SYN100).  The only correct
     source of multi-day history for the instruments the user actually
-    trades is the Blueberry MT5 terminal itself — ``copy_rates_range``
+    trades is the Deriv MT5 terminal itself — ``copy_rates_range``
     returns server-backed M1 OHLC that goes back days.
 
     The M1 candles are expanded into an OHLC-exact tick stream (4 ticks

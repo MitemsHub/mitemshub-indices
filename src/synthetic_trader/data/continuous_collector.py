@@ -1,11 +1,11 @@
-"""Continuous live tick collection service (Blueberry MT5 terminal).
+"""Continuous live tick collection service (Deriv MT5 terminal).
 
 Deriv synthetic indices (SYN75 / SYN100 — the instruments the user actually
-trades on Blueberry) trade **24/7/365 with no weekend close**, but there is
+trades on Deriv) trade **24/7/365 with no weekend close**, but there is
 one scheduled pause: the **daily rollover** around 00:00 broker server time
 (UTC), typically a short stall while the index resets its epoch counter.
 
-This service collects real ticks continuously from the Blueberry MT5
+This service collects real ticks continuously from the Deriv MT5
 terminal and appends them to the standard tick CSV (``data/backfill/``),
 reusing :func:`append_ticks_csv` so every write is deduplicated against the
 file tail, enriched with derived columns, and pruned at the size cap — the
@@ -14,7 +14,7 @@ already read.
 
 Design:
 
-- **Correct source.** MT5 (Blueberry) only. The Deriv WebSocket fallback
+- **Correct source.** MT5 (Deriv) only. The Deriv WebSocket fallback
   trades at a different price scale (1HZ75V ~7,000 vs SYN75 ~1,500) and
   would corrupt the corpus — so this service refuses to run without a
   reachable terminal.
@@ -24,6 +24,15 @@ Design:
   never trigger reconnect.  Stalls *outside* it warn after
   ``stall_warn_sec`` and force a reconnect after ``stall_reconnect_sec``
   (the terminal may have lost the feed).
+- **Mutual pause with the verify loop.** ``mql5/verify_all.ps1`` writes a
+  marker (``.data/verify_pause.flag``) before it closes the live terminal
+  for tester runs and removes it after restoring it.  While the marker is
+  fresh, the collector stands down completely — no tick polling (the
+  Python client could otherwise attach to the *tester* instance and
+  pollute the corpus with modeled ticks), no stall warnings, no
+  reconnects — and restarts its stall timer on resume.  A marker older
+  than ``VERIFY_PAUSE_STALE_SEC`` is ignored, so a crashed verify
+  self-heals.
 - **Session-safe appends.** ``append_ticks_csv`` dedupes by ``(epoch,
   price)`` against the file tail, so overlapping poll windows and restarts
   never double-write.
@@ -85,6 +94,17 @@ STATUS_INTERVAL_SEC = 10.0
 # errors in the status file.  cwd-relative like the status path.
 MT5_EVENTS_PATH = Path(".data") / "mt5_events.jsonl"
 
+# Mutual pause with the verify loop.  ``mql5/verify_all.ps1`` writes this
+# marker (absolute ``<repo>/.data/verify_pause.flag``) right before it closes
+# the live terminal for tester runs and removes it after restoring it.  While
+# the marker is present and fresh the collector stands down completely — no
+# tick polling (the Python client could otherwise attach to the *tester*
+# instance and pollute the corpus with modeled ticks), no stall warnings, no
+# reconnects.  A crashed verify leaves the file behind, so a marker older
+# than ``VERIFY_PAUSE_STALE_SEC`` is treated as expired and ignored.
+VERIFY_PAUSE_PATH = Path(".data") / "verify_pause.flag"
+VERIFY_PAUSE_STALE_SEC = 7200.0  # a full verify run is <= ~30 min; 2h covers a crash
+
 
 # ── MT5 event telemetry ─────────────────────────────────────────────────
 def _classify_mt5_event(message: str) -> str:
@@ -108,6 +128,29 @@ def _append_mt5_event(kind: str, message: str) -> None:
             f.write(json.dumps({"ts": time.time(), "kind": kind, "message": message}) + "\n")
     except Exception:
         pass
+
+
+def _verify_pause_state(
+    path: str | Path = VERIFY_PAUSE_PATH, now: float | None = None
+) -> str | None:
+    """Return the pauser's ``reason`` while the verify pause is active, else None.
+
+    Active when the marker exists and its ``started`` epoch is newer than
+    ``VERIFY_PAUSE_STALE_SEC`` — a crashed verify run leaves the file behind
+    and the pause must self-heal.  Any malformed/unreadable marker is treated
+    as inactive (fail-open: never let a broken file stand the collector down
+    forever).
+    """
+    if now is None:
+        now = time.time()
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8").strip())
+        started = float(data.get("started", 0))
+        if now - started > VERIFY_PAUSE_STALE_SEC:
+            return None
+        return str(data.get("reason", "verify"))
+    except Exception:
+        return None
 
 DEFAULT_OUTPUT_DIR = "data/backfill"
 
@@ -156,6 +199,10 @@ class CollectorStats:
     last_tick_epoch: float | None = None
     last_price: float | None = None
     errors: list[str] = field(default_factory=list)
+    # Verify-loop mutual pause: non-None while standing down (reason string)
+    # plus cumulative pause time, surfaced in status telemetry.
+    paused_by: str | None = None
+    paused_sec: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -171,6 +218,8 @@ class CollectorStats:
             "last_tick_epoch": self.last_tick_epoch,
             "last_price": self.last_price,
             "errors": self.errors,
+            "paused_by": self.paused_by,
+            "paused_sec": self.paused_sec,
         }
 
     def summary(self) -> str:
@@ -185,6 +234,8 @@ class CollectorStats:
             f"stalls_warned={self.stalls_warned}\n"
             f"last_tick_epoch={self.last_tick_epoch}\n"
             f"last_price={self.last_price}\n"
+            f"paused_by={self.paused_by}\n"
+            f"paused_sec={self.paused_sec:.1f}\n"
         )
 
 
@@ -212,6 +263,7 @@ class TickCollector:
         stall_warn_sec: float = STALL_WARN_SEC,
         stall_reconnect_sec: float = STALL_RECONNECT_SEC,
         rollover: RolloverCalendar | None = None,
+        pause_path: str | Path = VERIFY_PAUSE_PATH,
         log: Callable[[str], None] = print,
     ) -> None:
         self.symbol = symbol
@@ -224,6 +276,8 @@ class TickCollector:
         self.stall_reconnect_sec = stall_reconnect_sec
         self.rollover = rollover or RolloverCalendar()
         self._log = log
+        self._pause_path = Path(pause_path)
+        self._paused_since: float | None = None
         self.output_path = self.output_dir / f"{symbol}_ticks.csv"
         self.stats = CollectorStats(
             symbol=symbol,
@@ -272,6 +326,40 @@ class TickCollector:
                     break
                 if duration_sec is not None and time.time() - started >= duration_sec:
                     break
+
+                # Mutual pause with the verify loop (see VERIFY_PAUSE_PATH):
+                # while verify_all.ps1's marker is fresh, the tester owns the
+                # terminal and the live one is closed.  Stand down completely
+                # — no tick polling (the Python client could attach to the
+                # *tester* instance and pollute the corpus with modeled
+                # ticks), no stall warnings, no reconnects.
+                pause = _verify_pause_state(self._pause_path)
+                if pause:
+                    if self._paused_since is None:
+                        self._paused_since = time.time()
+                        self.stats.paused_by = pause
+                        self._last_tick_wall = None
+                        stall_warned = False
+                        self._log(
+                            f"[collector:{self.symbol}] paused by {pause} "
+                            f"(tester run owns the terminal) - standing down"
+                        )
+                    self.stats.paused_sec = time.time() - self._paused_since
+                    await asyncio.sleep(self.poll_interval_sec)
+                    continue
+                if self._paused_since is not None:
+                    self._log(
+                        f"[collector:{self.symbol}] {self.stats.paused_by} cleared "
+                        f"- resuming collection"
+                    )
+                    self._paused_since = None
+                    self.stats.paused_by = None
+                    self.stats.paused_sec = 0.0
+                    # Restart the stall timer from scratch — the pre-pause
+                    # last-tick age can be hours old and must not trigger an
+                    # immediate stall/reconnect on resume.
+                    self._last_tick_wall = None
+                    stall_warned = False
 
                 try:
                     if mt5_lock is not None:
@@ -369,6 +457,12 @@ def _shutdown_mt5_best_effort() -> None:
         import MetaTrader5 as mt5
 
         mt5.shutdown()
+    except Exception:
+        pass
+    # Clear the symbol resolution cache so symbols are re-resolved on reconnect
+    try:
+        from synthetic_trader.execution.mt5_data import clear_symbol_resolution_cache
+        clear_symbol_resolution_cache()
     except Exception:
         pass
 

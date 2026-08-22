@@ -8,6 +8,7 @@ import os
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from synthetic_trader.backtest.engine import BacktestEngine, load_ticks_csv
 from synthetic_trader.config import LiveMode, Mt5Config, PaperExecutionConfig, TraderConfig, Venue
@@ -172,6 +173,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.10,
         help="per-trade cash fee (old 0.5 default was ~10pct of a $1k-account stake; "
         "0.10 is a realistic retail fee on synthetic indices)",
+    )
+    backtest_vol.add_argument(
+        "--max-consecutive-losses",
+        type=int,
+        default=None,
+        help="override the risk engine's consecutive-loss halt (default 4).  The P10-A "
+        "aligned reference passes 9999 (= off) so the CLI side matches the EA's "
+        "aligned mode, which approves every signal (InpMaxConsecLosses=9999)",
+    )
+    backtest_vol.add_argument(
+        "--max-daily-loss-frac",
+        type=float,
+        default=None,
+        help="override the risk engine's daily-loss halt fraction (default 0.02).  The "
+        "P10-A aligned reference passes 1.0 (= off) to match the EA's aligned mode "
+        "(InpMaxDailyLossPct=1.0)",
     )
     backtest_vol.add_argument("--z-entry", type=float, default=1.5, help="price extension threshold in forecast sigmas")
     backtest_vol.add_argument("--vol-extended-ratio", type=float, default=1.5)
@@ -787,6 +804,11 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
         default=LiveMode.DRY_RUN_LIVE.value,
         choices=[LiveMode.DRY_RUN_LIVE.value, LiveMode.ARMED_LIVE.value],
     )
+    mt5_rollout_check.add_argument(
+        "--armed-live",
+        action="store_true",
+        help="explicit operator confirmation for armed-live mode (recorded as armed_confirmation in the snapshot/artifact)",
+    )
     mt5_rollout_check.add_argument("--mt5-server", required=True)
     mt5_rollout_check.add_argument("--mt5-login", required=True)
     mt5_rollout_check.add_argument("--mt5-password", required=True)
@@ -796,12 +818,34 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
     mt5_rollout_check.add_argument("--journal", help="optional MT5 analytics journal JSONL path")
     mt5_rollout_check.add_argument("--artifact-output", help="optional rollout snapshot JSON output path")
 
+    monitor_dashboard = subparsers.add_parser(
+        "monitor-dashboard",
+        help="live terminal dashboard showing EA state and positions",
+    )
+    monitor_dashboard.add_argument(
+        "--interval", type=float, default=3,
+        help="poll interval in seconds (default: 3)",
+    )
+    monitor_dashboard.add_argument(
+        "--once", action="store_true",
+        help="print one snapshot and exit",
+    )
+    monitor_dashboard.add_argument(
+        "--files-dir", type=str, default=None,
+        help="override MT5 Common Files directory",
+    )
+
     validate_system = subparsers.add_parser(
         "validate-system",
         help="run final validation and benchmarking summary",
     )
     validate_system.add_argument("--symbol", required=True, help="symbol to validate")
     validate_system.add_argument("--artifact-output", help="optional validation JSON output path")
+    validate_system.add_argument(
+        "--armed-live",
+        action="store_true",
+        help="record explicit operator armed-live confirmation in the validation artifact (replayable evidence)",
+    )
 
     backtest_synth = subparsers.add_parser(
         "backtest-synth",
@@ -809,7 +853,7 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
     )
     backtest_synth.add_argument(
         "--symbol", default="SYN100",
-        help="symbol: Deriv (R_75, R_100, V75, V100) or Blueberry (SYN50/75/100, SURGE50/75/100, DROP50/75/100, LEAP50/75/100)",
+        help="symbol: Deriv (R_75, R_100, V75, V100) or Deriv (SYN50/75/100, SURGE50/75/100, DROP50/75/100, LEAP50/75/100)",
     )
     backtest_synth.add_argument("--episodes", type=int, default=20, help="number of independent synthetic datasets")
     backtest_synth.add_argument("--ticks", type=int, default=5000, help="ticks per episode")
@@ -817,7 +861,7 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
     backtest_synth.add_argument("--no-learn", action="store_true", help="disable online learning during backtest")
     backtest_synth.add_argument(
         "--prop-firm",
-        choices=["blueberry_2step", "blueberry_synthetic", "none"],
+        choices=["deriv_2step", "deriv_synthetic", "none"],
         default="none",
         help="enforce prop firm rules during backtest (default: none)",
     )
@@ -825,7 +869,7 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
 
     collect_live = subparsers.add_parser(
         "collect-live-ticks",
-        help="run the continuous live tick collection service (Blueberry MT5 terminal)",
+        help="run the continuous live tick collection service (Deriv MT5 terminal)",
     )
     collect_live.add_argument("--symbols", default="R_75,R_100", help="comma-separated symbols (default R_75,R_100)")
     collect_live.add_argument("--venue-symbol", help="MT5 venue symbol override (auto-detected: SYN75/SYN100)")
@@ -856,6 +900,21 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
     capture_m1.add_argument("--once", action="store_true", help="run a single sweep and exit (cron / Task Scheduler friendly)")
     capture_m1.add_argument("--status-path", default="data/m1_capture.json", help="status JSON output path")
     capture_m1.add_argument("--mt5-terminal-path", help="path to terminal64.exe (auto-detected if omitted)")
+
+    collector_status = subparsers.add_parser(
+        "collector-status",
+        help="check tick collector health (running, data freshness, errors)",
+    )
+    collector_status.add_argument("--watch", action="store_true", help="continuous monitoring mode")
+    collector_status.add_argument("--restart", action="store_true", help="auto-restart collector if dead")
+    collector_status.add_argument("--json", action="store_true", help="output as JSON")
+
+    wfo_scheduler = subparsers.add_parser(
+        "wfo",
+        help="run walk-forward validation and generate performance report",
+    )
+    wfo_scheduler.add_argument("--weekly", action="store_true", help="generate Windows Task Scheduler XML")
+    wfo_scheduler.add_argument("--json", action="store_true", help="output results as JSON")
 
     tick_coverage = subparsers.add_parser(
         "tick-coverage",
@@ -909,7 +968,7 @@ help="breakeven trail for both vol-regime strategies: move the stop to entry "
 
     backfill_mt5 = subparsers.add_parser(
         "backfill-mt5",
-        help="backfill multi-day history from the Blueberry MT5 terminal (M1 rates -> tick CSV). "
+        help="backfill multi-day history from the Deriv MT5 terminal (M1 rates -> tick CSV). "
         "Uses the CORRECT broker symbols (SYN75/SYN100) and price scale, unlike the Deriv API fallback.",
     )
     backfill_mt5.add_argument("--symbol", default="R_75", choices=["R_75", "R_100"])
@@ -953,7 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "collect-history":
-        report = asyncio.run(
+        report: Any = asyncio.run(
             collect_history(
                 symbol=args.symbol,
                 count=args.count,
@@ -1008,7 +1067,7 @@ def main(argv: list[str] | None = None) -> int:
         model = OnlineLogisticModel.load(args.model_load) if args.model_load else None
         ticks = load_ticks_csv(output_path, default_symbol=args.symbol)
         engine = BacktestEngine(config=config, model=model)
-        result = engine.run_ticks(
+        result: Any = engine.run_ticks(
             ticks,
             symbol=args.symbol,
             timeframe_sec=args.timeframe,
@@ -1081,6 +1140,17 @@ def main(argv: list[str] | None = None) -> int:
             execution_penalty_per_trade=args.execution_penalty,
         )
         config = replace(TraderConfig.default(), paper=paper)
+        # Optional risk-halt overrides (P10-A aligned reference): the EA's
+        # aligned mode approves every signal (consecutive-loss and daily-loss
+        # halts disabled), so the CLI reference can be run on the same basis
+        # instead of letting the default 4-streak / 2% halts veto signals.
+        _risk_overrides = {
+            "max_consecutive_losses": args.max_consecutive_losses,
+            "max_daily_loss_fraction": args.max_daily_loss_frac,
+        }
+        _risk_overrides = {k: v for k, v in _risk_overrides.items() if v is not None}
+        if _risk_overrides:
+            config = replace(config, risk=replace(config.risk, **_risk_overrides))
         fade_config = VolReversionConfig(
             z_entry=args.z_entry,
             vol_extended_ratio=args.vol_extended_ratio,
@@ -1248,7 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
             print_gate_backtest_report,
         )
 
-        result = backtest_gate_from_csv(
+        result: Any = backtest_gate_from_csv(
             csv_path=args.csv,
             symbol=args.symbol,
             timeframe_sec=args.timeframe,
@@ -1311,14 +1381,16 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"sweep-vol: ignoring unknown mom-json key {k!r} "
                           f"(expected one of {grid_keys} or 'gate')")
             if isinstance(raw.get("gate"), dict):
+                if "gate_ranges" not in momentum_ranges:
+                    momentum_ranges["gate_ranges"] = {}  # type: ignore[assignment]
                 for gk, gv in raw["gate"].items():
                     if isinstance(gv, (list, tuple)) and len(gv) == 3:
-                        momentum_ranges.setdefault("gate_ranges", {})[gk] = tuple(gv)
+                        momentum_ranges["gate_ranges"][gk] = tuple(gv)  # type: ignore[index]
                     else:
                         print(f"sweep-vol: ignoring invalid gate override {gk!r}")
             elif "gate" in raw:
                 print("sweep-vol: ignoring 'gate' override (expected an object)")
-        report = run_sweep_for_csv(
+        report: Any = run_sweep_for_csv(
             args.csv,
             symbol=args.symbol,
             timeframe_sec=args.timeframe,
@@ -1358,7 +1430,7 @@ def main(argv: list[str] | None = None) -> int:
         symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
         ok = True
         for symbol in symbols:
-            report = revalidate_band_geometry(
+            report: Any = revalidate_band_geometry(
                 symbol=symbol,
                 engine_root=args.engine_root,
                 timeframe_sec=args.timeframe,
@@ -1378,7 +1450,7 @@ def main(argv: list[str] | None = None) -> int:
             run_collector_health,
         )
 
-        report = run_collector_health(
+        report: Any = run_collector_health(
             engine_root=args.engine_root, hours=args.hours
         )
         print_collector_health(report)
@@ -1391,13 +1463,63 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
+    if args.command == "collector-status":
+        from synthetic_trader.scripts.collector_health import run_health_check
+        status = run_health_check()
+        if args.json:
+            import json as json_mod
+            output = {
+                "healthy": status.healthy,
+                "collector_running": status.collector_running,
+                "data_fresh": status.data_fresh,
+                "csv_sizes": status.csv_sizes,
+                "last_tick_age_sec": status.last_tick_age_sec,
+                "errors": status.errors,
+                "warnings": status.warnings,
+            }
+            print(json_mod.dumps(output, indent=2))
+        else:
+            print(status.summary())
+        return 0 if status.healthy else 1
+
+    if args.command == "wfo":
+        from synthetic_trader.scripts.wfo_scheduler import (
+            run_full_wfo,
+            save_report,
+            print_report,
+            generate_task_scheduler_xml,
+        )
+
+        if args.weekly:
+            print(generate_task_scheduler_xml())
+            print("\n# To install:")
+            print("# 1. Save the XML above to wfo_task.xml")
+            print("# 2. Replace PROJECT_ROOT with the actual path")
+            print("# 3. Run: schtasks /create /tn \"SyntheticTraderWFO\" /xml wfo_task.xml")
+            return 0
+
+        # Run WFO
+        results = run_full_wfo()
+        report_path = save_report(results)
+        print(f"\nReport saved to: {report_path}")
+
+        if args.json:
+            import json as json_mod
+            print(json_mod.dumps([r.to_dict() for r in results], indent=2))
+        else:
+            print_report(results)
+
+        # Exit code: 0 = all pass, 1 = any fail
+        any_fail = any(r.verdict == "FAIL" for r in results)
+        return 1 if any_fail else 0
+
     if args.command == "verify-headtohead":
         from synthetic_trader.research.headtohead_verify import (
             print_verify_report,
             run_headtohead_verify,
         )
 
-        report = run_headtohead_verify(
+        report: Any = run_headtohead_verify(
             symbol=args.symbol,
             engine_root=args.engine_root,
             timeframe_sec=args.timeframe,
@@ -1414,7 +1536,7 @@ def main(argv: list[str] | None = None) -> int:
             run_combined_pair,
         )
 
-        report = run_combined_pair(
+        report: Any = run_combined_pair(
             csv_path=args.csv,
             symbol=args.symbol,
             timeframe_sec=args.timeframe,
@@ -1428,7 +1550,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "tune-bands":
         from synthetic_trader.scripts.horizon_forecast_stats import tune_all_multipliers
 
-        report = tune_all_multipliers(args.engine_root)
+        report: Any = tune_all_multipliers(args.engine_root)
         for symbol, symbol_report in report.items():
             if isinstance(symbol_report, dict) and "error" in symbol_report:
                 print(f"symbol={symbol} error={symbol_report['error']}")
@@ -1573,7 +1695,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "walk-forward":
         ticks = load_ticks_csv(args.csv, default_symbol=args.symbol)
-        report = run_walk_forward(
+        report: Any = run_walk_forward(
             ticks=ticks,
             symbol=args.symbol,
             train_ticks=args.train_ticks,
@@ -1612,6 +1734,7 @@ def main(argv: list[str] | None = None) -> int:
             mt5_runtime_status=runtime_status,
         )
         print(f"live_mode={mode.value}")
+        print(f"armed_confirmation={args.armed_live}")
         print(f"readiness_ok={readiness.ready}")
         if readiness.failures:
             print(f"readiness_failures={','.join(readiness.failures)}")
@@ -1714,7 +1837,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         mt5_module = _load_mt5_module() if mode is LiveMode.ARMED_LIVE else None
-        result = execute_supervised_mt5_order(
+        result: Any = execute_supervised_mt5_order(
             mode=mode,
             readiness_ok=readiness.ready,
             request=Mt5OrderRequest(
@@ -1847,7 +1970,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"sync_failures={','.join(sync_result.failures)}")
             return 1
 
-        result = execute_supervised_mt5_close(
+        result: Any = execute_supervised_mt5_close(
             mode=mode,
             readiness_ok=readiness.ready,
             sync_result=sync_result,
@@ -1941,7 +2064,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"reconcile_failures={','.join(reconcile_result.failures)}")
             return 1
 
-        result = execute_supervised_mt5_modify(
+        result: Any = execute_supervised_mt5_modify(
             mode=mode,
             readiness_ok=readiness.ready,
             reconcile_result=reconcile_result,
@@ -1987,7 +2110,7 @@ def main(argv: list[str] | None = None) -> int:
             print("error=invalid_payload:expected_json_object")
             return 1
         payload.setdefault("symbol", args.symbol)
-        record = build_call_record(payload)
+        record: Any = build_call_record(payload)
         append_call_record(Path(args.output), record)
         print(f"symbol={record.get('symbol')}")
         print(f"output={Path(args.output)}")
@@ -2000,7 +2123,7 @@ def main(argv: list[str] | None = None) -> int:
         if not journal_path.exists():
             print(f"error=journal_not_found:{journal_path}")
             return 1
-        # Scoring has NO Deriv fallback: resolve the Blueberry MT5 client or
+        # Scoring has NO Deriv fallback: resolve the Deriv MT5 client or
         # fail loudly (the call levels are SYN-scale; Deriv 1HZ is wrong-scale).
         try:
             client_factory = _resolve_scoring_client_factory()
@@ -2008,7 +2131,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error=scoring_unavailable:{exc}")
             return 1
         now = datetime.fromisoformat(args.now) if args.now else datetime.now(timezone.utc)
-        result = run_score_unresolved_records_from_market(
+        result: Any = run_score_unresolved_records_from_market(
             calls_path=journal_path,
             outcomes_path=Path(args.output),
             now=now,
@@ -2026,8 +2149,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "score-live-loop":
         from synthetic_trader.live.auto_scorer import run_auto_score_loop
 
-        mode = "single sweep" if args.once else f"loop every {args.interval:g}s"
-        print(f"score-live-loop: {mode}")
+        loop_mode = "single sweep" if args.once else f"loop every {args.interval:g}s"
+        print(f"score-live-loop: {loop_mode}")
         print(f"calls_journal={args.calls_journal}")
         print(f"output={args.output}")
         stats = asyncio.run(
@@ -2106,7 +2229,7 @@ def main(argv: list[str] | None = None) -> int:
             else float(os.getenv("SYNTH_EA_VOLUME", "0.2"))
         )
         try:
-            volume *= float(alert.get("size_multiplier") or 1.0)
+            volume *= float(str(alert.get("size_multiplier") or 1.0))
         except (TypeError, ValueError):
             pass
         record = emit_call_from_alert(
@@ -2120,7 +2243,7 @@ def main(argv: list[str] | None = None) -> int:
         if record is None:
             print(
                 f"[emit-ea-call] {args.symbol}: no call emitted — "
-                f"call={alert.get('call')!r} evidence={alert.get('stage3', {}).get('evidence_status') if isinstance(alert.get('stage3'), dict) else None} "
+                f"call={alert.get('call')!r} evidence={getattr(alert.get('stage3', {}), 'get', lambda k, d=None: d)('evidence_status', '')} "
                 f"(use --allow-unproven only for paper/harness runs)"
             )
             if not args.allow_unproven:
@@ -2208,7 +2331,7 @@ def main(argv: list[str] | None = None) -> int:
             symbol=args.symbol,
             app_id=None,
             token=None,
-            armed=False,
+            armed=args.armed_live,
             supported_symbols=set(TraderConfig.default().symbols),
             mt5_config=mt5_config,
             mt5_dependency_ready=mt5_dependency_available(),
@@ -2240,10 +2363,33 @@ def main(argv: list[str] | None = None) -> int:
             mt5_runtime_ready=runtime_status.ready,
             mt5_runtime_failures=runtime_status.failures,
             mt5_venue_symbol=runtime_status.venue_symbol,
+            armed_confirmation=args.armed_live,
         )
         print(render_rollout_status_text(snapshot))
         if args.artifact_output:
             dump_json_file(args.artifact_output, snapshot)
+        # Fail-closed: an armed-live preflight that is NOT ready (missing
+        # --armed-live confirmation, or MT5 runtime not ready) must exit
+        # nonzero so a wrapper script cannot proceed on a stale or
+        # non-consenting artifact.  Other modes stay read-only recorders
+        # (their fail-closed enforcement lives in the paper-live runner).
+        if mode is LiveMode.ARMED_LIVE and not readiness.ready:
+            print(
+                "rollout_exit=1 fail_closed=armed-live-readiness-failed "
+                f"reasons={','.join(readiness.failures)}"
+            )
+            return 1
+        return 0
+
+    if args.command == "monitor-dashboard":
+        from synthetic_trader.live.dashboard import run_dashboard
+
+        files_dir = Path(args.files_dir) if args.files_dir else None
+        run_dashboard(
+            interval=args.interval,
+            once=args.once,
+            files_dir=files_dir,
+        )
         return 0
 
     if args.command == "validate-system":
@@ -2258,6 +2404,7 @@ def main(argv: list[str] | None = None) -> int:
             venue=Venue.DERIV.value,
             mode=LiveMode.PAPER.value,
             live_summary=summary,
+            armed_confirmation=args.armed_live,
         )
         print(render_validation_text(snapshot))
         if args.artifact_output:
@@ -2268,15 +2415,15 @@ def main(argv: list[str] | None = None) -> int:
         from synthetic_trader.backtest.synthetic_runner import SyntheticBacktestRunner
         from synthetic_trader.backtest.synthetic_generator import (
             SyntheticIndexConfig,
-            BLUEBERRY_INDICES,
+            DERIV_INDICES,
         )
         from synthetic_trader.backtest.synthetic_validation import validate_synthetic_data
 
         # Auto-detect broker from symbol
         symbol_upper = args.symbol.upper()
-        if symbol_upper in BLUEBERRY_INDICES:
-            gen_config = SyntheticIndexConfig.from_blueberry(symbol_upper)
-            broker_label = "Blueberry Markets"
+        if symbol_upper in DERIV_INDICES:
+            gen_config = SyntheticIndexConfig.from_deriv(symbol_upper)
+            broker_label = "Deriv"
         elif symbol_upper.startswith("R_") or symbol_upper.startswith("V"):
             gen_config = SyntheticIndexConfig.from_deriv(symbol_upper)
             broker_label = "Deriv"
@@ -2296,9 +2443,9 @@ def main(argv: list[str] | None = None) -> int:
         from synthetic_trader.backtest.synthetic_generator import SyntheticPriceGenerator
         gen = SyntheticPriceGenerator(config=gen_config, seed=args.seed)
         sample_ticks = gen.generate_ticks(min(1000, args.ticks))
-        validation = validate_synthetic_data(sample_ticks)
-        print(f"data_validation={validation.summary}")
-        for t in validation.tests:
+        synth_validation = validate_synthetic_data(sample_ticks)
+        print(f"data_validation={synth_validation.summary}")
+        for t in synth_validation.tests:
             status = "PASS" if t.passed else "FAIL"
             print(f"  {status} {t.name}: {t.description}")
         print()
@@ -2326,7 +2473,7 @@ def main(argv: list[str] | None = None) -> int:
             config_override=gen_config,
             prop_firm=prop_firm,
         )
-        report = runner.run(args.symbol)
+        report: Any = runner.run(args.symbol)
         print(runner.render_report(report))
 
         if args.artifact_output:
@@ -2347,7 +2494,7 @@ def main(argv: list[str] | None = None) -> int:
             if value:
                 os.environ[key] = value
 
-        results = asyncio.run(
+        results: Any = asyncio.run(
             collect_live_ticks(
                 symbols,
                 output_dir=args.output_dir,
@@ -2368,9 +2515,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.mt5_terminal_path:
             os.environ["SYNTHETIC_MT5_TERMINAL_PATH"] = args.mt5_terminal_path
 
-        mode = "single sweep" if args.once else f"loop every {args.interval:g}s"
-        print(f"capture-m1: {mode} for {', '.join(symbols)}")
-        results = asyncio.run(
+        capture_mode = "single sweep" if args.once else f"loop every {args.interval:g}s"
+        print(f"capture-m1: {capture_mode} for {', '.join(symbols)}")
+        results: Any = asyncio.run(
             run_m1_capture_loop(
                 symbols,
                 output_dir=args.output_dir,
@@ -2394,7 +2541,7 @@ def main(argv: list[str] | None = None) -> int:
         # The coverage report uses arrow glyphs (→) that crash cp1252 consoles;
         # same reconfigure fix as run_wfo.py.
         try:
-            sys.stdout.reconfigure(encoding="utf-8")
+            sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
         except Exception:
             pass
         from synthetic_trader.scripts.tick_coverage_stats import (
@@ -2405,11 +2552,11 @@ def main(argv: list[str] | None = None) -> int:
         symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
         timeframes = [int(x) for x in args.timeframes.split(",") if x.strip()]
         horizons = [float(x) for x in args.horizon_hours.split(",") if x.strip()]
-        report = build_coverage_report(
+        report: Any = build_coverage_report(
             symbols,
             engine_root=args.engine_root,
-            timeframes=timeframes,
-            horizon_hours=horizons,
+            timeframes=tuple(timeframes),
+            horizon_hours=tuple(horizons),
         )
         if args.json:
             print(report.to_json())
@@ -2425,7 +2572,7 @@ def main(argv: list[str] | None = None) -> int:
             render_report,
         )
 
-        report = check_task_health(
+        report: Any = check_task_health(
             args.engine_root,
             flat_hours=args.flat_hours,
             task_stale_hours=args.task_stale_hours,
@@ -2451,7 +2598,7 @@ def main(argv: list[str] | None = None) -> int:
         print()
 
         try:
-            result = collect_ticks_from_mt5(
+            result: Any = collect_ticks_from_mt5(
                 symbol=args.symbol,
                 venue_symbol=venue_sym,
                 duration_sec=args.duration,
@@ -2472,8 +2619,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "backfill-mt5":
         from synthetic_trader.calibration.mt5_collector import collect_mt5_candle_history
 
-        print(f"Backfilling {args.symbol} ({args.days:g} days) from Blueberry MT5 terminal...")
-        result = collect_mt5_candle_history(
+        print(f"Backfilling {args.symbol} ({args.days:g} days) from Deriv MT5 terminal...")
+        result: Any = collect_mt5_candle_history(
             symbol=args.symbol,
             days=args.days,
             output_path=args.output,
@@ -2493,7 +2640,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Input: {args.csv}")
         print()
 
-        result = calibrate_from_ticks_csv(
+        result: Any = calibrate_from_ticks_csv(
             csv_path=args.csv,
             symbol=args.symbol,
         )
@@ -2591,7 +2738,7 @@ def _build_mt5_config(args: argparse.Namespace) -> Mt5Config:
 
 
 def _load_mt5_module():
-    import MetaTrader5  # type: ignore
+    import MetaTrader5
 
     return MetaTrader5
 

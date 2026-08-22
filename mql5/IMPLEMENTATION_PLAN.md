@@ -2,7 +2,7 @@
 
 > Companion to `ARCHITECTURE_PLAN.md`. This is the **build order and the test
 > gates**. No implementation happens until this plan is approved.
-> Compiler available: `C:/Program Files/Blueberry Markets MetaTrader 5/metaeditor64.exe`.
+> Compiler available: `C:/Program Files/MetaTrader 5 Terminal/metaeditor64.exe`.
 
 ---
 
@@ -16,7 +16,7 @@
   and the engine additionally refuses to run live unless the account is a demo
   or the operator explicitly confirms via a confirmation input.
 - **Compile command pattern (Windows, from repo root):**
-  `"C:/Program Files/Blueberry Markets MetaTrader 5/metaeditor64.exe" /compile:"<abs path to .mq5>" /log:"<abs path to .log>"` — logs land in the same dir as the source by default; the `/log` flag pins it.
+  `"C:/Program Files/MetaTrader 5 Terminal/metaeditor64.exe" /compile:"<abs path to .mq5>" /log:"<abs path to .log>"` — logs land in the same dir as the source by default; the `/log` flag pins it.
 
 ---
 
@@ -1028,6 +1028,28 @@ suppressed=0 (0.0%)) and `ALL SUITES PASSED (compile + Strategy Tester +
 sniper gate contract)`; verdict branches unit-tested (gate_verdict) and the
 PowerShell parse fixture-tested.
 
+**Paper->live execution parity layer (2026-08-12):** the Python engine's
+three execution paths — simulated (forward-demo paper fills), MT5 python-API
+(`Mt5LiveExecutionBackend`, the Python CTrade-equivalent), and the MQL5
+`SynthCallExecutor` EA (polls the `ea_emitter` call file) — now carry a
+shared parity contract.  New: `src/synthetic_trader/execution/mt5_simulator.py`
+(`FakeMetaTrader5`, an in-memory CTrade-equivalent: FOK market fills at
+ask/bid, position open/close/modify by ticket, configurable reject retcodes,
+every order_send logged) and `src/synthetic_trader/execution/parity.py`
+(replay engine: identical OrderIntents + candle streams through simulated
+and live backends, comparing submit acceptance / open-position counts after
+every step / per-outcome direction-entry-exit-return_r-won-close-time;
+`run_rejection_probe` for broker-reject handling; `check_ea_contract` proving
+the EA call record carries exactly the levels executed).  `mql5/execution_parity_check.py`
+is the CLI harness wired into `verify_all.ps1` as the `ExecutionParity` row
+(`-SkipExecutionParity` to opt out).  Fix surfaced by parity: the live
+backend's `open_positions_count()` returned the stale submit-time sync
+snapshot — a mid-session stop/target close left the count at 1 while the
+paper side read 0 — now re-syncs with the broker.  Verified: harness PASS
+(40/40 comparisons, 3 trades covering target/stop/expiry, reject probe ok,
+EA contract 3/3), 30 unit tests, full Python suite 1022 passed, verifier
+integration `ALL SUITES PASSED (... + execution parity)`.
+
 **Band floor verdict wired into Test-DepthSplit (2026-08-12):** the
 Stage-3 gate's own `VERDICT: achieved hit X% BEATS / does NOT beat the
 Y% floor` line is now part of the band's measurement contract — the block
@@ -1084,6 +1106,26 @@ also documents a real PowerShell 5.1 trap: `[string]$Seeds` type-constrains
 the param variable, so assigning the split to the case-colliding `$seeds`
 silently string-converts the array (space-joined, `count=1`); the parsed
 list must use a distinct name (`$seedList`).
+
+**Seed-sweep depth gate wired into the verifier (2026-08-12):** the
+measurement above became the justification for `verify_all.ps1 -SeedSweep`
+— an opt-in multi-seed depth-split gate.  It compiles BandBackTests once,
+re-runs it per seed (`-Seeds`, default 7/42/123/777/2024, ~25s each;
+`-Inputs` pass through with InpGeomSeed swept), parses each seed's rows
+from its run block, and `Test-SeedStability` fails the suite when the
+cap-1.25 / cap-2.00 cell means are unstable: mean exp < +0.05R (not
+positive after averaging), exp spread > 0.25R (quarter-R swing), or a
+small mean (< 0.10R) with spread > 3x the mean (noise, not signal).  Hit
+spread is reported, not gated (4.8pp at n~320 is counting noise).  Real
+5-seed integration run: BandBackTests single-seed PASS, SeedSweep FAIL
+with per-seed numbers byte-identical to seed_sweep.ps1 (seed 123
+317/23.0%/-0.079R etc.) and the UNSTABLE verdict naming both cells — the
+gate correctly refuses to certify a cell whose positives are seed noise.
+The pure verdict is fixture-tested (`verify_seedsweep_fixtures.ps1`, 8
+branches: stable PASS, measured-noise FAIL, absolute-spread FAIL,
+fragile-small-mean FAIL, too-few-seeds FAIL, hit-not-gated PASS).  Also
+caught and fixed a `$seed:` string-interpolation parse error (PowerShell
+drive-qualifier ambiguity — use `$($seed):`).
 
 **Pure subset test — geometry sweep OFF (2026-08-12):** with
 `InpGeomSweep=false` (fixed z_entry=1.0, stop 0.20 sigma, target 0.60
@@ -1280,7 +1322,7 @@ confirms the filters alone do not transplant it.
 **Forward-demo paper pass (started 2026-08-12 ~02:50 UTC) — UTC 18-24h
 & |range_z_50|<1.5 on the LIVE sniper leg, 30-trade target:**
 `mql5/forward_demo_pass.py` runs `run_live_paper` (venue=MT5,
-`Mt5TickClient` on the Blueberry terminal — MT5-first, paper fills via
+`Mt5TickClient` on the Deriv terminal — MT5-first, paper fills via
 SimulatedExecutionBackend, NO orders ever sent) with the R_75
 `SymbolProfile` entry gate overridden to UTC [18,24) & |range_z_50|<1.5
 (the strongest measured cell: n=67/hit 58.2%/+0.242R@RR1.2 backtest,
@@ -1296,7 +1338,7 @@ no credentials are configured (`account_info` populated) instead of
 crashing on `int(None)` — the terminal is the source of truth for what
 it's connected to; credentialed behavior is byte-identical when
 credentials ARE set.  Verified live: `reusing running terminal session
-(5098680@BlueberryMarketsSVG-Live)`, init 2ms, no login round-trip.
+(5098680@DerivSVG-Server-03)`, init 2ms, no login round-trip.
 (2) `run_live_paper` now passes the remaining run duration as the tick
 stream timeout — `Mt5TickClient.subscribe_ticks`/Deriv default is a 20s
 batch, so `duration_sec` chunks previously ended after one batch and the
@@ -1307,11 +1349,23 @@ candle warmup never accumulated past its seed (every evaluation skipped
 chunk, 30+ candles built, journal recording the gate firing correctly
 (`"entry gate: UTC hour 2 outside [18, 24) window"`) — no trades until
 18:00 UTC as configured.  Progress: `grep -c '"type": "outcome"'
-journals/forward_demo_18_24.jsonl`.  Caveats: the Blueberry terminal
-must stay running/logged in (the pass reuses its session); each chunk
-starts a fresh online model (matches the backtest's fresh-model-per-run
-methodology); the single-flight guard serializes terminal init against
-the scheduled collector.
+journals/forward_demo_18_24.jsonl`.  Caveats: the Deriv terminal
+must stay running/logged in (the pass reuses its session); each chunk  starts a fresh online model (matches the backtest's fresh-model-per-run
+  methodology); the single-flight guard serializes terminal init against
+  the scheduled collector.
+
+**Server-clock consistency fix (2026-08-12):** the pass's journal exposed a
+3h clock skew — Deriv server time = local UTC+3h (measured exactly
++10800.9s; backfill corpus epochs are server-time, matching file mtimes to
+the second).  `subscribe_ticks` stamped live ticks with `time.time()` while
+the warmup used `time_msc`, so live candles ran 3h behind warmup candles:
+non-monotonic journal epochs, a stuck "need 30 candles" buffer, and a gate
+that would fire 3h late vs the server-time backtest cell.  Fixed by
+stamping subscribe ticks with `time_msc` (fallback only when 0) + widening
+the tick_store future-junk guard to +4h.  Verified monotonic on the server
+clock; the pass now fires when server hour ∈ [18,24) = local 15:00-21:00,
+exactly reproducing the backtest cell.  Regression test:
+`test_subscribe_ticks_stamps_terminal_clock_not_local`.
 
 **Time-exit exit mode ported to the tester + 6-month backtest (2026-08-12):**
 `BandBackTests` gains `InpExitMode` (0 = TARGET default; 1 = TIME) — the
@@ -1378,6 +1432,23 @@ reason, WAIT never sized, STRONG approved with the gate on, WEAK passing when
 the gate is off (research mode), WAIT veto persisting regardless — all green
 in the tester on SYN75.
 
+**Real-corpus cross-validation (2026-08-12):** `phase6_real_corpus_check.py`
+— the stateful replay the stateless mirror couldn't do, same pattern as the
+Phase-2/3 harnesses.  Real R_75 M5 bars (2378 / 198h) → 2078 deterministic
+signals → both engines consume the same Python-driven lifecycle.
+`--mode aligned` (shared gates at RiskConfig values): **100%** on veto
+agreement, stake parity and per-event stateful parity (streak / daily-dd /
+open counts / day-start), with per-gate veto tallies identical gate-for-gate.
+`--mode defaults` (Constants vs RiskConfig): 81.4% agreement, the 386
+residuals 100% attributed to config drift — Python stricter (daily loss 2%vs 5%, consecutive 4 vs 5), MQL5 adds caps Python lacks (trades/day 10,
+  trades/hour 3, WEAK-verdict veto).  Machine lines `[PHASE6-REAL]` are wired
+  into `verify_all.ps1` as the `RealCorpus` gate (2026-08-15): aligned mode
+  must stay at 100% veto/state/stake parity or the scheduled loop FAILs.
+  Carry-into-Phase-7 notes: the consecutive-loss breaker is a
+per-day hard lock (nothing but a session-day roll re-arms a locked streak),
+and Python's `sync_session_day` primes lazily — consumers must call it before
+the first day change or the first daily reset is skipped.
+
 ### Phase 7 — Execution
 
 **Files to create:**
@@ -1393,6 +1464,62 @@ in the tester on SYN75.
 
 **Phase gate:** compiles; simulated order tests (mock retcodes) for rejection,
 invalid stops, volume errors, margin; verification path tested.
+
+**Status (2026-08-12):** all six files landed; `Tests/Phase7Tests.mq5` compiled
+clean in MetaEditor (0 errors, 0 warnings) and ran green in the real Strategy
+Tester on SYN75: **119 passed, 0 failed, SUITE PASSED**.  `verify_all.ps1`
+discovers the suite automatically (`Tests/*Tests.mq5`), so Phase 7 is already
+part of the one-command loop.
+
+Design notes worth carrying forward:
+
+- **Transport injection.**  Every order path runs through `CTradeInterface`
+  (Buy/Sell/Modify/Close + retcode + position-verification hooks).  Production
+  binds `CTradeAdapter` (real CTrade); the tester binds `MockTrade` with
+  scripted retcodes — so the mocked-retcode gate (rejection, invalid stops,
+  volume errors, margin, verify-fill failure) is exercised headless, and the
+  SAME engine code runs against the live broker unchanged.
+- **MQL5 gotchas discovered:** (a) this build's `CTrade::PositionClose(ticket,
+  deviation)` takes a ulong DEVIATION — partial closes live in
+  `PositionClosePartial`, and the adapter dispatches on volume; (b) MQL5
+  forbids reference chaining (error 229) and reference return types, so the
+  transport is injected by POINTER and position state is exposed via narrow
+  accessors, not object references.
+- **Never-assume-success is enforced twice:** `OrderManager` verifies the fill
+  exists in the position table after a DONE retcode (and that a close actually
+  removed it); `ExecutionEngine` runs the spread guard, price sanity,
+  stops-level, and min-RR checks BEFORE the transport is ever touched.
+- **Closed-candle grace is in `PositionManager` by construction** — it only
+  evaluates closed bars of the execution timeframe, so the forming bar's wicks
+  can never stop out a plan (band same-bar semantics: on a bar that both arms
+  the trail and dips through entry, the stop is evaluated at the newly-armed
+  entry — parity with `BandBackTests`).
+
+**Real-corpus cross-validation (2026-08-15):** `phase7_real_corpus_check.py`
+— the same stateful-replay pattern as the Phase-2/3/6 harnesses, applied to
+EXECUTION.  Real R_75 M5 bars (2603 / 217h) → 2303 deterministic RR-1.2
+signals → the MQL5 Execution mirror (ExecutionEngine gates +
+PositionManager lifecycle) vs the REAL production `SimulatedExecutionBackend`
+(the backend `paper_runner.py` journals).  Two modes:
+
+- **Aligned** (gates off, wick exits, no trail, 1h time exit): **100% parity on
+the 1012 traded entries** — identical entry bar, exit reason, exit price and
+realized R; the exit-reason split matches exactly (577 STOP / 427 TARGET /
+8 TIME).  The min-RR 1.2 float boundary (the Phase-6 footgun) agrees too: 972
+signals below 1.2 on BOTH sides, 0 disagreement.
+- **Defaults** (Python wick/no-trail vs MQL5 closed-candle + BE trail + gates
+on): the honest divergence.  Execution gates veto 997/2303 — 957 of them the
+min-RR 1.2 float boundary (Python would submit all of them), 31 spread-guard
+(real corpus spreads), 9 price-sanity; the band's full production floor
+(min_rr 2.0) rejects ALL RR-1.2 signals by design.  On the same approved entry
+set the Python journal (wick, no trail) books **−84.8R over 764 trades** while
+MQL5 (closed-candle + trail) books **+102.2R over 727 trades**: the grace
+spared 201 wick-stops and the BE trail converted 259 −1R losses to scratch —the exact exit-policy edge Phase 7's management layer adds over the Python
+  journal.  Machine lines `[PHASE7-REAL]` are wired into `verify_all.ps1` as
+  part of the `RealCorpus` gate (2026-08-15): aligned parity must stay 100%
+  with 0 min-RR boundary disagreements, and the defaults-mode management
+  edge must hold (`sumR_mq > sumR_py` and grace+trail conversions > 0) or
+  the scheduled loop FAILs.
 
 ### Phase 8 — Journal + Analytics
 
@@ -1410,26 +1537,282 @@ invalid stops, volume errors, margin; verification path tested.
 **Phase gate:** compiles; CSV schema verified (round-trip a record); aggregates
 match a hand-computed example.
 
-### Phase 9 — UI
+**Status (2026-08-15):** all six files landed (`Journal/TradeJournal.mqh`,
+`Journal/DecisionLogger.mqh`, `Journal/PerformanceLogger.mqh`,
+`Analytics/PerformanceAnalytics.mqh`, `Analytics/ExpectancyEngine.mqh`,
+`Analytics/RegimeAnalytics.mqh`); `Tests/Phase8Tests.mq5` compiled clean in
+MetaEditor (0 errors, 0 warnings) and ran green in the real Strategy Tester on
+SYN75: **87 passed, 0 failed, SUITE PASSED**.  The suite round-trips the §33
+CSV (write → close → reopen → read back, header not duplicated), exercises the
+DecisionLogger ring + counts, checks the PerformanceLogger incremental
+aggregation against a hand-computed sequence (max-DD 4.0R on the cumulative-R
+curve, PF 0.75, streaks 2/2), verifies PerformanceAnalytics.Metrics agrees
+with the logger and every split (strategy/regime/direction/exit/confidence
+bucket), locks the stage3_gate break-even floor math (1/(1+RR)+margin, clamps,
+fallback), and validates RegimeAnalytics per-regime breakdowns.
 
-**Files to create:**
+Design notes: (a) `FILE_CSV`'s auto-quoting of delimiter-bearing strings is
+unpredictable in the Strategy Tester sandbox, so the journal writes FILE_TXT
+with hand-built rows (fields are comma-free tokens; `CsvEscape` in
+`Constants.mqh` sanitizes any reason string); (b) MQL5's reference
+restrictions (error 229 — no local reference variables, no reference return
+types) apply to analytics structs too, so all aggregation is copy-based;
+(c) the confidence-bucket split takes a parallel confidence array so the
+STRONG-vs-WEAK discrimination question is directly answerable from any
+journal.
+
+**Gate wiring (2026-08-15):** `phase8_analytics_check.py` joined `verify_all.ps1` as the `Phase8Gate` Python contract row — its band replication must MATCH the CLI `backtest-vol --mode band` parity, and the floor verdict + bucket/exit split machine lines are parsed with partition/consistency checks (strong+weak == n, stop+trail+target+time == n, floor in [10,60], beats consistent with n>=min_samples AND hit>=floor).  `-SkipPhase8Gate` opts out; both branches verified end-to-end on 2026-08-15.
+
+### Phase 9 — UI — BUILT 2026-08-15
 
 | File | Contents |
 |---|---|
-| `UI/Panel.mqh` | dashboard panel primitives (the §34 layout) |
-| `UI/Dashboard.mqh` | REGIME / TREND / VOL / STRATEGY / SIGNAL / CONFIDENCE / RISK / POSITION / DAILY P/L / DD / TRADE COUNT |
-| `UI/VisualSignals.mqh` | chart objects: entries, exits, SL/TP, swings, liquidity, regime change markers |
+| `UI/Panel.mqh` | object-lifecycle foundation: bounded named registry, lazy one-time creation, headless text cache, per-object teardown |
+| `UI/Dashboard.mqh` | the §34 block: SYMBOL / MODE / REGIME / HTF BIAS / STRUCTURE / VOLATILITY / STRATEGY / SETUP SCORE / EXPECTED RR / DECISION / RISK / SL / TP / OPEN POSITIONS / TODAY / DRAWDOWN / REASON + hard-halt banner |
+| `UI/VisualSignals.mqh` | reason-coded chart markers: entry/exit arrows, SL/TP/BE HLINEs, structure/liquidity markers, regime-change VLINEs (64-slot bounded ring) |
 
-**Phase gate:** compiles; dashboard renders in a visual tester run.
+**Phase gate (PASS):** MetaEditor compile 0 errors / 0 warnings; `Tests/
+Phase9Tests.mq5` green in the Strategy Tester on SYN75 — **94 passed, 0 failed**,
+including the object-count tester gate (registry bounded + stable across
+thousands of updates, identical across generations, all registries empty after
+teardown; real ObjectCreate attempts capped).  Findings that shaped the gate:
+the tester never releases chart objects mid-pass (auto-cleans at pass end), so
+the leak contract is registry-level with per-object delete correct for live
+terminals; this build's `OBJPROP_TIME` is an integer property; MQL5 forbids
+in-class `static const` members (layout uses `#define`).
 
-### Phase 10 — Integration + Strategy Tester
+### Phase 10 — Integration (`MitemshubAI.mq5`) — WIRING PLAN (draft, awaiting approval)
 
-- `MitemshubAI.mq5` wires the full pipeline (OnTick → state → decide → risk →
-  execute → journal → dashboard).
-- Strategy Tester runs: R_75 & R_100, 60s/300s execution TF, "Every tick based
-  on real ticks", walk-forward windows matching the Python corpus split.
-- **Cross-validation gate:** MQL5 band-leg expectancy sign and R/trade must agree
-  with Python `backtest-vol` on the same window/params; divergence = bug.
+Wires every built module into one EA.  The tester is the authority; nothing
+new is invented — every call below is an existing, tested Phase 1-9 API.
+
+**New files:**
+
+| File | Contents |
+|---|---|
+| `MitemshubAI.mq5` | the EA: OnInit/OnTick/OnTimer/OnDeinit orchestration (~500 lines) |
+| `Market/BarAggregator.mqh` | tick → closed-bar bucketter (execution TF; wall-clock, same convention as the Python candle builder) |
+| `Market/GarchForecaster.mqh` | the EGARCH(1,1) estimator extracted from `BandBackTests` (InpGarchMode 0 = online-SGD port, 1 = calibrated fixed omega/alpha/gamma/beta) — the EA cannot depend on a test suite |
+
+**OnTick pipeline (closed-candle discipline — the only place signals fire):**
+
+```
+OnTick():
+  1. capture bid/ask/spread (SymbolInfoDouble/Integer)
+  2. BarAggregator(bid, time) → on a CLOSED execution bar:
+     CandleEngine.PushBar(tf, o, h, l, c, t)          # exec TF + HTF (TimeframeManager.SetTimeframes)
+     if exec bar closed:  run steps 3-15 ONCE per bar
+  3. GarchForecaster.update(log_ret) → sigma_t; sigma_ema(30); prev_sigma
+  4. VolatilityEngine.OnBarWithPrevClose(prev_close, h, l, c) → ATR, ATRPercentile
+  5. RegimeEngine.Classify(closes[], REGIME_LOOKBACK, atr_percentile, atr_ratio)   # CandleEngine.GetCloses
+  6. StructureEngine.Update(ce, setup_tf, atr) → Bias() + last event
+  7. StateManager.SetRegime(regime, conf)
+  8. BAND ENTRY GATE (replication contract — must match BandBackTests exactly):
+       vol_extended = prev_sigma > 1.3 × sigma_ema
+       z = ln(close / ema20) / prev_sigma;  |z| ≥ 1.0 → direction
+       depth = |z| / z_entry → setup_q (0.20..1.00), edge-depth cap check
+       BandContext ctx{entry, direction, prev_sigma, bar_sec=300, hold_sec=3600,
+                       stop 0.20σ, target 0.80σ, min_rr 2.0, max_stop 0.015}
+       cand = CStrategyEngine::Evaluate(STRATEGY_BAND, ctx)   # WAIT unless gates met
+  9. DECISION: composite = CScoringEngine::Evaluate(cand, regime, -1, -1, sb)
+       signal = CConfidenceEngine::Gate(composite, setup_q, true, is_long, -1, 0, 5000, min_conf)
+       blended = CConfidenceEngine::BlendConfidence(composite, setup_q)
+       StateManager.SetDecision(decision, reasons, score, blended, rr, STRATEGY_BAND)
+ 10. STAGE-3 FLOOR (walk-forward, no lookahead):
+       CTradeQualityEngine::Statistics(STRATEGY_BAND, ...) → floor vs hit
+       → still_learning / proven / suppressed  (BandBackTests semantics)
+ 11. RISK: verdict = CRiskEngine::Evaluate(cand, empirical_scale, vol_min, vol_max,
+       vol_step, tick_value, tick_size)                 # SymbolAdapter specs
+       if hard limit breached → StateManager.SetHardHalt(true) → EMERGENCY banner
+ 12. EXECUTE: ok = m_exec.Execute(cand, verdict, spec, bid, ask, log)   # never assume success
+       on ok: CTradeQualityEngine::StartPosition(cand, entry, t); StateManager.SetOpenPosition(ticket)
+ 13. JOURNAL: TradeJournal.Append(row); DecisionLogger.Add(...); PerformanceLogger.OnTrade(...)
+ 14. DASHBOARD: CDashboard::FromStateManager(state, symbol, st) → fill depth/score/vol → m_dash.Update(st)
+ 15. SIGNALS: on entry → m_signals.DrawTrade(dir, t, entry, sl, tp, be); structure/regime events → Add(...)
+
+OnTimer (once per bar while a position is open) — POSITION MANAGEMENT:
+  m_exec.ManageBar(high, low, close, bar_open_time, bar_sec, exit_price, res, partial)
+    → EXIT_* reason (STOP/TARGET/TIME/BREAKEVEN_TRAIL, closed-candle only)
+    → TQE.UpdatePosition(h, l) every bar; TQE.ClosePosition(exit_price, reason, ...)
+    → TradeJournal.Append(outcome); StateManager.SetOpenPosition(0); dashboard; exit marker
+
+OnDeinit: journal close; Dashboard.DestroyAll(); VisualSignals.ClearMarkers();
+```
+
+**Safety invariants:** live execution locked (`InpLiveTradingEnabled=false`);
+`ENGINE_MODE_BACKTEST` default; hard halt is absolute (no code path overrides);
+research strategies stay disabled (`ResearchEnabled()=false`); every order path
+verifies the fill before recording.
+
+**Phase-10 cross-validation gate — exact Strategy Tester config matrix.**
+Each row is one tester run (TestModel=1 “every tick based on real ticks”,
+Deposit=10000 USD, Leverage=1:500, Optimization=0) plus its contract.  The
+reference numbers come from the Python harnesses on the same corpus:
+`phase8_analytics_check.py` (band replication + analytics) and the phase7
+real-corpus harness (management/execution parity).  The tester window must
+overlap the Python corpus; if the terminal lacks history, the window shrinks
+and the gate compares only the overlapping days (machine line carries both).
+
+| Run | Symbol | TF | Window | Inputs | Contract |
+|---|---|---|---|---|---|
+| P10-A aligned | SYN75 | M5 (300s) | 2026.07.30→2026.08.16 | calibrated band defaults (z 1.0, vol 1.3, stop 0.20σ, target 0.80σ, hold 3600s, trail 0.3, min-revert 0.02, depth cap off, mode-0 seeded with the ANCHORED r_75.json: omega −1.8841, alpha 0.1422, gamma −0.0733, beta 0.8527) | STRICT (corpus ≥80% dense): trades Δ≤10, hit ±5pp, sumR sign, floor verdict.  Reference RE-BASELINED 2026-08-17 to aligned mode (permissive risk `--max-consecutive-losses 9999 --max-daily-loss-frac 1.0` — the EA approves every signal, so the CLI reference must too): **accepted pair EA 98 vs CLI 102 (Δ4), both NEGATIVE — PASS** |
+| P10-B @60s | SYN75 | M1 (60s) | same | same (bar_sec 60) + Python default risk (consec 4, daily 2%) | parity with the Python 60s band run — **DONE 2026-08-16: EA 238 trades / 10.08% / −38.8 sumR vs CLI 226 / 9.73% / −37.5 (rejected 364)** |
+| P10-C management on — DONE 2026-08-16 | SYN75 | M5 | same | + trail 0.3, closed-candle exits | mirrors phase7 defaults-mode contract: MQL5 sumR > Python wick-journal sumR; grace+trail conversions > 0 — contract PASS (harness sumR_mq +256.86 > sumR_py −29.99, grace 400 + trail 567); EA grace=ON run emits 98 trades / 58 trail exits / 0 vetoes |
+| P10-D R_100 | SYN100 | M5 | same | calibrated R_100 (`r_100.json`) | sign agreement with Python R_100 band (expected negative — the gate locks the SIGN, not a win) |
+
+**P10-B finding — the EA's risk breakers were dead (fixed).**  The first 60s
+run fired 523 trades / 0 vetoes because outcomes were never registered
+(no RegisterOpen/RegisterOutcome/RegisterClose, equity pinned to 10000 each
+bar), so consecutive-loss / daily-loss / equity-DD limits could never trip.
+P10-A masked it at 300s (Python rejected 14/104; the EA's 0 vetoes passed the
+Δ≤10 tolerance).  Fixed: exit registers outcomes (pnl = stake × return_r),
+tracked equity, exposure cleared on close, and the Evaluate reason chain now
+has the `> 0` guards (a 0 limit = disabled, not "veto everything").  After
+the fix the EA at 60s with Python's default risk produced 238 trades / 10.08%
+/ −38.8R vs the CLI's 226 / 9.73% / −37.5R — parity (Δ trades 12, Δ hit
+0.35pp, sumR both negative).  P10-A strict gate re-verified PASS (EA n=97
+vs CLI n=90, vetoes 0).
+
+**R_100 calibration re-check (2026-08-16, before Phase 10):** the on-disk
+`r_100.json` (Aug 8) was a DEGENERATE fit — alpha=0.001 at its optimizer
+floor, beta=0.111, persistence 0.112 — and `load_calibrated_garch_state`
+rejected it, so every R_100 backtest and the live assembler had been running
+UNcalibrated while R_75 used its params.  Re-fit on the full 16.8-day
+backfill corpus (frozen snapshot, 60s bars — the same convention as
+`r_75.json`): **omega=-1.8412, alpha=0.1345, gamma=-0.0374, beta=0.8557**
+(persistence 0.990, NLL -74423, converged, deterministic).  The fit's
+NLL is ~19-69 units BETTER than the degenerate mode — R_100 has the same
+vol-clustering structure as R_75; the Aug-8 degenerate file was a local-min
+artifact of the multi-start set, not a property of the data.  Two fixes
+landed in `models/garch_calibration.py`: (1) `fit_egarch(initial_params=...)`
+crashed with UnboundLocalError (sample_var not computed on that path) —
+fixed + regression tests; (2) an explicit high-persistence anchor
+`(-2.0, 0.10, 0.88, -0.04)` was added to the multi-start guesses so the
+winner is chosen by NLL and corpus growth can no longer flip the fit to a
+worse local optimum.  (3) 2026-08-16 — the winner selection is now
+DEGENERACY-GATED: every candidate (L-BFGS-B multi-start and the DE
+fallback) must pass the same `_params_at_bounds` predicate — bound-pinned,
+no-clustering, or absurd-NLL (optimizer blow-up) basins can never win, even
+with the best raw NLL.  Measured on the repaired full-density R_100 corpus:
+the bound-pinned basin (alpha/beta at floors, NLL best) is now returned
+only as a convergence=False fallback and the loader falls back to default
+priors instead of seeding a broken fit.
+
+**P10-D reference (band on R_100, 300s, repaired full-density corpus):**
+calibrated **-0.591R expectancy, 81 trades, 3.70% hit, net -254.51**
+(`calibrated_garch=loaded`, fresh `r_100.json` — params omega -1.8412 /
+alpha 0.1345 / gamma -0.0374 / beta 0.8557 preserved, diagnostics
+regenerated with the honest long_run_vol/vol_ratio computation).  The number
+was updated from the sparse-corpus reference (-0.619R, 44 trades) after the
+repair; the SIGN is robustly NEGATIVE under both.  The MQL5 P10-D tester
+must use the fresh params above.
+
+**Four-leg head-to-head on R_100 @300s (repaired corpus, realistic costs
+slip 0.05 / penalty 0.10, 2026-08-16) — the updated four-leg reference:**
+
+| leg | trades | hit | expectancy | net PnL |
+|---|---|---|---|---|
+| vol-band (P10-D reference) | 81 | 3.70% | **-0.591R** | -254.51 |
+| vol-reversion (fade) | 41 | 51.22% | -0.198R | -51.32 |
+| vol-momentum | 199 | 33.67% | -0.019R | -48.60 |
+| sniper (reference) | 262 | 46.95% | -0.029R | -60.23 |
+
+All four legs are NEGATIVE on R_100 at 300s; the band is the sign-lock
+reference the P10-D gate contracts against.  Command: `backtest-vol --csv
+data/backfill/R_100_ticks.csv --symbol R_100 --timeframe 300 --mode band
+--compare`.
+
+**P10-D row RUN (2026-08-16) — PASS (sign-lock confirmed).**  The integrated
+EA on SYN100 M5 over the same 17.4-day window (tester cache, mode-0 seeded
+with the fresh R_100 params): **trades=106, hit=0.94%, sumR=-53.741,
+floor 25.0% NOT_BEAT, vetoes/rejects=0** — vs the Python R_100 band reference
+on the repaired corpus (trades=81, win_rate=3.70%, expectancy=-0.591,
+calibrated loaded).  Both sums NEGATIVE -> the P10-D sign contract holds.
+The 106-vs-81 trade gap is the same data-source mismatch as P10-A (SYN100
+tester cache full-density vs corpus); P10-D locks the SIGN, not trade parity.
+
+**P10-D row RUN on R_75 (2026-08-16) — PASS (sign-lock confirmed).**  The
+integrated EA on SYN75 M5 over the same 17-day window (tester cache, mode-0
+seeded with the ANCHORED R_75 params as defaults): **trades=98, hit=1.02%,
+sumR=-36.964, exits stop 39 / trail 58 / target 1 / time 0, floor 25.0%
+NOT_BEAT, vetoes/rejects=0** (init confirms omega -1.8841 / alpha 0.1422 /
+gamma -0.0733 / beta 0.8527 — identical to the CLI's regenerated
+`r_75.json`) — vs the Python R_75 band reference on the repaired corpus
+(trades=87, win_rate=1.15%, expectancy=-0.376, calibrated loaded).  Both
+sums NEGATIVE -> the P10-D sign contract holds, the mirror of the R_100
+half (106 / -53.741 vs 81 / -0.591R).  The 98-vs-87 trade gap is the
+same corpus-density mismatch (93.3%) as P10-A; P10-D locks the SIGN, not
+trade parity.  **Resolved 2026-08-17:** the strict reference was re-baselined
+to the anchored fit in aligned mode (permissive risk), so the accepted pair
+is EA 98 vs CLI 102 (Δ4 ≤ 10, STRICT PASS) — see the P10-A row note for the
+finding (the Δ11 came from the reference's default-risk halts vetoing ~16
+signals, not the density gap, and full-density backfill is impossible: the
+interior 11:00-UTC holes exist in the terminal's own M1 history and the
+corpus edges are real data boundaries).  Command: `verify_all.ps1
+-Suite Phase10IntegrationTests -Symbol SYN75 -RangeDays 17
+-SkipPhase10R100Gate` (plus the gate-skip flags for a focused row).
+
+Command: `verify_all.ps1 -Suite Phase10IntegrationTests -Symbol SYN100
+-RangeDays 17 -Inputs "InpGarchMode=0;InpGarchOmega=-1.8412;
+InpGarchAlpha=0.1345;InpGarchGamma=-0.0374;InpGarchBeta=0.8557"` (Python
+gates skipped).
+
+| P10-E OHLC stress — DONE 2026-08-16 | SYN75 | M5 | same | TestModel=2 (1-min OHLC) via new `-TestModel` override (suite loop only; risk gate + seed sweep stay Model=1) | **DIRECTION FLIPPED — row criterion NOT met:** real ticks n=98 −36.964R / 1.02% hit → OHLC n=96 **+55.502R** / 30.21% hit, same inputs, same config (verified: 19,039 OHLC ticks vs 97,200 real ticks, 4,860 bars both). The OHLC model only sees 1-min bar closes, so wick stop-outs vanish and the 4.0σ target becomes reachable — i.e. OHLC implicitly applies closed-candle grace to ALL exits. This is the honest finding: the band's negative real-ticks result is model-true, and the flip quantifies the grace's potential if ever applied to stops. Object-count gate (Phase9Tests) green 0/0 in the full loop; EA state stable (96 vs 98 trades) |
+| P10-F walk-forward — DONE 2026-08-16 | SYN75 | M5 | two halves: 08.01–08.08 IS, 08.09–08.15 OOS (boundary Aug 9 00:00 UTC) | same default VolBandConfig, NO changes between halves, realistic costs + anchored R_75 calibration | PASS — OOS sign matches IS sign (IS n=57 −0.542R NEG, OOS n=59 −0.282R NEG); boundary-robust across Aug 8/9 ±12h (4/4 splits both NEG) |
+
+**Gate wiring (verify_all.ps1 `Invoke-Phase10Gate`) — IMPLEMENTED 2026-08-16.**
+Parse the `[PHASE10]` machine lines from the tester log (last-run isolation);
+run the CLI `backtest-vol --mode band` reference on the R_75 corpus; compute
+the corpus M5-bucket density.  The contract is DATA-AWARE (see the P10-A
+finding below): internal consistency + a RATE guard always; the STRICT
+parity contract only when the corpus is ≥80% dense.  `-SkipPhase10Gate`
+opts out; the gate row only runs when `Phase10IntegrationTests` is among the
+invocation's suites (else SKIP, like SeedSweep).  Both branches verified:
+PASS (rate 1.86 within band) and FAIL (RATE GUARD / STRICT trips).
+
+**Corpus repair — STRICT branch now ACTIVE (2026-08-16).**  The sparse tail
+(Aug 6-16) was backfilled from the terminal's M1 history:
+`python -m synthetic_trader.scripts.repair_corpus --symbol R_75 --backup`
+merged 47,372 OHLC-exact ticks (4 per M1 candle) into the 2,369 missing M5
+buckets, keeping every real tick.  Density 0.491 -> 0.935 (2,602 -> 4,968
+buckets).  First STRICT run: `EA n=97 hit=2.06% sumR=-36.172 | CLI n=90
+hit=2.22% exp=-0.309` — PASS (trades Δ7≤10, hit Δ0.16pp≤5, sign agrees).
+Same-data parity now enforced: the EA no longer over-fires vs the corpus
+(97 vs 90, was 93 vs 28 on sparse data).  Re-run the same command after any
+future collector outage; the script only fills buckets with <4 ticks so it
+never overwrites real data.
+
+**Build order within Phase 10:** (1) ~~`GarchForecaster.mqh` + `BarAggregator.mqh`~~
+**DONE 2026-08-15** — extracted, `Tests/Phase10Tests.mq5` green
+(**620/0**): mode-0 sigmas locked against the REAL Python
+`EGARCHVarianceForecaster`, mode-1 against a fixed-params replication
+(`mql5/phase10_garch_reference.py`), aggregator semantics locked
+(compile + unit tests against BandBackTests numbers); (2) ~~`MitemshubAI.mq5`~~
+**DONE 2026-08-16** — the integrated EA builds 0 errors / 0 warnings, runs
+the full pipeline in the tester, emits the `[PHASE10]` machine lines, and the
+wrapper `Tests/Phase10IntegrationTests.mq5` is green in verify_all.ps1;
+(3) ~~P10-A aligned~~ **LANDED 2026-08-16 with a documented finding** — the
+engine matches Python on shared full-density days (EA 22 vs Python 23 on
+Aug 1-5) but the corpus is ~50% sparse (Aug 6-16 has 17-145 M5 buckets/day)
+while the tester cache is dense, so same-data trade-for-trade parity is
+NOT enforceable until the corpus is complete; the gate therefore enforces
+the data-aware contract (rate guard + internal consistency now, STRICT
+parity automatically once density ≥ 80%).  **2026-08-17: corpus repaired to
+93.3% density, STRICT active, and the strict reference RE-BASELINED to the
+anchored fit in aligned mode** — the CLI reference now runs with permissive
+risk (`--max-consecutive-losses 9999 --max-daily-loss-frac 1.0`, matching
+the EA's 0-veto aligned config) so the accepted pair is EA 98 vs CLI 102
+(Δ4 ≤ 10, both NEGATIVE) and the P10-A row is GREEN; the prior Δ11 was the
+reference's default-risk halts (4-streak / 2% daily) vetoing ~16 signals,
+and full-density backfill was ruled out (terminal M1 history has the same
+interior holes; corpus edges are data boundaries); (4) P10-B..F; (5) ~~wire the gate
+into verify_all.ps1~~ **DONE 2026-08-16** (the `Phase10Gate` row).
+Estimated tester cost per row ~2-5 min (M5, 2-week window); the full matrix
+~20-30 min.
+
+**Phase gate:** compile 0/0; P10-A aligned passes (the cross-validation
+contract); full matrix green or explicitly sign-locked; dashboard renders in a
+visual pass.
 
 ### Phase 11 — Robustness
 

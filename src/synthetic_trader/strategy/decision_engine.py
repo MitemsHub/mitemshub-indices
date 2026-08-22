@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import mean
+from typing import Any
 
 from synthetic_trader.config import SymbolProfile, TraderConfig
 from synthetic_trader.domain import Candle, Direction, Regime, TradeSignal
@@ -85,7 +86,7 @@ def _replay_band_strategy(
 
 def _structure_band_levels(
     *,
-    strategy: object,
+    strategy: Any,
     execution_candles: list[Candle],
     bar_sec: int,
     hold_horizon_sec: int,
@@ -155,8 +156,8 @@ DRIFT_PENALTY_DECAY_STEPS = 500
 class CalibrationState:
     predictions: list[float] = field(default_factory=list)
     outcomes: list[int] = field(default_factory=list)
-    _fitted_ir: object | None = field(default=None, repr=False)
-    _fitted_platt: object | None = field(default=None, repr=False)
+    _fitted_ir: Any = field(default=None, repr=False)
+    _fitted_platt: Any = field(default=None, repr=False)
     _fitted_ir_version: int = field(default=0, repr=False)
     _fitted_platt_version: int = field(default=0, repr=False)
 
@@ -176,7 +177,7 @@ class CalibrationState:
         # Always re-sync outcomes to match predictions length (defensive invariant).
         self.outcomes = self.outcomes[-len(self.predictions):] if self.predictions else []
 
-    def _ensure_ir(self) -> object | None:
+    def _ensure_ir(self) -> Any:
         """Fit and cache the IsotonicRegression model if needed."""
         if self._fitted_ir_version == len(self.predictions):
             return self._fitted_ir  # cached (model or cached failure)
@@ -194,7 +195,7 @@ class CalibrationState:
             self._fitted_ir_version = len(self.predictions)
             return None
 
-    def _ensure_platt(self) -> object | None:
+    def _ensure_platt(self) -> Any:
         """Fit and cache the Platt-scaling LogisticRegression model if needed."""
         if self._fitted_platt_version == len(self.predictions):
             return self._fitted_platt  # cached (model or cached failure)
@@ -436,6 +437,7 @@ class DecisionEngine:
             direction=direction,
         )
         is_weak = signal_strength in ("weak_buy", "weak_sell", "wait")
+        rationale_weak: tuple[str, ...] = ()
         if is_weak and signal_strength != "wait":
             rationale_weak = (
                 f"weak signal ({signal_strength}) — confidence {confidence:.3f}",
@@ -449,7 +451,7 @@ class DecisionEngine:
                 f"calibrated probability {calibrated_prob:.3f}",
             )
 
-        rationale = (
+        rationale: tuple[str, ...] = (
             bias.reason,
             setup.reason,
             confirmation.reason,
@@ -935,7 +937,7 @@ class DecisionEngine:
         if steps_since >= DRIFT_PENALTY_DECAY_STEPS:
             return 0.0
         decay = 1.0 - steps_since / DRIFT_PENALTY_DECAY_STEPS
-        return DRIFT_MAX_PENALTY * decay
+        return float(DRIFT_MAX_PENALTY * decay)
 
     def _classify_signal_strength(
         self,

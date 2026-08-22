@@ -6,8 +6,8 @@ curve-fitting detection.  This ensures the strategy is tested under
 the same conditions the trader will face on a live funded account.
 
 Supported prop firms:
-- Blueberry Funded 2-Step (Forex)
-- Blueberry Funded Synthetic (Synthetic indices)
+- Deriv Funded 2-Step (Forex)
+- Deriv Funded Synthetic (Synthetic indices)
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ class PropFirmProfile:
     Parameters
     ----------
     name : str
-        Human-readable name (e.g., "Blueberry Funded 2-Step").
+        Human-readable name (e.g., "Deriv Funded 2-Step").
     max_daily_loss_pct : float
         Maximum daily loss as fraction of starting balance (e.g., 0.05 = 5%).
     max_overall_drawdown_pct : float
@@ -50,7 +50,7 @@ class PropFirmProfile:
         Whether synthetic indices are permitted.
     """
 
-    name: str = "Blueberry Funded 2-Step"
+    name: str = "Deriv Funded 2-Step"
     max_daily_loss_pct: float = 0.05
     max_overall_drawdown_pct: float = 0.10
     profit_target_phase1_pct: float = 0.10
@@ -67,8 +67,8 @@ class PropFirmProfile:
 
 # ── Pre-defined Profiles ────────────────────────────────────────────
 
-BLUEBERRY_FUNDED_2STEP = PropFirmProfile(
-    name="Blueberry Funded 2-Step",
+DERIV_FUNDED_2STEP = PropFirmProfile(
+    name="Deriv Funded 2-Step",
     max_daily_loss_pct=0.05,
     max_overall_drawdown_pct=0.10,
     profit_target_phase1_pct=0.10,
@@ -83,8 +83,8 @@ BLUEBERRY_FUNDED_2STEP = PropFirmProfile(
     allow_synthetic_indices=True,
 )
 
-BLUEBERRY_SYNTHETIC = PropFirmProfile(
-    name="Blueberry Funded Synthetic",
+DERIV_SYNTHETIC = PropFirmProfile(
+    name="Deriv Funded Synthetic",
     max_daily_loss_pct=0.04,  # 4% for synthetic plan
     max_overall_drawdown_pct=0.10,
     profit_target_phase1_pct=0.10,
@@ -101,8 +101,8 @@ BLUEBERRY_SYNTHETIC = PropFirmProfile(
 
 # Registry for CLI lookup
 PROP_FIRM_PROFILES: dict[str, PropFirmProfile] = {
-    "blueberry_2step": BLUEBERRY_FUNDED_2STEP,
-    "blueberry_synthetic": BLUEBERRY_SYNTHETIC,
+    "deriv_2step": DERIV_FUNDED_2STEP,
+    "deriv_synthetic": DERIV_SYNTHETIC,
 }
 
 

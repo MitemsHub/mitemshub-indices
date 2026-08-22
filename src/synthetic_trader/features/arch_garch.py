@@ -139,7 +139,7 @@ class ArchGarchForecaster:
             if len(returns_pct) < self.min_observations:
                 return
 
-            am = arch_model(returns_pct, vol="Garch", p=1, q=1, dist="normal")
+            am = arch_model(returns_pct, vol="GARCH", p=1, q=1, dist="normal")
             # The M5 log-returns (×100 for arch) land below arch's preferred
             # 1–1000 scale, so every periodic fit emits a DataScaleWarning.
             # This fit is optional diagnostics (persistence/long-run updates)

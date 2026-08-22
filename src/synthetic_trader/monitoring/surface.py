@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 
 MT5_EVENT_TYPES = {
     "mt5_runtime_summary",
@@ -13,20 +15,20 @@ MT5_EVENT_TYPES = {
 }
 
 
-def filter_mt5_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
+def filter_mt5_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [event for event in events if str(event.get("type")) in MT5_EVENT_TYPES]
 
 
 def build_mt5_monitor_snapshot(
     *,
-    events: list[dict[str, object]],
+    events: list[dict[str, Any]],
     symbol: str | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     filtered = filter_mt5_events(events)
     if symbol is not None:
         filtered = [event for event in filtered if event.get("symbol") == symbol]
 
-    snapshot: dict[str, object] = {
+    snapshot: dict[str, Any] = {
         "symbol": None,
         "venue_symbol": None,
         "runtime_ready": False,
@@ -87,7 +89,7 @@ def build_mt5_monitor_snapshot(
     return snapshot
 
 
-def build_monitor_snapshot(*, live_summary: dict[str, object]) -> dict[str, object]:
+def build_monitor_snapshot(*, live_summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "symbol": live_summary.get("symbol"),
         "signals": live_summary.get("signals", 0),
@@ -103,11 +105,13 @@ def build_validation_snapshot(
     venue: str,
     mode: str,
     live_summary: object,
-    latency_summary: dict[str, object] | None = None,
-) -> dict[str, object]:
-    snapshot: dict[str, object] = {
+    latency_summary: dict[str, Any] | None = None,
+    armed_confirmation: bool = False,
+) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
         "venue": venue,
         "mode": mode,
+        "armed_confirmation": armed_confirmation,
         "symbol": getattr(live_summary, "symbol"),
         "warmup_ticks": getattr(live_summary, "warmup_ticks"),
         "live_ticks": getattr(live_summary, "live_ticks"),
@@ -133,12 +137,13 @@ def build_rollout_status_snapshot(
     live_mode: str,
     readiness_ok: bool,
     readiness_failures: tuple[str, ...],
-    validation_snapshot: dict[str, object] | None = None,
-    mt5_snapshot: dict[str, object] | None = None,
+    validation_snapshot: dict[str, Any] | None = None,
+    mt5_snapshot: dict[str, Any] | None = None,
     mt5_runtime_ready: bool | None = None,
     mt5_runtime_failures: tuple[str, ...] = (),
     mt5_venue_symbol: str | None = None,
-) -> dict[str, object]:
+    armed_confirmation: bool = False,
+) -> dict[str, Any]:
     validation_snapshot = validation_snapshot or {}
     mt5_snapshot = mt5_snapshot or {}
     return {
@@ -148,6 +153,7 @@ def build_rollout_status_snapshot(
         "venue": venue,
         "symbol": symbol,
         "live_mode": live_mode,
+        "armed_confirmation": armed_confirmation,
         "readiness_ok": readiness_ok,
         "readiness_failures": list(readiness_failures),
         "validation_finalized": bool(validation_snapshot.get("finalized", False)),
@@ -165,12 +171,13 @@ def build_rollout_status_snapshot(
     }
 
 
-def render_rollout_status_text(snapshot: dict[str, object]) -> str:
+def render_rollout_status_text(snapshot: dict[str, Any]) -> str:
     ordered_keys = [
         "rollout_stage",
         "venue",
         "symbol",
         "live_mode",
+        "armed_confirmation",
         "readiness_ok",
         "readiness_failures",
         "validation_finalized",
@@ -191,10 +198,11 @@ def render_rollout_status_text(snapshot: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def render_validation_text(snapshot: dict[str, object]) -> str:
+def render_validation_text(snapshot: dict[str, Any]) -> str:
     ordered_keys = [
         "venue",
         "mode",
+        "armed_confirmation",
         "symbol",
         "warmup_ticks",
         "live_ticks",
@@ -216,7 +224,7 @@ def render_validation_text(snapshot: dict[str, object]) -> str:
     )
 
 
-def render_mt5_monitor_text(snapshot: dict[str, object]) -> str:
+def render_mt5_monitor_text(snapshot: dict[str, Any]) -> str:
     ordered_keys = [
         "symbol",
         "venue_symbol",
@@ -243,5 +251,5 @@ def render_mt5_monitor_text(snapshot: dict[str, object]) -> str:
     return "\n".join(f"mt5_{key}={snapshot.get(key)}" for key in ordered_keys)
 
 
-def render_monitor_text(snapshot: dict[str, object]) -> str:
+def render_monitor_text(snapshot: dict[str, Any]) -> str:
     return "\n".join(f"{key}={value}" for key, value in snapshot.items())

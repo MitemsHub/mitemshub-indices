@@ -166,7 +166,7 @@ class FeatureSelector:
         cv = std_val / abs(mean_val) if mean_val != 0 else 1.0
 
         # Convert to stability score (1 = perfectly stable)
-        return clamp(1.0 - min(cv, 1.0), 0.0, 1.0)
+        return clamp(float(1.0 - min(cv, 1.0)), 0.0, 1.0)
 
     def _detect_redundant_pairs(self) -> list[tuple[str, str, float]]:
         """Detect feature pairs with highly correlated weight trajectories."""
@@ -311,8 +311,8 @@ class ModelCalibrator:
             original_probs=probs,
             ece_before=ece_before,
             ece_after=ece_after,
-            brier_before=brier_before,
-            brier_after=brier_after,
+            brier_before=float(brier_before),
+            brier_after=float(brier_after),
             parameters=params,
         )
 
@@ -325,7 +325,8 @@ class ModelCalibrator:
         # Minimize: -sum(y_i * log(p_i) + (1-y_i) * log(1-p_i))
         # where p_i = 1 / (1 + exp(A * logit_i + B))
 
-        A, B = 0.0, 0.0
+        A: Any = 0.0
+        B: Any = 0.0
         lr = 0.01
 
         for _ in range(100):
@@ -385,7 +386,7 @@ class ModelCalibrator:
     def _expected_calibration_error(self, probs: np.ndarray, labels: np.ndarray, n_bins: int = 10) -> float:
         """Calculate Expected Calibration Error (ECE)."""
         bin_edges = np.linspace(0, 1, n_bins + 1)
-        ece = 0.0
+        ece: Any = 0.0
 
         for i in range(n_bins):
             mask = (probs >= bin_edges[i]) & (probs < bin_edges[i + 1])
@@ -727,10 +728,10 @@ class ModelMonitor:
         bin_preds = (preds > 0.5).astype(int)
 
         # Classification metrics
-        tp = np.sum((bin_preds == 1) & (labels == 1))
-        fp = np.sum((bin_preds == 1) & (labels == 0))
-        tn = np.sum((bin_preds == 0) & (labels == 0))
-        fn = np.sum((bin_preds == 0) & (labels == 1))
+        tp: int = int(np.sum((bin_preds == 1) & (labels == 1)))
+        fp: int = int(np.sum((bin_preds == 1) & (labels == 0)))
+        tn: int = int(np.sum((bin_preds == 0) & (labels == 0)))
+        fn: int = int(np.sum((bin_preds == 0) & (labels == 1)))
 
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -775,7 +776,7 @@ class ModelMonitor:
     def _expected_calibration_error(self, probs: np.ndarray, labels: np.ndarray, n_bins: int = 10) -> float:
         """Calculate ECE."""
         bin_edges = np.linspace(0, 1, n_bins + 1)
-        ece = 0.0
+        ece: Any = 0.0
         for i in range(n_bins):
             mask = (probs >= bin_edges[i]) & (probs < bin_edges[i + 1])
             if i == n_bins - 1:

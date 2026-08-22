@@ -49,3 +49,6 @@ terraform
 .agents/
 .claude/
 skills-lock.json
+.env.local
+logs/
+*.log

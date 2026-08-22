@@ -331,7 +331,7 @@ def load_horizon_verdict(
     preferred, 6h fallback) — the direct answer to "which calibrated 60s
     range multipliers are in force right now".
     """
-    _no_data = {
+    _no_data: dict[str, Any] = {
         "verdict": None,
         "verdict_4h": None,
         "verdict_6h": None,

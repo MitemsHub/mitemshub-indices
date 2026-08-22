@@ -354,7 +354,7 @@ def check_task_health(
             # The collector is still appending (or wrote within flat_hours);
             # verify/log snapshots merely lag the daily task run.
             sh.flat = False
-            sh.flat_hours = (now - csv_evidence_ts) / 3600.0
+            sh.flat_hours = (now - (csv_evidence_ts or 0.0)) / 3600.0
         elif csv_evidence_ts is not None:
             # CSV exists but is old: its mtime is ground truth for the last
             # append, so the flat window starts there.  This also covers a
@@ -362,7 +362,7 @@ def check_task_health(
             # and a snapshot count that lags a recent growth (the mtime stays
             # the honest last-growth time either way — no min() overstatement
             # from the older registration/log timestamps).
-            sh.flat_hours = (now - csv_evidence_ts) / 3600.0
+            sh.flat_hours = (now - (csv_evidence_ts or 0.0)) / 3600.0
             if sh.flat_hours >= flat_hours:
                 sh.flat = True
                 reasons = [
@@ -517,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     # Windows consoles default to cp1252 and crash printing non-ASCII glyphs;
     # force UTF-8 the same way the tick-coverage handler does.
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
     except (AttributeError, OSError):
         pass
 

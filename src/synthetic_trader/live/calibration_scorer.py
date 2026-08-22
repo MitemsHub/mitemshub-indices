@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from synthetic_trader.execution.venues import MarketDataClient
 
@@ -25,7 +25,7 @@ DEFAULT_EXECUTION_TIMEFRAME_SEC = 900
 
 def _resolve_record_window(
     *,
-    record: dict[str, object],
+    record: dict[str, Any],
     window_minutes: int | None = None,
 ) -> tuple[datetime, datetime, int]:
     generated_at = datetime.fromisoformat(str(record["generated_at"]))
@@ -36,7 +36,7 @@ def _resolve_record_window(
 
 async def fetch_prices_for_record(
     *,
-    record: dict[str, object],
+    record: dict[str, Any],
     client: MarketDataClient,
     window_minutes: int | None = None,
 ) -> list[tuple[float, float]]:
@@ -81,8 +81,10 @@ def _prices_from_window(
 ) -> list[float]:
     """Extract plain prices from either a price list or (price, epoch) pairs."""
     if prices and isinstance(prices[0], (tuple, list)):
-        return [float(price) for price, _ in prices]
-    return [float(price) for price in prices]
+        pairs: list[tuple[float, float]] = prices
+        return [float(p) for p, _ in pairs]
+    plain: list[float] = prices  # type: ignore[assignment]
+    return [float(p) for p in plain]
 
 
 def _stop_traded_on_closed_candle(
@@ -176,10 +178,10 @@ def _score_with_closed_candle_grace(
 
 def score_call_outcome(
     *,
-    record: dict[str, object],
+    record: dict[str, Any],
     prices: list[float] | list[tuple[float, float]],
     execution_timeframe_sec: int | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Score a call's outcome against its post-call price window.
 
     ``prices`` may be a plain price list (legacy paths — wick-based target AND
@@ -260,7 +262,7 @@ def score_call_outcome(
     }
 
 
-def load_jsonl_records(path: Path) -> list[dict[str, object]]:
+def load_jsonl_records(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     return [
@@ -270,13 +272,13 @@ def load_jsonl_records(path: Path) -> list[dict[str, object]]:
     ]
 
 
-def append_jsonl_record(path: Path, record: dict[str, object]) -> None:
+def append_jsonl_record(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record) + "\n")
 
 
-def _record_key(record: dict[str, object]) -> tuple[object, object]:
+def _record_key(record: dict[str, Any]) -> tuple[object, object]:
     return (record.get("symbol"), record.get("generated_at"))
 
 
@@ -295,7 +297,7 @@ async def score_unresolved_records_from_market(
     resolved_keys = {_record_key(record) for record in existing_outcomes}
     result = CalibrationScoringResult()
 
-    # No silent venue: scoring requires the Blueberry MT5 client because the
+    # No silent venue: scoring requires the Deriv MT5 client because the
     # call levels (entry/stop/target) are measured on the SYN75/SYN100 scale.
     # Deriv's 1HZ75V/1HZ100V trade at a different price scale (~7,000 vs
     # ~1,542 for R_75) and would produce incomparable outcomes, so a missing
@@ -303,7 +305,7 @@ async def score_unresolved_records_from_market(
     if client_factory is None:
         raise RuntimeError(
             "score_unresolved_records_from_market requires client_factory "
-            "(Blueberry MT5); the Deriv API fallback was removed because "
+            "(Deriv MT5); the Deriv API fallback was removed because "
             "1HZ75V/1HZ100V are on the WRONG price scale"
         )
     factory = client_factory
@@ -395,7 +397,7 @@ def score_unresolved_records(
     calls_path: Path,
     outcomes_path: Path,
     now: datetime,
-    price_lookup: Callable[[dict[str, object]], list[float]],
+    price_lookup: Callable[[dict[str, Any]], list[float]],
     symbol: str | None = None,
     window_minutes: int | None = None,
 ) -> int:
@@ -430,9 +432,9 @@ def score_unresolved_records(
 
 
 def summarize_outcomes(
-    outcomes: list[dict[str, object]],
+    outcomes: list[dict[str, Any]],
 ) -> dict[tuple[str, str | None, str | None], dict[str, float | int]]:
-    grouped: dict[tuple[str, str | None, str | None], list[dict[str, object]]] = {}
+    grouped: dict[tuple[str, str | None, str | None], list[dict[str, Any]]] = {}
     for outcome in outcomes:
         # Only measured trade outcomes count as evidence.  A scored row is a
         # real outcome only when the call carried entry/stop/target levels:

@@ -8,7 +8,7 @@ from pathlib import Path
 
 def to_json_ready(value):
     if is_dataclass(value):
-        return to_json_ready(asdict(value))
+        return to_json_ready(asdict(value))  # type: ignore[arg-type]
     if isinstance(value, dict):
         return {str(key): to_json_ready(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

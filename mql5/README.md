@@ -157,7 +157,25 @@ into Task Scheduler so the MQL5 build verifies itself continuously:
   result table to `.data/mql5_verify_state.json`.
 - **Email**: set `MQL5_VERIFY_SMTP_SERVER/TO/FROM/USER/PASS` (or edit the
   inline defaults in the wrapper) and each real run emails the PASS/FAIL
-  table; unconfigured = disabled.
+  table; unconfigured = disabled.  The email subject is parsed from
+  `verify_all.ps1`'s machine-readable summary line — `[VERIFY] summary
+  ok=1 rows=N green=N red=N skip=N` (green) or `ok=0 ... failed=SuiteA,SuiteB`
+  (red) — so a failing row like the P10-A STRICT Δ11 breach is named in the
+  subject without scraping the human table.  The old `ALL SUITES PASSED` /
+  `N suite(s) NOT green` / `PRE-FLIGHT FAILED` text regexes remain as
+  fallbacks for runs that never reached the summary (pre-flight throw).
+- **Mutual pause with the live tick collector**: every tester run closes the
+  live terminal (`Stop-Process terminal64`), which the collector otherwise
+  reads as a feed loss and reconnects against — and could attach to the
+  *tester* instance and pollute the corpus with modeled ticks.  Before the
+  first suite, `verify_all.ps1` writes `.data/verify_pause.flag`
+  (`VERIFY_PAUSE_PATH` in `src/synthetic_trader/data/continuous_collector.py`)
+  and waits (≤20s) for the collector's status file to report `paused_by`;
+  the collector stands down completely while the marker is fresh — no tick
+  polling, no stall warnings, no reconnects — and restarts its stall timer
+  on resume.  The marker is removed after the terminal is restored (and on
+  the no-restore path), and a marker older than 2h is ignored, so a crashed
+  verify self-heals instead of standing the collector down forever.
 
 Uninstall with `setup-mql5-verify-task.ps1 -Unregister`. One gotcha baked into
 both scripts: the hook invokes schtasks through PowerShell (`-Command
@@ -295,6 +313,26 @@ contract survive every seed (no false failures), but any positive-EXP
 conclusion on a cell should be re-checked across >=3 seeds before trusting
 it; seed 42 (the default) sits near the cap-2.0 mean, not at an extreme.
 
+**Seed-sweep depth gate (`verify_all.ps1 -SeedSweep`):** the single-seed
+contract above certifies on ONE draw, so the loop now offers the strict
+multi-seed gate as an opt-in switch.  `-SeedSweep -Seeds "7,42,123,777,2024"`
+re-runs BandBackTests once per seed (~25s each, compile once — inputs arrive
+via the .set and `-Inputs` overrides pass through with InpGeomSeed swept) and
+fails the suite when the depth-split cell MEANS are not stable across seeds:
+(1) mean exp < +0.05R — the cell is not positive after seed averaging;
+(2) exp spread > 0.25R — a quarter-R swing between seeds; (3) a small
+positive mean (< 0.10R) whose spread exceeds 3x the mean — noise, not
+signal.  Both reference cells (shallow <=1.25 and the cap-2.00 doc cell) must
+pass; hit spread is reported but not gated (4.8pp at n~320 is counting noise,
+exp is the decision metric).  Verified on the real 5-seed run: the gate
+FAILS exactly as it should — cap-2.00 mean +0.023R < floor, spread 8.1x the
+mean; shallow mean −0.012R, spread 0.513R — with per-seed numbers
+byte-identical to `seed_sweep.ps1`.  The verdict is a `SeedSweep` row in the
+summary (FAIL trips the loop exit), and the pure verdict logic is
+fixture-tested (`verify_seedsweep_fixtures.ps1`, 8 branches).  The gate is
+opt-in: the scheduled single-seed run keeps its existing contract, and a
+re-tuned cell that survives seed averaging will PASS this gate.
+
 **Pure subset test — geometry sweep OFF (fixed z_entry=1.0, stop 0.20 sigma,
 target 0.60 sigma = 3.0R), TARGET mode, 6-month (2026-08-12):** with
 `InpGeomSweep=false` there is no RNG at all (MathSrand is never consumed),
@@ -353,6 +391,194 @@ contract)`; the FAIL/SKIP verdict branches are unit-tested in
 gate_verdict() and the PowerShell parse (last-`[GATECHECK]`-line-wins) is
 fixture-tested.
 
+### Paper->live execution parity contract (ExecutionParity row)
+
+The Python engine can execute an approved call three ways, and they must
+behave as ONE execution layer: the **simulated** backend (forward-demo
+paper fills), the **MT5 python-API** backend (`Mt5LiveExecutionBackend` —
+the Python CTrade-equivalent: FOK market order, broker SL/TP, modify/close
+by ticket, retcode-verified), and the **MQL5 SynthCallExecutor EA** (polls
+the call file `ea_emitter` writes and executes via CTrade).  `verify_all.ps1`
+runs `python mql5/execution_parity_check.py` (pure Python — the live
+backend runs against `FakeMetaTrader5`, an in-memory CTrade-equivalent
+simulator with ask/bid fills, position open/close/modify, and configurable
+reject retcodes) and honors its `[PARITY]` verdict + exit code:
+
+- **PASS** — deterministic buy/sell signals replayed through the simulated
+  and live backends agree on EVERY decision: submit acceptance,
+  open-position counts after each submit/candle/shutdown, and per-outcome
+  direction/entry/exit/return_r/won/close-time (reference run 2026-08-12:
+  compared=40 agreed=40 mismatches=0, trades=3 covering target / stop /
+  expiry exits, broker-rejection probe ok, EA contract 3/3).
+- **FAIL** (loop exits 1) — any disagreement, the live path accepting a
+  broker-rejected order, or an EA call record that drifted from the
+  executed levels.
+
+Two things the parity work fixed/added on the live backend: `open_positions_count()`
+now re-syncs with the broker instead of returning the stale submit-time
+snapshot (a mid-session stop/target close left the count at 1 while the
+paper side correctly read 0), and the EA-contract check
+(`check_ea_contract` in `src/synthetic_trader/execution/parity.py`)
+proves `build_call_record` emits exactly the direction/entry/stop/target/volume
+the Python backends executed — so the MQL5 path shares one execution
+contract.  Add `-SkipExecutionParity` to skip the ~2s check.  Unit-tested
+in `tests/test_execution_parity.py` (simulator fill/close/modify/reject
+semantics + replay parity + drift detection).
+
+### Real-corpus gate contracts (RealCorpus row, 2026-08-15)
+
+`verify_all.ps1` now runs the Phase-6/7 real-corpus harnesses as a third
+Python contract row — the same stateful-replay gates the individual phases
+were validated with, asserted on EVERY verify run (fast: ~3s per invocation
+on the current corpus):
+
+- **`phase6_real_corpus_check.py` (risk layer)** — `--mode aligned` must
+  report **100% veto agreement AND 100% stateful AND stake parity**
+  (measured 2309/2309); `--mode defaults` is parse-only (the ~17%
+  disagreements are documented config drift — Python stricter on
+daily-loss/consecutive, MQL5 adds trades/day + trades/hour + WEAK-veto
+caps).
+- **`phase7_real_corpus_check.py` (execution layer)** — `--mode aligned`
+  must report **100% entry+exit parity** and **0 min-RR float-boundary
+disagreements** (measured 1014/1014, rr 0); `--mode defaults` must keep
+  the management edge — the closed-candle grace + BE trail lane must beat
+the Python wick journal on the same entries (`sumR_mq > sumR_py`, measured
++104.6 vs −82.4) and the grace/trail conversions must be present
+(grace_saved + trail_converted > 0, measured 201 + 259).
+
+A regression in ANY contract — a refactor that breaks the mirror, the
+grace, or the trail — fails the loop like the depth-split/sniper gates.
+The row renders as `RealCorpus - PASS|FAIL`; add `-SkipRealCorpusGate` to
+opt out.  Both FAIL branches (parity < 100% and the defaults edge flip)
+were verified end-to-end on 2026-08-15.
+
+### Phase-8 analytics gate (Phase8Gate row, 2026-08-15)
+
+`verify_all.ps1` also runs `phase8_analytics_check.py` as a fourth Python
+contract row.  The harness replays the production band backtest on the
+real R_75 corpus, REQUIRES its replication to match the CLI
+`backtest-vol --mode band` (`[PARITY] verdict=MATCH` — the "this is a real
+band backtest" guarantee), feeds the captured OutcomeRecords through the
+Phase-8 analytics stack, and emits machine lines the gate parses:
+
+- **band row** — `n / hit / exp / sumR / maxDD / floor / beats` must parse,
+  the floor must sit inside the [10,60] clamp, and the beats verdict must
+  be consistent with `(n >= min_samples AND hit >= floor)`.
+- **bucket split** — `strong n + weak n` must equal the total `n` (the
+  confidence buckets must partition the trade set; a refactor that drops a
+  trade from the split fails).
+- **exit split** — `stop + trail + target + time` must equal `n` (every
+  outcome must carry an exit reason).
+- **parity** — `MATCH` is required; a mismatch means the analytics are
+  being measured on something that is no longer the real band backtest.
+
+The row renders as `Phase8Gate - PASS|FAIL`; add `-SkipPhase8Gate` to opt
+out.  Both branches were verified end-to-end on 2026-08-15: PASS on the
+measured numbers (n=28, floor 25%, beats=no, strong 18 / weak 10) and FAIL
+when the bucket partition was broken (strong 17 + weak 10 != 28).
+
+### Phase-6 risk-wiring gate (Phase6RiskGate row, 2026-08-16)
+
+`verify_all.ps1` runs a dedicated EA tester pass as its own contract row to
+prove the integrated EA's hard risk limits (§12 "TRADING DISABLED") actually
+fire.  P10-B exposed a defect where the EA fired 523 trades with **0 risk
+vetoes**: outcomes were never registered, so the consecutive-loss / daily-loss
+/ equity-drawdown breakers saw 0 losses forever — and the P10-A gate masked
+it because the aligned 300s config expects vetoes=0.  This gate re-runs the
+exact P10-B configuration and fails the loop visibly if the vetoes are gone
+again:
+
+- compiles + stages the integrated EA wrapper (`Phase10IntegrationTests`),
+- runs it in the Strategy Tester at **`InpBarSec=60` (M1)** with the Python
+  default risk (consec 4, daily 2% = 0.02 fraction, equity-DD disabled) —
+  the same `-Inputs` as the documented P10-B row,
+- parses the `[PHASE10]` machine line **scoped to `bar_sec=60`** (the log
+  accumulates all of the day's runs, so a plain "last line wins" parse would
+  mis-read the P10-A 300s line and vice-versa — `Get-Phase10TradesLine`
+  pairs each `trades=` line with its own `bar_sec=` line),
+- **FAILS if `risk_vetoes = 0`** with a meaningful trade count (>0) — the
+  exact P10-B regression signature (523 trades / 0 vetoes) — and also fails
+  on a 0-trade run so the check can't pass vacuously.
+
+The P10-A gate now uses the same bar_sec-scoped parser for its 300s line, so
+the two EA rows coexist in one log without cross-reading.  The row renders as
+`Phase6RiskGate - PASS|FAIL`; add `-SkipPhase6Gate` to opt out.  Verified
+end-to-end on 2026-08-16 (17-day window): PASS with the live run at **241
+trades / 325 vetoes / 0 rejects** (P10-B reference 238 / 318 / 0), and the
+FAIL branch proven on the regression signature (523 trades / 0 vetoes ->
+FAIL, 0 trades -> FAIL).
+
+### Phase-10 P10-E real-tick sign gate (Phase10ESignGate row, 2026-08-16)
+
+The P10-E OHLC stress row proved the tester's price model can **flip the EA's
+PnL sign**: the same window/config that loses **−36.964R on real ticks**
+(Model=1) shows **+55.502R under 1-min OHLC** (Model=2).  Only the real-tick
+basis is trustworthy for the band's wick-sensitive geometry, so this row
+makes the real-tick sign a hard contract:
+
+- parses the integrated EA's `[PHASE10]` machine line **scoped to
+  `bar_sec=300`** (the suite loop's Model=1 real-tick run — no extra tester
+  pass needed; the Phase-6 gate's 60s line and any OHLC-stress 300s line are
+  kept separate by `Get-Phase10TradesLine`),
+- runs the CLI band reference on the repaired corpus (`backtest-vol --mode
+  band @300s`, the same command P10-A uses),
+- **FAILS loudly if the EA's real-tick sumR disagrees in sign** with the CLI
+  reference expectancy — the P10 matrix locks R_75 NEGATIVE on the
+  calibrated real-tick basis, so a flip means the calibration/geometry/cost
+  basis changed materially and must be deliberately re-baselined, not
+  carried silently,
+- also fails on a 0-trade run, an exactly-0 sumR, an exactly-0 reference, or
+  a missing machine line — it can never pass vacuously.
+
+The row renders as `Phase10ESignGate - PASS|FAIL`; add
+`-SkipPhase10ESignGate` to opt out.  Contract-location rule identical to the
+Phase-6 row: SKIPs when `Phase10IntegrationTests` isn't in the run's suites.
+Verified end-to-end on 2026-08-16 (17-day window, alongside the P10-A row):
+**PASS — real-tick sumR=−36.964 (n=98) agrees in sign with CLI exp=−0.376
+(both NEGATIVE)**; the FAIL branch proven on synthetic flips (EA +36.964 vs
+ref −0.376 -> FAIL, and the reverse -> FAIL) plus the degenerate guards.
+
+**Why the grace is band-specific (2026-08-18).**  `_probe_sniper_ohlc.py`
+replays the real captured sniper entry set (249 entries, no trail) under
+four price models — WICK-M5 (real ticks), CLOSE-M5, CLOSE-M1 (the true
+TestModel=2 analog), and WICK-M1 (extreme-based at the tester's 1-min
+resolution, which brackets the close-vs-extreme interpretation).  The
+sniper does **NOT flip** in any lane: sumR +88.16 (wick) vs +86.75 (both
+M1 lanes, Δ−1.41R); WICK-M1 ≡ CLOSE-M1 in sumR, with only 4/129
+stop-outs resolving a few minutes later under close semantics and **0
+saved** by the closed-candle grace at 1-min resolution.  Compare the
+band's +92.47R Model=2 swing: the closed-candle grace is a property of the
+band's wide stop geometry, not a general wick-save the sniper can harvest —
+the sniper's tight 1R stops are close-throughs, so the wick-save ceiling
+must never be misread as sniper-harvestable.
+
+### Calibration-sanity gate (CalibrationGate row, 2026-08-16)
+
+`verify_all.ps1` runs `calibration_sanity_check.py` as a sixth Python
+contract row.  The harness loads the on-disk EGARCH calibration JSONs
+(`data/garch_calibration/r_75.json`, `r_100.json` — the exact files the
+live engine and the band reference load on startup) and requires each fit to
+be usable:
+
+- the file exists and parses;
+- `convergence=True` (a degenerate / all-basins-rejected fit reports False
+  and the loader silently falls back to default priors — the gate makes
+  that visible);
+- NOT rejected by `_params_at_bounds` (bound-pinned, no-clustering,
+  absurd-NLL, or absurd long-run-ratio fits); and
+- `vol_ratio` inside the healthy band `[0.02, 50]` (criterion-3 semantics,
+  checked first-class so a regeneration that drifts the ratio fails with a
+  specific message even if the predicate itself changes).
+
+The gate validates what the engine WILL load rather than re-fitting (a full
+`calibrate-egarch` run takes minutes per symbol), so a regenerated fit that
+lands in a degenerate basin — the measured full-corpus R_100 case — fails
+the loop loudly the moment it lands on disk.  The row renders as
+`CalibrationGate - PASS|FAIL`; add `-SkipCalibrationGate` to opt out.  Both
+branches verified end-to-end on 2026-08-16: PASS on the healthy JSONs
+(R_75 vol_ratio 0.607, R_100 0.814) and FAIL when R_75's vol_ratio was
+corrupted to 0.00004 (exit 1, "1 suite(s) NOT green").
+
 ## Field notes (forward-demo pass, 2026-08-10)
 
 Operational knowledge from attaching the EA live on SYN75 and exercising the
@@ -400,7 +626,7 @@ Launch the terminal with it via PowerShell `Start-Process -ArgumentList
 
 ### The current hard blocker: the account, not the code
 
-Demo account `5098680` on `BlueberryMarketsSVG-Live` returns
+Demo account `5098680` on `DerivSVG-Server-03` returns
 **retcode 10026 `AutoTrading disabled by server`** for *every* order attempt —
 including a manual `order_send` from Python with no EA involved. This is a
 server-side account setting the broker controls; the terminal's own algo button
@@ -1844,7 +2070,7 @@ confirms the filters alone do not transplant it.
 **Forward-demo paper pass (started 2026-08-12 ~02:50 UTC) — UTC 18-24h
 & |range_z_50|<1.5 on the LIVE sniper leg, 30-trade target:**
 `mql5/forward_demo_pass.py` runs `run_live_paper` (venue=MT5,
-`Mt5TickClient` on the Blueberry terminal — MT5-first, paper fills via
+`Mt5TickClient` on the Deriv terminal — MT5-first, paper fills via
 SimulatedExecutionBackend, NO orders ever sent) with the R_75
 `SymbolProfile` entry gate overridden to UTC [18,24) & |range_z_50|<1.5
 (the strongest measured cell: n=67/hit 58.2%/+0.242R@RR1.2 backtest,
@@ -1860,7 +2086,7 @@ no credentials are configured (`account_info` populated) instead of
 crashing on `int(None)` — the terminal is the source of truth for what
 it's connected to; credentialed behavior is byte-identical when
 credentials ARE set.  Verified live: `reusing running terminal session
-(5098680@BlueberryMarketsSVG-Live)`, init 2ms, no login round-trip.
+(5098680@DerivSVG-Server-03)`, init 2ms, no login round-trip.
 (2) `run_live_paper` now passes the remaining run duration as the tick
 stream timeout — `Mt5TickClient.subscribe_ticks`/Deriv default is a 20s
 batch, so `duration_sec` chunks previously ended after one batch and the
@@ -1872,11 +2098,55 @@ chunk, 30+ candles built, and the journal records the gate firing
 correctly — `"entry gate: UTC hour 2 outside [18, 24) window"` — so no
 trades until 18:00 UTC as configured.  Check progress with
 `wc -l journals/forward_demo_18_24.jsonl` and `grep -c '"type":
-"outcome"' journals/forward_demo_18_24.jsonl`.  Caveats: the Blueberry
+"outcome"' journals/forward_demo_18_24.jsonl`.  Caveats: the Deriv
 terminal must stay running/logged in (the pass reuses its session); each
 chunk starts a fresh online model (matches the backtest's
 fresh-model-per-run methodology); the single-flight guard serializes
 terminal init against the scheduled collector.
+
+**CLOCK-CONSISTENCY FIX (2026-08-12, found via the pass's own journal):**
+the Deriv terminal stamps ticks in SERVER time, which runs exactly
++3h ahead of the local machine clock (measured: latest_tick time_msc −
+time.time() = +10800.9s; the backfill corpus's last-row epoch read as
+server time matches its file mtime to the second — the RESEARCH corpus
+and its "UTC 18-24h" edge are server-time).  `Mt5TickClient.subscribe_ticks`
+was stamping live ticks with `time.time()` (local) while `ticks_history`
+warmup used `time_msc` (server) — so live candles landed 3h BEHIND the
+warmup candles, the journal epochs went non-monotonic (a skip stamped
+09:58 written at 09:16), the builder stalled on mixed-clock buckets
+("need 30 candles, have 3" for hours), and the entry gate would have
+fired 3h late vs the backtest.  Fix: `subscribe_ticks` now stamps
+`time_msc` (fallback `time.time()` only when time_msc == 0) — one clock
+end-to-end, matching warmup, the corpus, and the research hours; the
+`tick_store` "far future" junk guard widened from +1h to +4h so legit
+server-stamped (+3h) live ticks aren't dropped.  Verified: journal goes
+monotonic on the server clock (12:57→13:00 per-minute skips), gate names
+server hours, and the pass now opens its window when SERVER hour ∈
+[18,24) = local UTC 15:00-21:00 — reproducing the backtest cell exactly.
+Regression test: `test_subscribe_ticks_stamps_terminal_clock_not_local`
+in `tests/test_mt5_client_hardening.py`.
+
+**JOURNAL WATCHDOG (2026-08-12) — the stall that silently missed windows:**
+the pass keeps stalling in dead chunks (process alive, MT5 connected, no
+journal writes — the recurring IPC pattern), and before this a stalled pass
+could sit silently for hours and miss the 18-24h window.  Now scheduled:
+
+- `mql5/forward_demo_watchdog.py` — checks `journals/forward_demo_18_24.jsonl`
+  (file MTIME = wall clock, so the +3h server stamp can't bias the age).
+  Exit codes: 0 healthy, 1 STALLED (> 30 min silent — alert written, once
+  per stall episode via a state file), 2 journal missing.  A pass with its
+  full 30 closed trades is reported COMPLETE, not stalled.  Alerts carry
+  the diagnosis (age, outcomes, pass process alive?, terminal up?) and the
+  restart command; log: `.freebuff/forward_demo_watchdog.log`.
+- Task Scheduler entry **"Mitemshub ForwardDemo Watchdog"** — every 15 min:
+  `schtasks /query /tn "Mitemshub ForwardDemo Watchdog" /v /fo LIST` to
+  check Last Result (0 = healthy, 1 = stall detected).  Scheduler output
+  goes to `.freebuff/forward_demo_watchdog_sched.log`.
+
+Verified live on 2026-08-12: the watchdog fired on the real stalled pass
+(102 min silent, pass alive in a dead chunk), the pass was restarted
+(pid via `tasklist | grep python`), the journal went fresh again, and the
+watchdog flipped to `status=OK` with the scheduled task returning 0.
 
 **Time-exit exit mode ported to the tester + 6-month backtest (2026-08-12):**
 `BandBackTests` gains `InpExitMode` (0 = TARGET default; 1 = TIME) — the
@@ -1967,6 +2237,697 @@ names the specific breached limit, and the drawdown day-window init is the
 caller's job (`SyncState` does it on first sync / day roll).  The plan's gate
 cases are all test-locked: sizing math, hard-limit breach → disabled, netting
 forbids the second position, EMERGENCY_STOP blocks everything.
+
+**Real-corpus cross-validation (2026-08-12):** `phase6_real_corpus_check.py`
+closes the same gap the Phase-2/3 harnesses closed — a STATEFUL replay of the
+risk layer over the real R_75 tick corpus (2378 M5 bars / 198h, 2078
+signals), instead of only the stateless parity gate.  Both engines consume
+the same deterministic signal stream (3-bar momentum direction, RR 1.2,
+closed-candle stop/target, 1h time exit) and the SAME Python-driven position
+lifecycle, so every downstream divergence is a gate/threshold/counter
+difference.  Results:
+
+- **`--mode aligned`** (shared gates at Python RiskConfig values): **veto
+  agreement 2078/2078 (100%)**, per-gate veto tallies identical gate-for-gate,
+  stake parity 202/202, stateful parity (streak + daily-dd + open counts)
+  2078/2078, 0 day_start disagreements.  The MQL5 risk layer and the Python
+  RiskEngine behave identically on the shared gates.
+- **`--mode defaults`** (MQL5 Constants.mqh vs Python RiskConfig): veto
+  agreement 81.4% (386 disagreements) — every one attributed to documented
+  configuration drift, none unexplained.  Python is stricter on daily loss
+  (2% vs 5%: 131) and consecutive losses (4 vs 5: 130); MQL5 adds hard caps
+  Python lacks — trades/day 10 (109), trades/hour 3 (8), the
+  decision-layer WEAK veto (8).  Stateful parity stays 2078/2078 and stake
+  parity 77/77 even at defaults.
+- The 1.2-RR float boundary is exercised and SYMMETRIC: both sides compute
+  `reward_risk` from the same entry/stop/target floats, so the 150
+  boundary-adjacent vetoes agree on both sides.
+
+Two harness findings worth carrying into Phase 7: the consecutive-loss
+breaker is a per-day hard lock (4 material losses halts the engine until the
+next session-day rollover re-arms it — nothing else resets a locked streak),
+and Python's `sync_session_day` lazily primes on first call, so a consumer
+that never calls it before the first day change silently skips the first
+daily reset (the harness must prime it, exactly like production does).
+
+### Phase 7 — Execution layer (2026-08-12)
+
+The six Execution modules are in place (`OrderManager`, `StopManager`,
+`TakeProfitManager`, `PositionManager`, `ExecutionMonitor`, `ExecutionEngine`),
+compiled clean (0 errors, 0 warnings) and **119/119 in the Strategy Tester**
+(`Tests/Phase7Tests.mq5` on SYN75, SUITE PASSED).  The layer is
+**transport-injected**: production binds the real `CTrade` via `CTradeAdapter`;
+the tester binds `MockTrade` with scripted retcodes — so the mocked-retcode
+phase gate (rejection / invalid stops / volume errors / margin /
+verify-fill failure) runs headless and the same engine code runs live
+unchanged.  `OrderManager` verifies every fill against the position table (and
+that closes actually removed the position); `ExecutionEngine` gates spread,
+price sanity, stops-level, and min-RR before the transport is touched;
+`PositionManager` only evaluates closed candles (no intraday-wick stop-outs)
+with reason-coded breakeven-trail / time-exit / partial management — the same
+closed-candle grace the Python engine enforces.  `verify_all.ps1` picks the
+suite up automatically via `Tests/*Tests.mq5`, so Phase 7 is already part of
+the one-command loop.
+
+### Phase 7 real-corpus cross-validation (R_75, 2026-08-15)
+
+`phase7_real_corpus_check.py` runs the execution layer against the REAL
+production Python backend over the real tick corpus — the Phase-2/3/6 harness
+pattern applied to execution.  2303 deterministic RR-1.2 signals from real R_75
+M5 bars (2603 / 217h) feed the MQL5 Execution mirror and the
+`SimulatedExecutionBackend` (the backend `paper_runner.py` journals).
+
+**Aligned mode (shared config: gates off, wick exits, no trail, 1h time exit):
+100% parity on all 1012 traded entries** — identical entry bar, exit reason,
+exit price and realized R (577 STOP / 427 TARGET / 8 TIME on both sides), and
+the min-RR 1.2 float boundary agrees exactly (972 below-threshold signals,
+0 disagreement).
+
+**Defaults mode (honest divergence):** the execution gates veto 997/2303
+signals (957 = the RR-1.2 float boundary — Python would submit all; 31 =
+spread guard on real corpus spreads; 9 = price sanity), and on the same
+approved entry set the Python journal (wick, no trail) books **−84.8R over 764
+trades** while the MQL5 closed-candle + BE trail books **+102.2R over 727
+trades** — 201 wick-stops spared by the grace, 259 −1R losses converted to
+scratch by the trail.  The band's full production floor (min_rr 2.0) rejects
+ALL RR-1.2 signals by design.  `[PHASE7-REAL]` machine lines are wired into
+`verify_all.ps1` as part of the `RealCorpus` gate contract (see the gate
+section above) — aligned parity below 100% or a defaults-mode edge flip now
+fails the scheduled loop.
+
+## Phase 8 — Journal + Analytics (2026-08-15)
+
+`Journal/` and `Analytics/` give the engine the plan's §17/§18 traceability:
+
+- **`Journal/TradeJournal.mqh`** — the §33 machine-readable trade log.  One CSV
+  row per closed trade: opened_at, symbol, strategy, regime, direction, entry,
+  SL, TP, volume, risk, pnl, confidence, score, exit, R, MAE, MFE, exit_reason,
+  closed_at, hold_bars.  Writes FILE_TXT + hand-built rows (FILE_CSV's auto-
+  quoting is unreliable in the tester sandbox); `CsvEscape` (in
+  `Constants.mqh`) sanitizes reason strings.
+- **`Journal/DecisionLogger.mqh`** — every BUY/SELL/WAIT with the full
+  decision-layer context (verdict, confidence, composite, geometry, reasons) in
+  a ring buffer + optional CSV mirror, with the §24 debug print block.
+- **`Journal/PerformanceLogger.mqh`** — incremental run aggregation (net/gross
+  PnL, PF, expectancy, win rate, avg win/loss, max drawdown on the
+  cumulative-R curve, consecutive streaks, avg hold) with a per-run summary CSV.
+- **`Analytics/PerformanceAnalytics.mqh`** — the full §18 metric set over
+  `OutcomeRecord[]` (identical math to the logger) plus splits by strategy,
+  regime, direction, exit reason, and confidence bucket.
+- **`Analytics/ExpectancyEngine.mqh`** — hit rate, avg R, avg planned RR, and
+  the empirical break-even floor (exact stage3_gate port: 1/(1+RR)+margin,
+  clamp [0.10,0.60], fallback 0.50) with a BEATS / does NOT beat verdict.
+- **`Analytics/RegimeAnalytics.mqh`** — per-regime breakdowns, best/worst
+  regime, regime concentration, and alignment share.
+
+**Verification (2026-08-15):** MetaEditor compile 0 errors / 0 warnings;
+`Tests/Phase8Tests.mq5` green in the real Strategy Tester on SYN75
+(**87 passed, 0 failed — SUITE PASSED**): the CSV round-trips (write → close →
+reopen → read back, header not duplicated), the logger matches hand-computed
+aggregation (max-DD 4.0R, PF 0.75, streaks 2/2), analytics metrics agree with
+the logger, all five splits are locked, the break-even floor math is pinned,
+and the regime breakdowns check out.  `verify_all.ps1` picks the suite up
+automatically.
+
+## Phase 9 — UI (2026-08-15)
+
+`UI/` renders the plan §34 chart dashboard and the trade/analysis trail on the
+chart.  Every object the engine draws goes through ONE lifecycle manager, so
+the object count is provably bounded and leak-free:
+
+- **`UI/Panel.mqh`** — the object-lifecycle foundation: a fixed-capacity named
+  registry with lazy ONE-TIME creation (create once, then update-only), a text
+  cache so content is assertable headlessly, and per-object teardown.  Bound:
+  `UI_MAX_OBJECTS` (256) per panel, `UI_MAX_MARKERS` (64) per signals ring.
+- **`UI/Dashboard.mqh`** — the §34 block: SYMBOL / MODE / REGIME (+conf) /
+  HTF BIAS / STRUCTURE / VOLATILITY / STRATEGY / SETUP SCORE / EXPECTED RR /
+  DECISION / RISK / SL / TP / OPEN POSITIONS / TODAY / DRAWDOWN / REASON,
+  color-coded by decision (BUY lime, SELL tomato, WAIT gray) and regime, with
+  an EMERGENCY_STOP banner on hard halt.  Fixed 20-object table; `Update()` is
+  text-only.  `FromStateManager()` feeds it straight from the engine state.
+- **`UI/VisualSignals.mqh`** — the reason-coded marker ring: entry/exit arrows
+  (233/234), SL/TP/breakeven HLINEs, structure/liquidity markers, regime-
+  change VLINEs.  Bounded by construction — adding beyond the 64-slot cap
+  evicts the oldest, and slot reuse type-switches the object (delete +
+  re-create) so the count never grows.
+
+**The object-count tester gate** (Phase9Tests) enforces the leak contract:
+registry bounded and stable across thousands of updates, identical object
+counts across create/destroy generations, real `ObjectCreate` attempts never
+above the caps, and every registry empty after teardown.  Three MQL5 gotchas
+found while building it: (1) the Strategy Tester does NOT release chart
+objects mid-pass — neither `ObjectDelete` nor `ObjectsDeleteAll` decrements
+`ObjectsTotal` during a pass (the tester auto-cleans at pass end), so the gate
+is registry-level, and `DestroyAll()` per-object delete is correct for live
+terminals; (2) this MT5 build exposes `OBJPROP_TIME` as an INTEGER property
+(`ObjectSetInteger`), verified by probe compile; (3) MQL5 forbids in-class
+`static const` members, so layout constants are `#define`s.
+
+**Verification (2026-08-15):** MetaEditor compile 0 errors / 0 warnings;
+`Tests/Phase9Tests.mq5` green in the real Strategy Tester on SYN75
+(**94 passed, 0 failed — SUITE PASSED**): panel lifecycle, the full §34 layout
+formatting + long-field truncation, the StateManager feed, the bounded marker
+ring with type-switch reuse, and the object-count gate.  `verify_all.ps1`
+picks the suite up automatically.
+
+## Phase 10 — Integration step 1: Market feed modules (2026-08-15)
+
+The two feed modules the EA needs that no production file had yet, extracted
+from `Tests/BandBackTests.mq5` so the EA never depends on a test suite:
+
+- **`Market/GarchForecaster.mqh`** — the EGARCH(1,1) estimator, verbatim
+  (modes: 0 = online-SGD faithful port of Python `models/garch.py`, 1 =
+  calibrated-fixed with the R_75 parameters — the production estimator).
+  Buffer-initialized log-variance at 50 observations; `Update()` returns false
+  with sigma = sqrt(long_run_variance) during the <30-observation warmup,
+  exactly like Python `_default_features()`.
+- **`Market/BarAggregator.mqh`** — the tick→closed-bar bucketter matching the
+  Python `CandleBuilder` convention: `bucket = floor(time/bar_sec)*bar_sec`,
+  same-bucket ticks update OHLC, a bucket crossing closes the bar exactly once
+  (`OnTick` returns true → `ClosedBar()` consumes it), multi-bucket jumps
+  fabricate no empty bars, and stale ticks are ignored.  This is the
+  closed-candle discipline the EA's per-bar pipeline runs on.
+
+**The Phase-10 step-1 lock (Phase10Tests):** reference sigmas are LOCKED
+cross-language, not just smoke-tested.  `mql5/phase10_garch_reference.py`
+runs the REAL Python `EGARCHVarianceForecaster` (mode-0 lock) and a
+fixed-params replication (mode-1 lock) over a fixed 80-return sequence
+(self-validating its mode-0 replication against the actual model before
+printing), and the tester asserts every MQL5 sigma against those literals at
+1e-9 relative.  Any divergence — a mistranslated recursion, a wrong clamp, a
+drifted default — fails the suite visibly.
+
+**Verification (2026-08-15):** MetaEditor compile 0 errors / 0 warnings;
+`Tests/Phase10Tests.mq5` green in the real Strategy Tester on SYN75
+(**620 passed, 0 failed — SUITE PASSED**): the <30-observation warmup gate,
+mode-1 calibrated-fixed sigmas vs the fixed-params replication (all 80),
+mode-0 online-SGD sigmas vs the real Python forecaster (all 80), SGD-vs-fixed
+divergence, determinism across instances + Reset, and the aggregator's OHLC /
+exactly-once close / multi-bucket jump / stale-tick / lockstep semantics.
+
+## Phase 10 — Integration step 2+3: the EA + P10-A aligned (2026-08-16)
+
+**`MitemshubAI.mq5`** — the integrated EA: `OnTick` → `BarAggregator` →
+`CandleEngine` → `GarchForecaster` → `VolatilityEngine` → `RegimeEngine` →
+`StructureEngine` → `StateManager` → band gate → `ScoringEngine` /
+`ConfidenceEngine` decision layer → `TradeQualityEngine` stage-3 floor →
+`RiskEngine` → `ExecutionEngine` (paper transport) → `TradeJournal` /
+`DecisionLogger` / `PerformanceLogger` → `Dashboard` → `VisualSignals` →
+`PositionManager` per-bar management.  Wrapper `Tests/Phase10IntegrationTests.mq5`
+lets verify_all.ps1 compile and run it like every other suite.
+
+**Verified (2026-08-16):** MetaEditor compile 0 errors / 0 warnings;
+Strategy Tester on SYN75 runs the FULL pipeline and emits the `[PHASE10]`
+machine lines (`trades / exit split / sumR / hit / avg_rr / floor / verdict /
+vetoes / rejects`) plus `SUITE PASSED`; the whole loop is green in
+`verify_all.ps1` including the new `Phase10Gate` row.
+
+**P10-A finding — the engine is aligned, the DATA sources are not.**  The
+Python reference (`backtest-vol --mode band` on the corpus, 300s) fires 28
+signals on the 2,565 M5 candles the corpus contains; the EA fires 93 on the
+4,584 dense M5 bars the tester generates for the same window.  The gap is a
+DATA-source mismatch, not an engine bug: the `data/backfill/R_75_ticks.csv`
+corpus is ~50% sparse (full Aug 1-5, then only 17-145 M5 buckets/day from
+Aug 6-16) while the terminal's SYN75 cache is full-density.  Measured proof:
+on the shared full-density days (Aug 1-5) the EA fires **22 signals vs
+Python's 23** — near-parity; the divergence is entirely the sparse tail,
+where the EA sees 5-10x more bars and fires proportionally.  Same-data
+parity is therefore not enforceable until the corpus is complete.
+
+**The P10-A gate is data-aware by design.**  `Invoke-Phase10Gate` in
+verify_all.ps1 always enforces the internal contract (exit split sums to
+trades, floor verdict self-consistent, zero vetoes/rejects in aligned mode,
+RR ≥ 1) and a RATE guard (EA signals per tester bar vs CLI signals per corpus
+candle within [0.25, 3.0]); when the corpus is ≥80% dense it additionally
+enforces the STRICT contract (trades ±10, hit ±5pp, sumR sign, floor
+verdict).  `-SkipPhase10Gate` opts out.
+
+**R_100 four-leg sign-lock (inside the same gate, 2026-08-16).**  The gate
+also runs the R_100 four-leg head-to-head (`backtest-vol --mode band
+--compare` @300s on `data/backfill/R_100_ticks.csv`) and FAILS if any leg's
+expectancy flips non-negative relative to the documented P10 matrix — the
+matrix locks ALL FOUR R_100 legs as negative (band −0.591R / fade −0.198R /
+momentum −0.019R / sniper −0.029R).  A flip means the matrix reference is
+stale or the leg's edge / cost model changed materially, so the loop must
+fail visibly instead of silently carrying a stale reference.  The parse is
+keyed on the CLI's `strategy=` machine lines (band / vol-reversion /
+vol-momentum / sniper), requires all four legs present with a parseable
+`expectancy_r=`, and only asserts the sign when a leg actually traded
+(>0 trades — a 0-trade leg can't prove a flip).  `-SkipPhase10R100Gate`
+opts out of this sub-check only (the four-leg run replays the sniper via
+`run_ticks`, the slow leg of the head-to-head).  Verified end-to-end on
+2026-08-16: the sign-lock PASSes on the fresh run (sniper n=266 −0.043R,
+band n=81 −0.591R, momentum n=199 −0.019R, fade n=41 −0.198R — all
+negative) and the FAIL branch was proven on a synthetic flipped momentum
+leg (+0.047R → SIGN FLIP).
+
+**R_75 sign-lock (inside the same gate, 2026-08-18).**  The gate also
+asserts the R_75 CLI reference's OWN sign against the documented matrix
+(−0.393R on the aligned real-tick basis, 2026-08-17): a non-negative
+expectancy on the band reference fails the loop even when EA↔CLI trade
+parity stays inside tolerance.  The STRICT branch only checks EA-vs-CLI
+sign *agreement* — a flip that moves BOTH sides positive together (a
+re-baseline, a cost-model edit, or a systematic edge change) satisfies
+parity and would otherwise pass silently.  Mirrors the R_100 four-leg
+sign-lock (which pins the leg signs against the P10 matrix); the R_75
+block reuses the already-computed CLI reference, so it adds no runtime.
+
+**Corpus repaired (2026-08-16) — the STRICT branch is now ACTIVE.**  The
+sparse tail (Aug 6-16, 50-145 buckets/day, Aug 10/11/14 missing entirely)
+was backfilled from the terminal's own M1 history with
+`python -m synthetic_trader.scripts.repair_corpus --symbol R_75 --backup`:
+47,372 OHLC-exact ticks (4 per M1 candle, 5 M1 candles per M5 bucket) merged
+into the 2,369 previously-missing buckets, keeping every real tick verbatim.
+Density: **0.491 → 0.935** (2,602 → 4,968 unique M5 buckets; the residual
+~6% is the corpus edges — Jul 30 starts at 05:41 and Aug 16's M1 sync ends
+12:34 UTC).  First strict run:
+`density=0.935 STRICT: EA n=97 hit=2.06% sumR=-36.172 | CLI n=90 hit=2.22%
+exp=-0.309` — **PASS** (trades Δ=7 ≤ 10, hit Δ=0.16pp ≤ 5, sign agrees).
+On the shared full-density days the EA now fires 97 vs CLI's 90 — same-data
+parity, no more 3.3x over-firing.  The repair is repeatable (the script
+fetches the terminal's M1 range over the corpus span and only fills buckets
+with <4 ticks), so a future collector outage can be repaired in one command.
+
+**P10-A strict reference re-baselined (2026-08-17) — the last red row is
+green.**  After the corpus kept growing (Jul 30 04:41 → Aug 16 20:33, density
+0.933), the full-loop STRICT pair sat at **EA 98 vs CLI 87 (Δ11 > 10)** —
+one trade over the Δ≤10 tolerance.  The Δ was NOT a density artifact: the
+CLI reference ran with the DEFAULT risk config (consecutive-loss halt 4,
+daily-loss halt 2%), which vetoed 16 of 103 signals — a 1.15%-hit 4R
+strategy trips the 4-loss breaker after every few losses and stays halted
+until the next win — while the EA's aligned mode approves every signal
+(InpMaxConsecLosses=9999 / InpMaxDailyLossPct=1.0 — "reference approved
+every signal — limits permissive", by the EA's own comment).  Full-density backfill was ruled out as a fix: the corpus's
+residual gaps are real data boundaries (Jul-30 04:41 start, Aug-16 20:33
+end — no ticks exist beyond them) and the interior 11:00–11:55 UTC holes on
+Aug 1/8/15 exist in the terminal's OWN M1 history (measured via
+`copy_rates_range` — the cache ends at 10:59 those days), so they cannot be
+re-created from any source.
+
+**Re-baseline:** the P10-A gate's CLI reference now runs the anchored-fit
+band in the SAME aligned mode as the EA — `backtest-vol --mode band
+--max-consecutive-losses 9999 --max-daily-loss-frac 1.0` (r_75.json still
+loaded).  On the current corpus that reference gives **trades=102
+signals=103 rejected=1 win=0.98% exp=-0.393** (the one rejection is an
+open-position overlap, the EA's SetMaxOpenPositions(1) equivalent).  The
+accepted pair is therefore:
+
+| Side | trades | hit | sumR / expectancy |
+|---|---|---|---|
+| EA (SYN75 M5, tester cache, aligned) | 98 | 1.02% | −36.964 |
+| CLI reference (R_75 band @300s, aligned risk, anchored fit) | 102 | 0.98% | −0.393R |
+
+**STRICT: PASS** — trades Δ4 ≤ 10, hit Δ0.04pp ≤ 5pp, sumR/expectancy both
+negative, EA floor verdict NOT_BEAT self-consistent, vetoes/rejects 0.  The
+residual 4-trade gap is the honest data-boundary residue (CLI sees the
+Aug-16 tail past the tester's Aug-16 00:00 window; EA sees Jul-30 00:00–04:41
+bars the corpus predates) — small enough to sit inside the tolerance the
+contract was designed for.  The P10-E sign gate's CLI reference uses the
+same aligned command; the R_100 four-leg sign-lock matrix is unchanged (it
+locks the SIGN on realistic costs, a separate basis).
+
+**Also fixed while wiring:** the EA's `MeanRevertSignal` was missing Python's
+middle z-band branch (2.0-3.0 → `min(0.6, 0.3 + recent*0.05)`) — patched for
+exactness (entry-set-neutral at the 0.02 min-revert gate, but the port is now
+faithful).  And the six undeclared `GATE_*` constants (defined in
+BandBackTests but not the EA) plus an implicit enum conversion — the
+transitional compile had 6 errors / 1 warning; now 0 / 0.
+
+## Phase 10 — P10-D row: the EA on SYN100, sign-lock vs Python R_100 (2026-08-16)
+
+**Run:** `verify_all.ps1 -Suite Phase10IntegrationTests -Symbol SYN100
+-RangeDays 17 -Inputs "InpGarchMode=0;InpGarchOmega=-1.8412;InpGarchAlpha=0.1345;
+InpGarchGamma=-0.0374;InpGarchBeta=0.8557"` (Python gates skipped — P10-D's
+reference is the R_100 band, not R_75).  The EA seeds mode 0 (online-SGD from
+calibrated priors — exactly the Python `calibrated_garch=loaded` path) with
+the fresh R_100 params and runs on the SYN100 tester cache over the same
+17.4-day window as the corpus.
+
+**Result — P10-D PASSES (sign-lock confirmed):**
+
+| Side | trades | hit | sumR / expectancy | calibration |
+|---|---|---|---|---|
+| EA (SYN100 M5, tester cache) | 106 | 0.94% | **−53.741** | mode-0 seeded (omega −1.8412 / alpha 0.1345 / gamma −0.0374 / beta 0.8557) |
+| Python reference (R_100 band @300s, repaired corpus) | 81 | 3.70% | **−0.591** | loaded (`r_100.json`) |
+
+Both sums are **negative** — the P10-D contract (sign agreement, expected
+negative) holds.  The 106-vs-81 trade gap is the same data-source mismatch
+documented for P10-A (terminal cache full-density vs corpus) rather than an
+engine divergence; P10-D locks the SIGN, not trade-for-trade parity.  The
+reference number was updated after the corpus repair (was 44 trades / −0.619R
+on the sparse corpus).  The EA run also kept internal consistency (exit split
+sums to trades, floor verdict self-consistent, vetoes/rejects = 0) and
+printed `SUITE PASSED`.
+
+**Four-leg head-to-head on R_100 @300s, repaired corpus, realistic costs
+(slip 0.05, penalty 0.10) — 2026-08-16, fresh calibrated params:**
+
+| leg | trades | hit | expectancy | net PnL |
+|---|---|---|---|---|
+| vol-band (P10-D reference) | 81 | 3.70% | **−0.591R** | −254.51 |
+| vol-reversion (fade) | 41 | 51.22% | −0.198R | −51.32 |
+| vol-momentum | 199 | 33.67% | −0.019R | −48.60 |
+| sniper (reference) | 262 | 46.95% | −0.029R | −60.23 |
+
+All four legs are **negative** on R_100 at 300s — the R_100 side of the P10
+matrix is uniformly bearish, and the band remains the sign-lock reference
+the P10-D gate contracts against.  All three vol legs ran with
+`calibrated_garch=loaded` (fresh `r_100.json`).
+
+## Phase 10 — P10-D row: the EA on SYN75, sign-lock vs Python R_75 (2026-08-16)
+
+**Run:** `verify_all.ps1 -Suite Phase10IntegrationTests -Symbol SYN75
+-RangeDays 17 -SkipPhase10R100Gate -SkipSniperGate -SkipExecutionParity
+-SkipRealCorpusGate -SkipPhase8Gate -SkipPhase6Gate -SkipCalibrationGate`
+(Python gates skipped — this is the R_75 half of the P10-D sign-lock; the
+R_100 half was verified earlier the same day).  The EA seeds mode 0
+(online-SGD from calibrated priors — exactly the Python
+`calibrated_garch=loaded` path) with the **anchored R_75 params as its
+defaults** and runs on the SYN75 tester cache over the same 17-day window as
+the repaired corpus.
+
+**Result — P10-D R_75 PASSES (sign-lock confirmed):**
+
+| Side | trades | hit | sumR / expectancy | calibration |
+|---|---|---|---|---|
+| EA (SYN75 M5, tester cache) | 98 | 1.02% | **−36.964** | mode-0 seeded (omega −1.8841 / alpha 0.1422 / gamma −0.0733 / beta 0.8527) |
+| Python reference (R_75 band @300s, repaired corpus) | 87 | 1.15% | **−0.376R** | loaded (`r_75.json`) |
+
+Both sums are **negative** — the P10-D contract (sign agreement, expected
+negative) holds, the same verdict the R_100 half produced (EA −53.741 vs
+reference −0.591R).  The EA init line confirms the shared anchored basis
+(`[MITEMSHUB] bar_sec=300 garch_mode=0 omega=-1.8841 alpha=0.1422
+gamma=-0.0733 beta=0.8527 ...`) — identical params to the CLI's `r_75.json`.
+Machine line: `trades=98 exits=stop:39,trail:58,target:1,time:0 sumR=-36.964
+hit=1.02% avg_rr=4.00 floor=25.0% floor_verdict=NOT_BEAT risk_vetoes=0
+exec_rejects=0` (internally consistent — exits sum to trades, aligned mode
+has zero vetoes/rejects).  The 98-vs-87 trade gap is the same data-source
+mismatch as R_100 (tester cache full-density vs corpus 93.3% density); P10-D
+locks the SIGN, not trade-for-trade parity.  The strict P10-A trade-count
+contract still sits one trade over tolerance (Δ11 > 10) on that density gap
+— the documented decision point from the full-loop run, unchanged by this
+row.  **Resolved 2026-08-17** — the strict reference was re-baselined to the
+anchored fit in aligned mode (permissive risk, matching the EA's 0-veto
+aligned config) so the accepted pair is EA 98 / −36.964 vs CLI 102 /
+−0.393R (Δ4 ≤ 10, STRICT PASS — see the P10-A section above for the
+finding and why full-density backfill is impossible).  Both symbols in the
+P10 matrix now share one freshly verified basis: R_75 (98 / −36.964 vs 102 /
+−0.393R) and R_100 (106 / −53.741 vs 81 / −0.591R), all four sums NEGATIVE.
+
+## Phase 10 — P10-B row: the EA at M1, 60s parity + a real risk-wiring bug (2026-08-16)
+
+**Run:** `verify_all.ps1 -Suite Phase10IntegrationTests -Symbol SYN75 -RangeDays 17
+-Inputs "InpBarSec=60;InpMaxConsecLosses=4;InpMaxDailyLossPct=0.02;InpMaxEquityDDPct=0.0"`
+(Python gates skipped).  The Python 60s reference: `backtest-vol --mode band
+--timeframe 60` on the repaired corpus = **signals 590, rejected 364, trades
+226, win 9.73%, expectancy −0.166R**.
+
+**First run exposed a real bug, not a parity miss:** the EA fired **523
+trades / 0 vetoes** — its §12 risk breakers could not fire because outcomes
+were never registered (`RegisterOpen`/`RegisterOutcome`/`RegisterClose` were
+never called, and `SyncState(10000.0,…)` pinned equity flat on every bar, so
+the consecutive-loss / daily-loss / equity-drawdown limits saw 0 losses
+forever).  P10-A had masked this at 300s: Python's default risk rejected
+14/104 signals there, but the EA's 0 vetoes passed the Δ≤10 tolerance.
+
+**Fixed in `MitemshubAI.mq5` + `Risk/RiskEngine.mqh`:** (1) exit path now
+registers outcomes — `pnl = stake × return_r` (Python `register_outcome`
+parity), updates tracked equity, and `RegisterClose` clears the MQL5-only
+exposure manager; (2) entry path calls `RegisterOpen` after a successful
+submit; (3) a latent bug in the Evaluate reason chain — the equity-drawdown
+(and open-positions / consecutive / daily) checks lacked the `> 0` guard
+that `AnyHardLimitBreached` has, so a limit set to 0 (disabled) vetoed
+EVERY signal.  Phase-6 suite still 45/45.
+
+**After the fix — P10-B PARITY:**
+
+| Side | trades | hit | sumR | vetoes |
+|---|---|---|---|---|
+| EA (SYN75 M1, default risk) | 238 | 10.08% | −38.840 | 318 |
+| Python reference (60s band) | 226 | 9.73% | −37.5 | 364 rejected |
+
+Trades Δ12, hit Δ0.35pp, sumR both negative and within 4% — same-data
+parity given the residual corpus-density gap (93.5% vs the tester cache's
+100%).  **P10-A strict gate still PASSES** after the fix (EA n=97 hit=2.06%
+vs CLI n=90, vetoes 0 in the aligned config) — the 300s path is unchanged.
+The production consequence: the EA's hard risk limits (§12 "TRADING
+DISABLED") now actually fire instead of silently never tripping.
+
+## Phase 10 — P10-C row: EA management config (trail 0.3 + closed-candle grace) vs the phase-7 defaults contract (2026-08-16)
+
+**Run:** `verify_all.ps1 -Suite Phase10IntegrationTests -Symbol SYN75 -RangeDays 17
+-Inputs "InpTrailOn=true;InpTrailFrac=0.3;InpClosedCandleGrace=true"` with the
+gates skipped (P10-C is a manual row like P10-B/D — the P10-A gate expects its
+own aligned config).  The EA now defaults to the anchored R_75 calibration
+(omega −1.884103 / alpha 0.142169 / gamma −0.073285 / beta 0.852741) and
+reuses the fixed risk wiring from P10-B.
+
+**Phase-7 defaults-mode contract (the Python harness, same entry set, both exit
+policies) — PASS (re-verified 2026-08-16, fresh run on the current corpus):**
+
+| lane | trades | hit | sumR |
+|---|---|---|---|
+| Python wick journal (no trail) | 1604 | — | **−28.99** |
+| MQL5 closed-candle + BE trail 0.3 | 1528 | 31.1% | **+257.26** |
+
+sumR_mq +257.26 > sumR_py −28.99 ✓, grace_saved 401 + trail_converted 571 > 0 ✓
+(numbers moved up from the gate's original +104.6/−82.4 because the corpus is
+now full-density — more bars, more replays; the contract direction holds).
+
+**EA side (SYN75 M5, 17-day window, grace=ON verified in the machine line):**
+
+| EA run | trades | exits (stop/trail/target/time) | sumR | vetoes/rejects |
+|---|---|---|---|---|
+| P10-A baseline (wick, trail 0.3) | 97 | 39/56/1/1 | −36.172 | 0/0 |
+| P10-C (grace ON, trail 0.3) | 98 | 39/58/1/0 | −36.964 | 0/0 |
+
+The management wiring is end-to-end live in the integrated EA (grace=ON
+applied, 58 BE-trail conversions > 0, zero vetoes/rejects with the fixed risk
+engine).  The honest nuance: on the **band** entry set the closed-candle grace
+is near-neutral (−0.79R on 98 trades — one exit reclassified time→trail and one
+new trade), because the band's exits are time/trail-dominated and its stops are
+rarely wick-touched.  The grace's value lives on the **sniper-style** entry set
+with tighter stops — that's where the harness's 400 wick-saves come from.  So
+P10-C confirms the phase-7 management edge contract (it PASSES), and confirms
+the EA runs the same management config; it also documents that the grace is an
+entry-set-dependent tool, not a band-leg fix.
+
+## Phase 10 — P10-E row: OHLC stress — the direction FLIPS (2026-08-16)
+
+**Run:** `verify_all.ps1 -Suite Phase10IntegrationTests -Symbol SYN75 -RangeDays
+17 -TestModel 2` (gates skipped; the `-TestModel` override applies to the suite
+loop only — the Phase-6 risk gate and the seed sweep keep `Model=1` because
+their contracts were calibrated on real ticks).  Same window, same EA inputs,
+same anchored calibration — only the tester's price model changed:
+
+| EA run | model | ticks | trades | hit | sumR |
+|---|---|---|---|---|---|
+| P10-A baseline | 1 (real ticks) | 97,200 | 98 | 1.02% | −36.964 |
+| **P10-E stress** | 2 (1-min OHLC) | 19,039 | 96 | **30.21%** | **+55.502** |
+
+**The P10-E row criterion ("same PnL direction") is NOT met — the sign
+flipped from negative to positive.**  This is a real, reproducible finding, not
+a fluke: the run generated 19,039 OHLC-synthesized ticks vs 97,200 real ticks
+over the same 4,860 M5 bars, so the tester genuinely used the OHLC model.
+
+**Why it flips — and why this matters:** the OHLC model only sees 1-min bar
+closes, so intrabar wick trade-throughs never reach the EA's stop logic.  The
+band's 4.0σ target becomes reachable on closes (hit 1.02% → 30.21%) and the
+−36.964R real-tick loss becomes +55.502R.  In effect, OHLC implicitly applies
+closed-candle grace to ALL exits — the same mechanism P10-C measured as
+near-neutral on the band leg because its stops are rarely wick-touched on real
+ticks.  The honest conclusions:
+
+1. **The band's negative real-tick result is model-true.**  The direction flip
+   under OHLC means the positive sign is a *model artifact* — you cannot
+   validate the band leg on OHLC and call it profitable; only real-tick tests
+   are trustworthy for this geometry.
+2. **The flip quantifies the grace ceiling.**  +55.502R vs −36.964R (Δ≈92R
+   over 96-98 trades) is the theoretical value of applying wick-grace to
+   stops — a useful upper bound for the sniper-side grace work, not a band
+   freebie (the band's own P10-C grace run stayed at −36.964R because its
+   stops aren't the wick-hit exits; the OHLC delta comes from the *entry set's*
+   stop sensitivity, which is the sniper geometry's domain).
+
+   **Follow-up — the sniper does NOT flip under the OHLC model.**  There is no
+   sniper EA in the tester (the sniper is Python research via `run_ticks`), so
+   the equivalent was a replay of the REAL captured 277-trade sniper entry set
+   under close-based exit resolution — the documented P10-E mechanism (no
+   intrabar wick trade-throughs) — at both the native M5 and the tester's 1-min
+   resolution (`_probe_sniper_ohlc.py`):
+
+   | lane | trades | hit | sumR | delta vs real ticks |
+   |---|---|---|---|---|
+   | WICK-M5 (real ticks) | 277 | 50.2% | +121.40 | — |
+   | CLOSE-M5 (OHLC-equiv) | 277 | 50.2% | +119.09 | **−2.31R** |
+   | CLOSE-M1 (1-min OHLC) | 276 | 50.4% | +119.86 | **−1.54R** |
+
+   The band's ~92R OHLC delta is a **band-geometry artifact, not a general
+   wick-grace value**: the sniper's 1R stops mean 135-136 of its 136
+   stop-outs are CLOSE-THROUGHS even at 1-minute resolution (the close itself
+   violates the stop), so removing intrabar wick trade-throughs converts
+   almost nothing (0-1 of 136).  The band's 4.0σ target makes its stop the
+   near side, so its stop-outs are wick-only touches that the OHLC model lets
+   survive to the reachable target.  The sniper is model-robust in both
+   directions (sign unchanged, sumR within ~2R of the real-tick baseline);
+   the small negative deltas come from the close lanes missing wick-only
+   *target* touches (132 -> 130-131 targets).  **The wick-save ceiling is
+   therefore never sniper-harvestable:** the closed-candle grace is
+   band-geometry-specific (wide stops, mostly wick-only touches), while the
+   sniper's tight 1R stops are overwhelmingly close-throughs — close-based
+   resolution converts ~nothing on the sniper entry set, so the ~92R ceiling
+   must be read as the BAND's artifact, not a sniper improvement reserve.
+3. **No state-growth concern:** 96 vs 98 trades (consistent volume), Phase-9's
+   object-count gate is green (0/0) in the full loop, and the machine line
+   still carries a clean internal contract (exit split sums, vetoes/rejects 0,
+   floor verdict self-consistent).
+
+## P10-E sweep: the FULL loop at -TestModel 2 (2026-08-17) — only the exit
+## side moves, and a machine-line parse bug surfaced
+
+Ran the whole loop (all 13 tester suites + every gate) at `-TestModel 2`
+(`verify_all.ps1 -TestModel 2 -RangeDays 17`).  The result is remarkably
+clean: **every suite and every Model-independent gate holds**, and the only
+shifts are the two rows that consume the EA's `[PHASE10]` machine line —
+which is exactly the P10-E lesson generalized.
+
+| Row | Model=1 baseline | Model=2 result | verdict |
+|---|---|---|---|
+| All 13 tester suites (Phase1-9, Phase10, Phase10Integration, BandBack, StructureLive) | PASS | **PASS — byte-identical** | HOLDS |
+| SniperGate | PASS | PASS (svcap n=277 exp +0.119R) | HOLDS (corpus replay) |
+| ExecutionParity | PASS | PASS (40/40) | HOLDS |
+| RealCorpus | PASS | PASS (phase6 aligned 4717/4717 veto 100%) | HOLDS |
+| Phase8Gate | PASS | PASS (parity MATCH, band n=87 exp −0.376R) | HOLDS |
+| Phase6RiskGate | PASS | PASS (242/294 — its own forced Model=1 run) | HOLDS |
+| CalibrationGate | PASS | PASS | HOLDS |
+| **Phase10Gate (P10-A STRICT)** | PASS (EA 98 vs CLI 102, Δ4) | **FAIL — hit Δ30.02pp + sign flip** (trades Δ2 still ≤10!) | SHIFTS (exit side only) |
+| **Phase10ESignGate** | PASS | **FAIL — SIGN FLIP** (EA +60.496 vs CLI −0.393) | SHIFTS (expected) |
+
+Two findings beyond the P10-E row itself:
+
+1. **The entry set is model-robust; the EXIT side is what flips.**  At
+   Model=2 the EA fired **100 trades vs the aligned CLI reference's 102 →
+   Δ2**, even tighter than the real-tick Δ4: the band's ~100-signal entry set
+   is price-model-independent.  What changes is entirely in the exits —
+   hit 1.02% → 31.00%, sumR −36.964 → **+60.496**, floor verdict NOT_BEAT →
+   BEAT, exit split 39/58/1/0 → 49/20/26/5 (targets become reachable on
+   closes: 1 → 26; wick-trail conversions collapse: 58 → 20).  The STRICT
+   trade-count check survives the model switch; hit/sign are the tripwires.
+2. **The two machine-line gates had a parse bug that this sweep exposed:**
+   the `[PHASE10]` regex required `sumR=([+-]...)`, but the EA prints a
+   leading sign only for NEGATIVE sums — the first positive sumR in the
+   suite-loop log (the Model=2 +60.496) made both gates bail with "no
+   machine line" instead of evaluating the flip.  Fixed to `([+-]?...)` in
+   verify_all.ps1 and re-evaluated against the actual run: P10-A now fails
+   with the honest "STRICT hit Δ30.02pp + sign disagree" and P10-E with
+   "SIGN FLIP" — the verdicts the contracts were designed to produce.
+   (The R_100 four-leg sign-lock inside P10-A was skipped by the early
+   bail; it is corpus-replay and Model-independent — unchanged from the
+   verified 2026-08-16 matrix.)
+3. **The audit generalizes the fix (2026-08-17).** The same sign-required
+   assumption existed in every other numeric machine-line regex, two of
+   them live: the Phase-6 risk gate's 60s `sumR=([+-]...)` would bail the
+   first time that run's sumR printed positive or `0.000` (same EA, same
+   no-forced-sign `%.3f` — only negative today by luck), and the Phase-8
+   analytics gate's `beats=(yes|no)` could not match the harness's
+   `beats=BEATS` (case-sensitive) — it only passed because the band has
+   been losing; the first BEATS verdict would have bailed as "unparseable"
+   instead of evaluating the flip.  All gate value-parses now share one
+   token, `$NumTok` = `([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)`
+   (defined once in verify_all.ps1 and seed_sweep.ps1): optional sign +
+   exponent form, exactly one capturing group per use so downstream group
+   indexes are unchanged.  The Phase-8 harness now emits `beats=yes|no` to
+   match its gate's vocabulary.  Depth/vol-split and Phase-8 exp/sumR were
+   `[+-]`-required but their emitters force `%+`/`:+` today — hardened to
+   the same token so a dropped forced sign can never break them.  The fix is
+   fixture-guarded: `verify_phase10_machine_line_fixtures.ps1` extracts the
+   real `$NumTok` + all three gate regex literals and the real
+   `Get-Phase10TradesLine` out of verify_all.ps1 and asserts a positive-sumR
+   line (`sumR=60.496` — the Model=2 flip shape) parses end-to-end with
+   correct groups, so P10-A / Phase-6 / P10-E evaluate it instead of bailing
+   on "no machine line"; it also covers zero/forced-plus sumR, bar_sec
+   last-run-wins scoping, and a negative control proving the old `([+-]...)`
+   pattern still bails on the positive line (mutation-tested: regressing
+   `$NumTok` back to a sign-required form fails the harness, exit 1).  The
+   harness is wired into `verify_all.ps1`'s pre-flight as an always-on,
+   ~1-second parse-contract gate (step 5): every verify run — including the
+   hourly scheduled loop — executes it BEFORE anything compiles or stages, so
+   a regex regression fails the run in seconds with `PRE-FLIGHT FAILED`
+   (exit 2) instead of after a 20-minute tester run.  If the harness file is
+   missing, the pre-flight warns loudly and proceeds (a missing harness   does not by itself produce a bogus verdict; restore it to re-arm the gate).
+4. **The audit is now a closed loop (2026-08-17, same day).** Four follow-up
+   guards landed so emitters and gates can never drift apart again:
+   - **EA sign at the source:** the `[PHASE10]` print in MitemshubAI.mq5 now
+     uses `sumR=%+.3f`, so every live machine line carries an explicit sign
+     and the sign-optional `$NumTok` parse is a pure compatibility layer for
+     old artifacts.
+   - **Phase-8 fixture harness wired in:** `verify_phase8_machine_line_fixtures.ps1`
+     (16 cases: live band/buckets/exit pattern extraction, beats vocabulary
+     with a `beats=BEATS` negative control, forced-sign/no-sign/zero variants,
+     emitter-source assertions on phase8_analytics_check.py) now runs in the
+     same pre-flight step 5 as the Phase-10 gate.
+   - **Phase-10 harness extended to every P10-A/P10-E value parse:** it now
+     also extracts the CLI-reference patterns (`trades=` / `win_rate=` /
+     `expectancy_r=`) and the R_100 four-leg block patterns (`^strategy=` /
+     `^trades=` / `^win_rate=` / `^expectancy_r=`), asserts negative,
+     no-sign-positive, and zero CLI expectancies parse, replicates the
+     four-leg block parser against the documented matrix legs (band −0.591R /
+     fade −0.198R / momentum −0.019R / sniper −0.029R), and negative-controls
+     that a flipped (positive) leg is detected by the sign-lock.
+   - **`$NumTok` fuzz gate (pre-flight step 6):** fuzzes every `$NumTok`
+     interpolation site in verify_all.ps1 (9 rows: EA, depth, vol, phase7
+     ×2, phase8 ×2, four-leg, CLI ref) against negative / no-sign positive /
+     forced-plus / zero / small-exponent / large-exponent, plus a negative
+     control that the old sign-required form still bails on a no-sign
+     positive.  A table-vs-use-site text drift (each row's pattern must appear
+     verbatim at ≥2 places in the file) fails the run, so a future emitter
+     format change fails the loop in seconds instead of at the first live
+     flip.
+   - **The contract is documented once:** `MACHINE_LINE_SPEC.md` is the
+     single source of truth — the shared number grammar, the sign policy per
+     emitter, every emitter/parser pair with file pointers, the protection
+     matrix, and emitter hygiene rules.
+
+5. **Python-reference basis audit (2026-08-18).** Every place verify_all.ps1
+   (or a harness it invokes) runs a Python reference was checked for a risk or
+   config basis that could silently diverge from the contract it claims to
+   enforce.  Findings and fixes:
+   - **P10-A / P10-E `backtest-vol` references — FIXED:** both now pin the
+     documented realistic-cost basis explicitly at the call site
+     (`--entry-slippage-ticks 0.05 --exit-slippage-ticks 0.05
+     --execution-penalty 0.10`) plus the aligned risk basis
+     (`--max-consecutive-losses 9999 --max-daily-loss-frac 1.0`), so a future
+     change to the CLI's *default* cost args cannot silently re-basis the gate.
+     The CLI defaults currently match (0.05/0.05/0.10), but the gate no longer
+     depends on them staying that way.
+   - **R_100 four-leg reference — FIXED:** same explicit cost pin at the
+     `--compare` call site (matrix basis is defined on 0.05/0.05/0.10).
+   - **phase8_analytics_check.py internal CLI-parity reference — FIXED:** the
+     Python-side broker hardcodes 0.05/0.05/0.10; the CLI subprocess now passes
+     the same args instead of inheriting defaults.
+   - **phase6/phase7 real-corpus checks — SAFE by design:** each runs in two
+     explicit modes (`aligned` = shared gates configured identically, 100%
+     parity enforced; `defaults` = MQL5-vs-Python drift quantified, parse-only
+     row).  No silent basis: the contract mode is the aligned one and it fails
+     loudly.
+   - **execution_parity_check.py — SAFE by design:** uses zero-cost
+     `PaperExecutionConfig()` on BOTH sides; the contract is paper-vs-live
+     backend equivalence, so any cost basis would itself be drift.
+   - **svcap_recheck.py — SAFE by design:** reports gross AND net@0.05 AND
+     net@0.10 explicitly on the same run, gating on the costed cells; no
+     hidden default.
+   - **calibration_sanity_check.py / phase10_garch_reference.py — SAFE:**
+     read on-disk calibration JSONs / a fixed literal sequence; no risk or
+     cost args to drift.
+   - **Windowed parity corpus (2026-08-18):** the R_75 reference corpus is now
+     `data/backfill/R_75_ticks.windowed.csv` — union of the pre-repair head
+     (Jul 30 → Aug 09) and the live backfill, repaired from the terminal's M1
+     history, clipped EXACTLY to the tester window (Jul 30 00:00 → Aug 16
+     00:00).  CLI 97 vs EA 98 (Δ1 ≤ 10, STRICT PASS); the live collector file
+     keeps growing for the engine while the windowed file is the frozen parity
+     basis.  The contract test `tests/test_phase10_aligned_reference_contract.py`
+     locks this (|trades − 98| ≤ 10 and expectancy < 0 on the windowed
+     corpus).
 
 ## What is deliberately NOT here
 

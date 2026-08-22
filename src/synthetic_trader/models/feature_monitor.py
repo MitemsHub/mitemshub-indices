@@ -243,7 +243,7 @@ class FeatureImportanceMonitor:
         self, feature: str, model_weights: dict[str, float]
     ) -> DriftAlert | None:
         """Check if a feature's rolling importance dropped below the floor."""
-        history = self._contribution_history.get(feature, [])
+        history: list[float] | deque[float] = self._contribution_history.get(feature, [])
         if len(history) < self.min_samples_before_alert:
             return None
 
@@ -294,7 +294,7 @@ class FeatureImportanceMonitor:
             )
             if consistent:
                 weight = model_weights.get(feature, 0.0)
-                rolling_avg_history = self._contribution_history.get(feature, [])
+                rolling_avg_history: list[float] | deque[float] = self._contribution_history.get(feature, [])
                 rolling_avg = (
                     sum(rolling_avg_history) / len(rolling_avg_history)
                     if rolling_avg_history

@@ -20,28 +20,28 @@ class DerivCredentials:
 
 # ── Deriv API symbol mapping ───────────────────────────────────────────────
 # CRITICAL: The Deriv WebSocket API symbols for Volatility 75/100 (1s) Index
-# DO NOT match Blueberry Markets MT5 pricing. The prices are fundamentally
+# DO NOT match Deriv MT5 pricing. The prices are fundamentally
 # different instruments despite sharing similar names:
 #
 #   Deriv 1HZ75V  (Volatility 75 1s Index)  → trades at ~7,000
-#   Blueberry Volatility 75 (SYN75)          → trades at ~1,542
+#   Deriv Volatility 75 (SYN75)          → trades at ~1,542
 #
 #   Deriv 1HZ100V (Volatility 100 1s Index) → trades at ~280
-#   Blueberry Volatility 100 (SYN100)        → trades at ~280
+#   Deriv Volatility 100 (SYN100)        → trades at ~280
 #
 # When MT5 is configured and connected, the system pulls ticks DIRECTLY from
-# the Blueberry Markets terminal (correct prices). Deriv API is only used as
+# the Deriv terminal (correct prices). Deriv API is only used as
 # a FALLBACK when MT5 is not available — in which case the price levels will
 # NOT match the broker's actual instrument pricing.
 #
 # Map: internal symbol → Deriv API symbol (fallback only)
 DERIV_API_SYMBOL_MAP: dict[str, str] = {
     # 1HZ75V = Deriv's own Volatility 75 (1s) Index. Price levels are ~4.6x
-    # higher than Blueberry Markets' "Blueberry Volatility 75" (~1,542).
+    # higher than Deriv' "Deriv Volatility 75" (~1,542).
     # Used for pattern analysis only — trade levels should come from MT5.
     "R_75": "1HZ75V",
     # 1HZ100V = Deriv's Volatility 100 (1s) Index. Price levels roughly match
-    # Blueberry Markets' "Blueberry Volatility 100" (~280).
+    # Deriv' "Deriv Volatility 100" (~280).
     "R_100": "1HZ100V",
 }
 
@@ -64,7 +64,7 @@ def _warn_deriv_fallback() -> None:
         _DERIV_WARNING_SHOWN = True
         print(
             "[deriv_ws] WARNING: MT5 not configured — using Deriv API fallback. "
-            "Deriv 1HZ75V trades at ~7,000 but Blueberry Volatility 75 trades at "
+            "Deriv 1HZ75V trades at ~7,000 but Deriv Volatility 75 trades at "
             "~1,542. Trade levels will be WRONG until MT5 is configured. "
             "Set SYNTHETIC_MT5_SERVER, SYNTHETIC_MT5_LOGIN, SYNTHETIC_MT5_PASSWORD "
             "in .env.local.",
@@ -129,7 +129,7 @@ class DerivWebSocketClient:
             if message.get("req_id") == payload["req_id"]:
                 if "error" in message:
                     raise RuntimeError(message["error"])
-                return message
+                return dict(message)
 
     async def authorize(self, token: str) -> dict[str, Any]:
         return await self.request({"authorize": token})

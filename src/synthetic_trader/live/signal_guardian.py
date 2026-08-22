@@ -477,7 +477,7 @@ def evaluate_signal_guardian(
         context.previous_guardian_state == "confirmed"
         and context.first_confirmed_at_tick is not None
     ):
-        ticks_since_confirmation = context.ticks_since_armed - context.first_confirmed_at_tick
+        ticks_since_confirmation = context.ticks_since_armed - (context.first_confirmed_at_tick or 0)
         if ticks_since_confirmation < _effective_lock_ticks:
             _in_confirmed_lock = True
 
@@ -510,7 +510,7 @@ def evaluate_signal_guardian(
         favorable_ratio = context.max_favorable_excursion / stop_distance if stop_distance else 0.0
         atr = context.atr_14 if context.atr_14 and context.atr_14 > 0 else stop_distance * 0.3
         _trail = _compute_trailing_stop(snapshot, stop_distance, favorable_ratio, atr)
-        ticks_since = context.ticks_since_armed - context.first_confirmed_at_tick
+        ticks_since = context.ticks_since_armed - (context.first_confirmed_at_tick or 0)
         return GuardianEvaluation(
             "confirmed",
             f"Sniper setup confirmed and stable ({ticks_since}t since confirmation) — thesis intact, only stop-hit invalidates.",
@@ -603,7 +603,7 @@ def evaluate_signal_guardian(
     # impulse) but the setup was recently confirmed, hold 'confirmed'
     # until the lock expires.
     if _in_confirmed_lock:
-        ticks_since_confirmation = context.ticks_since_armed - context.first_confirmed_at_tick
+        ticks_since_confirmation = context.ticks_since_armed - (context.first_confirmed_at_tick or 0)
         remaining = _effective_lock_ticks - ticks_since_confirmation
         return GuardianEvaluation(
             "confirmed",

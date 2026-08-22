@@ -135,9 +135,9 @@ def _write_status(stats: dict[str, AutoScoreStats], status_path: Path) -> None:
 class ScoringUnavailableError(RuntimeError):
     """Raised when no trusted market-data source is available for scoring.
 
-    Scoring *requires* the Blueberry MT5 terminal.  There is deliberately no
+    Scoring *requires* the Deriv MT5 terminal.  There is deliberately no
     Deriv fallback: Deriv's 1HZ75V/1HZ100V trade at a completely different
-    price scale (R_75 ~7,000 on Deriv vs ~1,542 on Blueberry SYN75), so
+    price scale (R_75 ~7,000 on Deriv vs ~1,542 on Deriv SYN75), so
     outcomes measured through Deriv would be incomparable to the call levels
     and could never feed the Stage-3 gate honestly.
     """
@@ -146,7 +146,7 @@ class ScoringUnavailableError(RuntimeError):
 def _resolve_scoring_client_factory() -> Callable:
     """Resolve the market-data client for scoring sweeps.
 
-    Only the Blueberry MT5 terminal (``Mt5TickClient``) is trusted: it serves
+    Only the Deriv MT5 terminal (``Mt5TickClient``) is trusted: it serves
     the same SYN75/SYN100 price scale the calls' levels (entry/stop/target)
     are measured on.  Without MT5 the sweep fails loudly ("no fallback") so
     the operator never mistakes wrong-scale outcomes for real evidence.
@@ -157,7 +157,7 @@ def _resolve_scoring_client_factory() -> Callable:
         return Mt5TickClient
     raise ScoringUnavailableError(
         "MT5 not configured (SYNTHETIC_MT5_SERVER/LOGIN/PASSWORD unset) - "
-        "scoring requires the Blueberry MT5 terminal; the Deriv API fallback "
+        "scoring requires the Deriv MT5 terminal; the Deriv API fallback "
         "was removed because 1HZ75V/1HZ100V are on the WRONG price scale"
     )
 
@@ -291,7 +291,7 @@ async def run_auto_score_loop(
         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
             log(
                 f"[auto-score] giving up after {consecutive_errors} consecutive "
-                f"failed sweeps — start the Blueberry MT5 terminal "
+                f"failed sweeps — start the Deriv MT5 terminal "
                 f"(scoring has no Deriv fallback)"
             )
             break

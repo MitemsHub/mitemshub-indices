@@ -15,9 +15,11 @@
 //|    OUT:  synth_ea_state_<symbol>.json (this EA's exec state)     |
 //|                                                                  |
 //|  Safety:  proven-only gate (only evidence_status=proven calls    |
-//|  execute), magic-number separation, max-spread guard, daily-     |
-//|  loss halt, call expiry, call_id dedupe persisted across         |
-//|  restarts.                                                       |
+//|  execute), magic-number separation, max-spread guard, HARD RISK  |
+//|  HALTS fed by real closes (daily loss, consecutive-loss streak,  |
+//|  equity drawdown — the P10-B outcome-registration fix ported to  |
+//|  the attached live chart), call expiry, call_id dedupe persisted |
+//|  across restarts.                                                |
 //+------------------------------------------------------------------+
 #property strict
 #property copyright "Synthetic Indices Bot"
@@ -45,8 +47,14 @@ input double InpVolume          = 0.0;      // Fixed volume (0 = use call's volu
 
 input group "Risk management"
 input double InpMaxDailyLossPct = 5.0;      // Halt new entries after this daily drawdown %
+input int    InpMaxConsecLosses = 5;        // Halt after this many consecutive material losses (0=off)
+input double InpMaxEquityDDPct  = 15.0;     // Halt after this equity drawdown % from peak (0=off)
 input bool   InpBreakevenTrail  = true;     // Move SL to entry at breakeven_frac of target
 input double InpBreakevenFrac   = 0.30;     // MFE fraction of target that triggers BE move
+
+// Python RiskEngine parity: a scratch of -0.10R or better is NOT a loss —
+// frictions alone must not trip the streak (Risk/RiskLimits.mqh).
+#define PY_LOSS_R_THRESHOLD -0.10
 
 //--- globals ----------------------------------------------------------------
 CTrade  g_trade;
@@ -54,11 +62,15 @@ string  g_lastCallId   = "";
 string  g_lastStatus   = "idle";
 double  g_dayStartEquity = 0.0;
 long    g_dayStartDay   = 0;
-long    g_openTicket    = 0;double    g_mfe           = 0.0;   // max favorable excursion since entry (for BE trail)
-double    g_entryPrice    = 0.0;
-double    g_targetPrice   = 0.0;
-bool      g_beMoved       = false;
-datetime  g_backoffUntil  = 0;     // skip order attempts until this time (server AT block)
+long    g_openTicket    = 0;
+double  g_mfe           = 0.0;   // max favorable excursion since entry (for BE trail)
+double  g_entryPrice    = 0.0;
+double  g_entrySL       = 0.0;   // planned stop from the call (for R-multiple outcome registration)
+double  g_targetPrice   = 0.0;
+double  g_peakEquity    = 0.0;   // equity peak since attach (equity-drawdown halt)
+int     g_consecutiveLosses = 0; // material-loss streak (Python RiskEngine parity)
+bool    g_beMoved       = false;
+datetime  g_backoffUntil  = 0;   // skip order attempts until this time (server AT block)
 
 //+------------------------------------------------------------------+
 //| JSON field extractor (flat schema, ASCII-safe).                  |
@@ -200,7 +212,13 @@ void SaveState(const string status, const string extra = "", const string callId
    json += "\"updated_at_epoch\":" + IntegerToString((long)TimeCurrent()) + ",";
    json += "\"open_ticket\":" + IntegerToString(g_openTicket) + ",";
    json += "\"open_price\":" + DoubleToString(g_entryPrice, 5) + ",";
-   json += "\"mfe\":" + DoubleToString(g_mfe, 5);
+   json += "\"open_sl\":" + DoubleToString(g_entrySL, 5) + ",";
+   json += "\"mfe\":" + DoubleToString(g_mfe, 5) + ",";
+   json += "\"consecutive_losses\":" + IntegerToString(g_consecutiveLosses) + ",";
+   json += "\"peak_equity\":" + DoubleToString(g_peakEquity, 2) + ",";
+   json += "\"halted\":{\"daily\":" + (DailyLossHalted() ? "true" : "false") + ",";
+   json += "\"consecutive\":" + (ConsecutiveLossHalted() ? "true" : "false") + ",";
+   json += "\"equity_dd\":" + (EquityDDHalted() ? "true" : "false") + "}";
    if(extra != "")
       json += "," + extra;
    json += "}";
@@ -230,21 +248,155 @@ bool HasOpenPosition()
   }
 
 //+------------------------------------------------------------------+
-//| Daily-loss halt: freeze new entries after InpMaxDailyLossPct.    |
+//| Day rollover (mirrors RiskLimits.SyncWindow): a new session day  |
+//| resets the day-start equity baseline AND the consecutive-loss    |
+//| streak.                                                          |
 //+------------------------------------------------------------------+
-bool DailyLossHalted()
+void SyncDayIfNeeded()
   {
    long today = (long)(TimeCurrent() / 86400);
    if(g_dayStartDay != today)
      {
       g_dayStartDay  = today;
       g_dayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
-      return(false);
+      g_consecutiveLosses = 0;
+      Print("SynthCallExecutor: new session day — risk counters reset (baseline ",
+            DoubleToString(g_dayStartEquity, 2), ")");
      }
+  }
+
+//+------------------------------------------------------------------+
+//| Daily-loss halt: freeze new entries after InpMaxDailyLossPct.    |
+//+------------------------------------------------------------------+
+bool DailyLossHalted()
+  {
+   SyncDayIfNeeded();
+   if(InpMaxDailyLossPct <= 0.0)
+      return(false);
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    double start  = g_dayStartEquity > 0.0 ? g_dayStartEquity : equity;
    double lossPct = start > 0.0 ? (start - equity) / start * 100.0 : 0.0;
-   return(InpMaxDailyLossPct > 0.0 && lossPct >= InpMaxDailyLossPct);
+   return(lossPct >= InpMaxDailyLossPct);
+  }
+
+//+------------------------------------------------------------------+
+//| Consecutive-loss halt (Python RiskEngine parity).                |
+//+------------------------------------------------------------------+
+bool ConsecutiveLossHalted()
+  {
+   return(InpMaxConsecLosses > 0 && g_consecutiveLosses >= InpMaxConsecLosses);
+  }
+
+//+------------------------------------------------------------------+
+//| Equity-drawdown halt: drawdown % from the attach-time equity peak.|
+//+------------------------------------------------------------------+
+bool EquityDDHalted()
+  {
+   if(InpMaxEquityDDPct <= 0.0)
+      return(false);
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double peak   = g_peakEquity > 0.0 ? g_peakEquity : equity;
+   if(peak <= 0.0)
+      return(false);
+   return((peak - equity) / peak * 100.0 >= InpMaxEquityDDPct);
+  }
+
+//+------------------------------------------------------------------+
+//| Any hard limit breached -> TRADING DISABLED (plan §12).          |
+//+------------------------------------------------------------------+
+bool HardLimitsHalted()
+  {
+   return(DailyLossHalted() || ConsecutiveLossHalted() || EquityDDHalted());
+  }
+
+//+------------------------------------------------------------------+
+//| Register the closed trade's outcome into the risk state.         |
+//|                                                                  |
+//| THE P10-B FIX PORTED LIVE: the tester's risk breakers were dead  |
+//| because outcomes were never registered (and equity was pinned).  |
+//| The live executor must feed real closes into the same limits —   |
+//| the consecutive-loss streak (scratch of -0.10R or better resets) |
+//| and the equity-DD peak — or the hard limits can never fire on    |
+//| the attached chart.                                              |
+//+------------------------------------------------------------------+
+void RegisterCloseOutcome()
+  {
+   // Find the closing deal: last DEAL_ENTRY_OUT with our magic on this
+   // symbol (any history depth — a position can outlive a day).
+   datetime from = 0;
+   datetime to   = TimeCurrent() + 60;
+   bool found = false;
+   if(HistorySelect(from, to))
+     {
+      int total = HistoryDealsTotal();
+      for(int i = total - 1; i >= 0; i--)
+        {
+         ulong dealTicket = HistoryDealGetTicket(i);
+         if(dealTicket == 0)
+            continue;
+         if(HistoryDealGetInteger(dealTicket, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+            continue;
+         if(HistoryDealGetString(dealTicket, DEAL_SYMBOL) != _Symbol)
+            continue;
+         if(HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != InpMagic)
+            continue;
+         found = true;
+         double pnl    = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+         double volume = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+         double price  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+         // R-multiple: profit / planned risk = |entry-stop| x value-per-
+         // price-unit x volume (tick value per lot / tick size).
+         double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+         double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         double perUnit   = (tickSize > 0.0) ? tickValue / tickSize : 0.0;
+         double entryForR = g_entryPrice > 0.0 ? g_entryPrice : price;
+         double stopForR  = g_entrySL;
+         double riskCurrency = 0.0;
+         if(volume > 0.0 && stopForR > 0.0 && perUnit > 0.0)
+            riskCurrency = MathAbs(entryForR - stopForR) * perUnit * volume;
+         double returnR = (riskCurrency > 0.0) ? pnl / riskCurrency : 0.0;
+         if(returnR < PY_LOSS_R_THRESHOLD)
+            g_consecutiveLosses++;
+         else
+            g_consecutiveLosses = 0;
+         double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+         if(equity > g_peakEquity)
+            g_peakEquity = equity;
+         Print("SynthCallExecutor: closed outcome pnl=", DoubleToString(pnl, 2),
+               " R=", DoubleToString(returnR, 2),
+               " streak=", IntegerToString(g_consecutiveLosses),
+               " halted=", HardLimitsHalted() ? "yes" : "no");
+         break;
+        }
+     }
+   if(!found)
+      Print("SynthCallExecutor: WARNING - closing deal not found in history; outcome NOT registered (streak unchanged)");
+  }
+
+//+------------------------------------------------------------------+
+//| Detect a closed position and register its outcome.               |
+//|                                                                  |
+//| ManageBreakeven only notices a vanished position while the BE    |
+//| trail is armed and not yet moved — with the trail off or already |
+//| applied, a close would go unregistered and the risk limits would |
+//| never see the loss.  This runs every tick and is the single      |
+//| close detector.                                                  |
+//+------------------------------------------------------------------+
+void CheckForClose()
+  {
+   if(g_openTicket == 0)
+      return;
+   if(!PositionSelectByTicket((ulong)g_openTicket))
+     {
+      RegisterCloseOutcome();
+      g_openTicket = 0;
+      g_entryPrice = 0.0;
+      g_entrySL    = 0.0;
+      g_targetPrice = 0.0;
+      g_mfe = 0.0;
+      g_beMoved = false;
+      SaveState("closed");
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -255,17 +407,8 @@ void ManageBreakeven()
   {
    if(!InpBreakevenTrail || g_openTicket == 0 || g_beMoved)
       return;
-   if(!PositionSelectByTicket((ulong)g_openTicket))
-     {
-      // position closed — clear tracking
-      g_openTicket = 0;
-      g_entryPrice = 0.0;
-      g_targetPrice = 0.0;
-      g_mfe = 0.0;
-      g_beMoved = false;
-      SaveState("closed");
-      return;
-     }
+   // NOTE: a vanished position is handled by CheckForClose() (the single
+   // close detector) — ManageBreakeven only manages the still-open one.
    double cur  = PositionGetDouble(POSITION_PRICE_CURRENT);
    double open = PositionGetDouble(POSITION_PRICE_OPEN);
    long   type = PositionGetInteger(POSITION_TYPE);
@@ -381,8 +524,14 @@ bool ExecuteCall(const string callId, const string direction,
    else
       g_entryPrice = (direction == "sell" && bid > 0.0) ? bid : ask;
    g_targetPrice = tp;
+   g_entrySL = sl;
    g_mfe = g_entryPrice;
    g_beMoved = false;
+   // Track the equity peak at entry too so the equity-DD halt sees the
+   // account's highest point (including float on the open position).
+   double equityNow = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equityNow > g_peakEquity)
+      g_peakEquity = equityNow;
    SaveState("executed", "\"direction\":\"" + direction + "\",\"entry\":"
              + DoubleToString(entry, 5) + ",\"sl\":" + DoubleToString(sl, 5)
              + ",\"tp\":" + DoubleToString(tp, 5), callId);
@@ -461,9 +610,12 @@ void ProcessCalls()
       return;   // do NOT mark processed — retry next poll until position closes
      }
 
-   if(DailyLossHalted())
+   if(HardLimitsHalted())
      {
-      Print("SynthCallExecutor: daily loss halt active — skipping ", callId);
+      Print("SynthCallExecutor: hard limit halt active (daily=", DailyLossHalted() ? "1" : "0",
+            " consec=", ConsecutiveLossHalted() ? "1" : "0",
+            " equityDD=", EquityDDHalted() ? "1" : "0",
+            " streak=", IntegerToString(g_consecutiveLosses), ") — skipping ", callId);
       return;
      }
 
@@ -482,9 +634,10 @@ int OnInit()
       Print("SynthCallExecutor: EventSetTimer failed");
       return(INIT_FAILED);
      }
-   // seed daily-loss baseline
+   // seed risk baselines (day equity + attach-time equity peak)
    g_dayStartDay    = (long)(TimeCurrent() / 86400);
    g_dayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_peakEquity     = AccountInfoDouble(ACCOUNT_EQUITY);
    // Recover the last FILLED call id from the state file so restarts don't
    // re-fire an already-executed call.  A rejected/held-back call must NOT be
    // remembered — otherwise a restart silently skips a still-valid call and
@@ -496,6 +649,27 @@ int OnInit()
       string prevStatus = JsonGetValue(state, "status");
       if(prev != "" && (prevStatus == "executed" || prevStatus == "closed"))
          g_lastCallId = prev;
+      // Restore the risk state so a restart cannot silently reset a
+      // breached limit or a losing streak (the live analog of the
+      // P10-B lesson: state must survive to be meaningful).
+      string consecStr = JsonGetValue(state, "consecutive_losses");
+      if(consecStr != "")
+         g_consecutiveLosses = (int)StringToInteger(consecStr);
+      string peakStr = JsonGetValue(state, "peak_equity");
+      if(peakStr != "" && StringToDouble(peakStr) > 0.0)
+         g_peakEquity = StringToDouble(peakStr);
+      // Restore the open-position context so a restart mid-position still
+      // computes a correct R-multiple when the close is later registered
+      // (stop reference comes from the call's planned SL, not 0).
+      string ticketStr = JsonGetValue(state, "open_ticket");
+      if(ticketStr != "" && StringToInteger(ticketStr) > 0 && PositionSelectByTicket((ulong)StringToInteger(ticketStr)))
+         g_openTicket = (long)StringToInteger(ticketStr);
+      string openPriceStr = JsonGetValue(state, "open_price");
+      if(openPriceStr != "" && StringToDouble(openPriceStr) > 0.0)
+         g_entryPrice = StringToDouble(openPriceStr);
+      string openSlStr = JsonGetValue(state, "open_sl");
+      if(openSlStr != "" && StringToDouble(openSlStr) > 0.0)
+         g_entrySL = StringToDouble(openSlStr);
      }
    Print("SynthCallExecutor: initialized on ", _Symbol,
          " magic=", InpMagic, " proven_only=", InpRequireProven ? "true" : "false");
@@ -504,7 +678,9 @@ int OnInit()
 
 void OnTick()
   {
-   // Position management runs at tick speed (breakeven trail, tracking).
+   // Close detection + outcome registration run first (single detector),
+   // then the breakeven trail on the still-open position.
+   CheckForClose();
    ManageBreakeven();
   }
 

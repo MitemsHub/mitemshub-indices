@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from synthetic_trader.config import MAX_FEATURE_HISTORY, TraderConfig
 from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
@@ -225,7 +225,7 @@ def load_ticks_csv(path: str | Path, default_symbol: str) -> list[Tick]:
         has_header = stripped.startswith(("epoch", "symbol", "price"))
 
         if has_header:
-            reader = csv.DictReader(handle)
+            reader: Any = csv.DictReader(handle)
             required = {"epoch", "price"}
             missing = required.difference(reader.fieldnames or [])
             if missing:

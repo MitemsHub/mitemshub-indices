@@ -9,6 +9,8 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
 
+from typing import Any
+
 from synthetic_trader.domain import Tick
 from synthetic_trader import __version__ as _engine_version
 from synthetic_trader.execution.mt5_guard import Mt5SingleFlightLock
@@ -82,11 +84,11 @@ def _store_mt5_timing(init_ms: float, login_ms: float) -> None:
         pass
 
 
-def get_mt5_timing() -> dict | None:
+def get_mt5_timing() -> dict[str, Any] | None:
     """Read the last persisted MT5 timing data, if any."""
     try:
         if _MT5_TIMING_PATH.exists():
-            return json.loads(_MT5_TIMING_PATH.read_text(encoding="utf-8"))
+            return dict(json.loads(_MT5_TIMING_PATH.read_text(encoding="utf-8")))
     except Exception:
         pass
     return None
@@ -144,22 +146,37 @@ def _mt5_available() -> bool:
     return True
 
 
+# Cache for resolved symbols — avoids repeated MT5 queries and log spam
+# in the tight polling loop of the tick collector.
+_SYMBOL_RESOLUTION_CACHE: dict[str, str] = {}
+
+
+def clear_symbol_resolution_cache() -> None:
+    """Clear the symbol resolution cache. Call on reconnect/MT5 shutdown."""
+    _SYMBOL_RESOLUTION_CACHE.clear()
+
+
 def _resolve_mt5_symbol(symbol: str, mt5_module=None) -> str:
+    # Return cached resolution if available (avoids log spam in tight loops)
+    if symbol in _SYMBOL_RESOLUTION_CACHE:
+        return _SYMBOL_RESOLUTION_CACHE[symbol]
+
     configured = os.getenv("SYNTHETIC_MT5_SYMBOL_MAP")
     if configured:
         try:
             mapping = dict(item.split(":", 1) for item in configured.split(","))
             if symbol in mapping:
+                _SYMBOL_RESOLUTION_CACHE[symbol] = mapping[symbol]
                 return mapping[symbol]
         except Exception:
             pass
 
     vol_num = "75" if symbol == "R_75" else "100"
     candidates = [
-        # Blueberry Markets' actual broker symbols (verified live on the
-        # Blueberry MT5 terminal) — try these first.
+        # Deriv' actual broker symbols (verified live on the
+        # Deriv MT5 terminal) — try these first.
         f"SYN{vol_num}",
-        f"Blueberry Volatility {vol_num}",
+        f"Deriv Volatility {vol_num}",
         f"Volatility {vol_num} Index",
         f"Volatility {vol_num}",
         f"Vol {vol_num} Index",
@@ -176,15 +193,18 @@ def _resolve_mt5_symbol(symbol: str, mt5_module=None) -> str:
                 info = mt5.symbol_info(name)
                 if info is not None:
                     _diag(f"resolved {symbol} -> {name}")
+                    _SYMBOL_RESOLUTION_CACHE[symbol] = name
                     return name
                 if mt5.symbol_select(name, True):
                     _diag(f"resolved {symbol} -> {name} (via symbol_select)")
+                    _SYMBOL_RESOLUTION_CACHE[symbol] = name
                     return name
             except Exception:
                 continue
         _diag(f"symbol {symbol} not found on broker, tried: {candidates}")
 
     _diag(f"using default symbol name: {candidates[0]} (no MT5 module to verify)")
+    _SYMBOL_RESOLUTION_CACHE[symbol] = candidates[0]
     return candidates[0]
 
 
@@ -409,7 +429,7 @@ class Mt5TickClient:
 
     def __init__(self, connect_timeout: float = 20.0) -> None:
         self._connect_timeout = connect_timeout
-        self._mt5_module: object | None = None
+        self._mt5_module: Any | None = None
 
     async def __aenter__(self) -> "Mt5TickClient":
         if not _mt5_available():
@@ -681,9 +701,24 @@ class Mt5TickClient:
                 price = float(tick_info.bid) if tick_info.bid > 0 else float(tick_info.ask)
                 if price > 0 and price != last_price:
                     last_price = price
+                    # SAME clock as ticks_history/latest_tick: the terminal's
+                    # time_msc (broker server time), NOT the local machine
+                    # clock.  The research corpus and its "UTC 18-24h" hour
+                    # edge are stamped in server time (Deriv server =
+                    # local UTC+3h), and the warmup candles are built from
+                    # time_msc ticks — the old time.time() stamp put live
+                    # candles 3h BEHIND the warmup, so the journal epochs
+                    # went non-monotonic and the entry gate fired 3h late
+                    # vs the backtest.  Fall back to the local clock only
+                    # when the terminal reports no timestamp.
+                    epoch = (
+                        float(tick_info.time_msc) / 1000.0
+                        if tick_info.time_msc > 0
+                        else time.time()
+                    )
                     yield Tick(
                         symbol=symbol,
-                        epoch=time.time(),
+                        epoch=epoch,
                         price=price,
                     )
             await asyncio.sleep(POLL_INTERVAL)

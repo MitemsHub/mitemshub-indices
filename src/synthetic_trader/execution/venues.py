@@ -19,4 +19,8 @@ class MarketDataClient(Protocol):
         start: int | None = None,
     ) -> list[Tick]: ...
 
-    async def subscribe_ticks(self, symbol: str, timeout: float = 20.0) -> AsyncIterator[Tick]: ...
+    # NOTE: subscribe_ticks is an async generator (uses yield) in both
+    # Mt5TickClient and DerivWebSocketClient, so it returns AsyncIterator[Tick]
+    # directly, not a coroutine.  Using plain def (not async def) in the
+    # protocol matches the actual runtime type.
+    def subscribe_ticks(self, symbol: str, timeout: float = 20.0) -> AsyncIterator[Tick]: ...

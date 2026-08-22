@@ -7,7 +7,7 @@
 //|  then returns INIT_FAILED if any test failed (so a green init    |
 //|  in the Experts log means all tests passed).                     |
 //|                                                                  |
-//|  Tests use known-good values — including the REAL Blueberry      |
+//|  Tests use known-good values — including the REAL Deriv      |
 //|  SYN75/SYN100 specs probed live — so a regression is caught      |
 //|  immediately.                                                    |
 //+------------------------------------------------------------------+
@@ -79,7 +79,7 @@ void TestConfig()
 
 void TestSymbolAdapterFixture()
   {
-   Print("[PHASE1] --- SymbolAdapter (real Blueberry fixtures) ---");
+   Print("[PHASE1] --- SymbolAdapter (real Deriv fixtures) ---");
    CSymbolAdapter adapter;
    SymbolSpec spec;
    CSymbolAdapter::FillFixture("SYN75", spec);

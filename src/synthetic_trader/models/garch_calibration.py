@@ -2,7 +2,7 @@
 
 Fits omega, alpha, beta, gamma to observed returns using scipy.optimize.
 This replaces estimated GARCH parameters with calibrated values from
-actual Blueberry Markets synthetic index behavior.
+actual Deriv synthetic index behavior.
 
 The negative log-likelihood of the EGARCH(1,1) model is:
 
@@ -23,6 +23,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -114,7 +115,184 @@ class CalibrationResult:
 
 def compute_log_returns(prices: np.ndarray) -> np.ndarray:
     """Compute log-returns from a price series."""
-    return np.diff(np.log(np.maximum(prices, 1e-10)))
+    result: np.ndarray = np.diff(np.log(np.maximum(prices, 1e-10)))
+    return result
+
+
+def compute_egarch_diagnostics(
+    omega: float,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    log_returns: np.ndarray,
+    distribution: str = "normal",
+    dof: float = 5.0,
+) -> tuple[float, float, float, float, float]:
+    """Compute EGARCH fit diagnostics from fitted parameters.
+
+    Returns ``(persistence, half_life, long_run_vol, realized_vol, vol_ratio)``.
+
+    ``realized_vol`` is the per-bar standard deviation of the returns — the
+    same scale as ``long_run_vol`` — so ``vol_ratio`` is honest.  The old code
+    annualized ``realized_vol`` with sqrt(252*24*4) (a 15-minute-bar factor
+    that also disagreed with its "4H bars" comment), which put it ~155x above
+    the per-bar long_run_vol and made every healthy fit look like
+    vol_ratio ~0.0001.
+
+    omega is a LOG-variance intercept: unconditional variance is
+    exp(omega / (1 - persistence)).  The theoretical value is only meaningful
+    at moderate persistence.  Near unit root (>= 0.95 — e.g. R_75 0.995,
+    R_100 0.990) the denominator collapses and exp(omega/(1-persistence))
+    underflows to ~0, pinning long_run_vol at the 1e-05 sqrt floor: the known
+    unit-root issue the forecaster itself avoids by anchoring on a
+    bias-corrected realized-scale estimate.  In that regime (or when the
+    theoretical value is numerically degenerate) we anchor long_run_vol on
+    the geometric-mean realized vol of the fitted series, so the diagnostic
+    and its ratio stay honest.
+    """
+    persistence = alpha + beta
+    half_life = math.log(0.5) / math.log(persistence) if 0.0 < persistence < 1.0 else float("inf")
+    realized_vol = float(np.std(log_returns))
+
+    theoretical_log_long_run_var = omega / max(1.0 - persistence, 1e-10)
+    theoretical_long_run_var = math.exp(min(theoretical_log_long_run_var, 5.0))
+    HIGH_PERSISTENCE = 0.95
+    if (
+        persistence >= HIGH_PERSISTENCE
+        or not math.isfinite(theoretical_long_run_var)
+        or theoretical_long_run_var < 1e-16
+    ):
+        # Bias-corrected mean realized log-variance: E[2*log|r|] =
+        # log sigma^2 + E[log z^2] for the standardized innovation z,
+        # so subtracting E[log z^2] removes the systematic low bias.
+        # Same realized-scale anchor HorizonVolForecaster uses for its
+        # long-run reference.  Lazy import mirrors the scipy pattern.
+        from synthetic_trader.models.horizon_forecast import _log_z2_expectation
+
+        realized_logvar = (
+            float(np.mean(2.0 * np.log(np.maximum(np.abs(log_returns), 1e-12))))
+            - _log_z2_expectation(distribution, dof)
+        )
+        long_run_var = math.exp(max(min(realized_logvar, 5.0), -30.0))
+    else:
+        long_run_var = theoretical_long_run_var
+    long_run_vol = math.sqrt(max(long_run_var, 1e-10))
+    vol_ratio = float(long_run_vol / max(realized_vol, 1e-10))
+    return persistence, half_life, long_run_vol, realized_vol, vol_ratio
+
+
+# A per-observation NLL above this is an optimizer blow-up, not a real fit:
+# healthy EGARCH fits on these return series sit at roughly -3 to -8 per obs
+# (per-bar sigma ~0.0005-0.01); the stability-penalty basin is ~1e10 per call
+# and the measured R_100 full-corpus blow-up was ~+2500 per obs.
+ABSURD_PER_OBS_NLL = 5.0
+
+
+def _degenerate_params(
+    omega: float,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    persistence: float,
+    long_run_vol: float,
+    realized_vol: float,
+) -> bool:
+    """Raw-parameter degeneracy check shared by the multi-start winner
+    selection and ``_params_at_bounds``.
+
+    Returns True when a fit is degenerate and must NEVER be used:
+      1. any single parameter pinned at an optimizer bound, OR
+      2. persistence below 0.05 (no vol clustering to model), OR
+      3. a long-run vol absurdly far from the realized vol.
+
+    Bounds (matching fit_egarch):
+        omega: [-30, 2], alpha: [0.001, 0.95], beta: [0.01, 0.999], gamma: [-0.99, 0.99]
+    """
+    BOUND_EPS = 0.001  # within 0.1% of bound edge
+    at_bounds = 0
+    if omega >= 2.0 - BOUND_EPS or omega <= -30.0 + BOUND_EPS:
+        at_bounds += 1
+    if alpha >= 0.95 - BOUND_EPS or alpha <= 0.001 + BOUND_EPS:
+        at_bounds += 1
+    if beta >= 0.999 - BOUND_EPS or beta <= 0.01 + BOUND_EPS:
+        at_bounds += 1
+    if abs(gamma) >= 0.99 - BOUND_EPS:
+        at_bounds += 1
+    if at_bounds >= 1:
+        return True
+    if persistence < 0.05:
+        return True
+    # Rule 3 (long-run vs realized vol sanity).  Both fields are per-bar
+    # scale, and compute_egarch_diagnostics anchors long_run_vol on the
+    # bias-corrected realized level for near-unit-root fits, so the ratio
+    # is honest in every persistence regime.
+    if realized_vol > 0:
+        ratio = long_run_vol / realized_vol
+        if ratio < 0.02 or ratio > 50.0:
+            return True
+    return False
+
+
+def _fit_candidate_acceptable(
+    x: np.ndarray,
+    log_returns: np.ndarray,
+    distribution: str,
+    dof: float,
+) -> bool:
+    """True when a multi-start/DE candidate is a usable (non-degenerate) fit.
+
+    The winner must NEVER be a fit that ``_params_at_bounds`` would reject:
+    the degenerate R_100 refit on the repaired full-density corpus had the
+    LOWEST raw NLL but alpha/beta pinned at their floors (persistence ~0.01,
+    no vol clustering) — picking by NLL alone would seed the online
+    forecaster with a broken fit that the loader then silently rejects.
+    """
+    omega, alpha, beta, gamma = x
+    persistence, _, long_run_vol, realized_vol, _ = compute_egarch_diagnostics(
+        omega, alpha, beta, gamma, log_returns,
+        distribution=distribution, dof=dof,
+    )
+    return not _degenerate_params(
+        omega, alpha, beta, gamma, persistence, long_run_vol, realized_vol
+    )
+
+
+def _select_best_candidate(
+    candidates: list,
+    log_returns: np.ndarray,
+    distribution: str,
+    dof: float,
+) -> tuple:
+    """Choose the multi-start winner: the best NLL among NON-degenerate
+    basins, with the best degenerate candidate tracked only as a fallback.
+
+    Returns ``(winner, fallback)``; either may be None.  ``winner`` is
+    always a fit ``_params_at_bounds`` would accept (or None when every
+    basin landed degenerate); ``fallback`` is the best-NLL degenerate fit
+    for the caller to return with convergence=False rather than silently
+    picking it as a valid calibration.
+    """
+    best_nll = float("inf")
+    winner = None
+    fb_nll = float("inf")
+    fallback = None
+    for cand in candidates:
+        nll = float(cand.fun)
+        per_obs = nll / max(len(log_returns), 1)
+        if (
+            not _fit_candidate_acceptable(cand.x, log_returns, distribution, dof)
+            or (math.isfinite(nll) and per_obs > ABSURD_PER_OBS_NLL)
+        ):
+            # Bound-pinned / no-clustering / optimizer-blow-up basins are
+            # never the winner — only the explicit all-degenerate fallback.
+            if nll < fb_nll:
+                fb_nll = nll
+                fallback = cand
+            continue
+        if nll < best_nll:
+            best_nll = nll
+            winner = cand
+    return winner, fallback
 
 
 def _log_t_density(z: float, dof: float) -> float:
@@ -242,15 +420,15 @@ def fit_egarch(
 
     log_returns = compute_log_returns(prices_arr)
 
-    # Realized volatility
-    realized_vol = float(np.std(log_returns) * math.sqrt(252 * 24 * 4))  # annualized (4H bars)
-
-    # Initial parameter guess
+    # Initial parameter guess.  sample_var is computed unconditionally so
+    # the multi-start list below works for the initial_params path too
+    # (it previously crashed with UnboundLocalError when initial_params was
+    # supplied but the guesses referenced sample_var).
+    sample_var = float(np.var(log_returns))
     if initial_params is not None:
         x0 = np.array(initial_params)
     else:
         # Sensible defaults based on empirical properties of synthetic indices
-        sample_var = float(np.var(log_returns))
         omega_init = math.log(max(sample_var * 0.5, 1e-10))
         x0 = np.array([omega_init, 0.08, 0.88, -0.04])
 
@@ -275,57 +453,111 @@ def fit_egarch(
     # beta 0.75-0.90, gamma -0.20 to 0.10.
     initial_guesses = [
         x0,  # default guess from data
+        # Explicit high-persistence anchor.  Measured on R_100 (2026-08-16):
+        # the five original guesses all converged to the LOW-persistence
+        # basin (beta at its 0.01 floor, persistence ~0.05 — rejected by
+        # _params_at_bounds as degenerate), while this anchor reaches the
+        # genuinely better mode (NLL ~19 units lower, persistence ~0.99).
+        # Including it makes the fit deterministic: the winner is chosen by
+        # NLL among NON-degenerate basins, so corpus growth can no longer
+        # flip the result to a WORSE local optimum or a bound-pinned one.
+        np.array([-2.0, 0.10, 0.88, -0.04]),
         np.array([math.log(max(sample_var * 0.1, 1e-10)), 0.05, 0.90, -0.10]),  # low alpha, high beta
         np.array([math.log(max(sample_var * 0.3, 1e-10)), 0.12, 0.82, 0.05]),  # moderate alpha
         np.array([math.log(max(sample_var * 0.5, 1e-10)), 0.08, 0.85, -0.20]),  # strong asymmetry
         np.array([-5.0, 0.10, 0.80, 0.0]),  # neutral asymmetry
     ]
 
-    best_nll = float("inf")
-    best_result = None
+    candidates: list = []
     last_exception = None
 
     for guess in initial_guesses:
         try:
-            result = minimize(
-                egarch_negative_log_likelihood,
-                guess,
-                args=(log_returns, distribution, dof),
-                method="L-BFGS-B",
-                bounds=bounds,
-                options={"maxiter": max_iter, "ftol": 1e-10},
+            candidates.append(
+                minimize(
+                    egarch_negative_log_likelihood,
+                    guess,
+                    args=(log_returns, distribution, dof),
+                    method="L-BFGS-B",
+                    bounds=bounds,
+                    options={"maxiter": max_iter, "ftol": 1e-10},
+                )
             )
-            if result.fun < best_nll:
-                best_nll = float(result.fun)
-                best_result = result
         except Exception as exc:
             last_exception = exc
             continue
 
+    best_result, best_degenerate_result = _select_best_candidate(
+        candidates, log_returns, distribution, dof
+    )
+
     # ── Differential evolution fallback ──────────────────────────────
-    # If the best L-BFGS-B result didn't converge, use differential
-    # evolution (global optimizer) which doesn't need a good starting
-    # point.  DE needs more iterations than L-BFGS-B (typically 2000+).
+    # If the best L-BFGS-B result didn't converge (or every start landed in
+    # a degenerate basin), use differential evolution (global optimizer)
+    # which doesn't need a good starting point.  DE needs more iterations
+    # than L-BFGS-B (typically 2000+).  Its result goes through the same
+    # degeneracy-gated selection.
     should_try_de = (
         best_result is None
         or not best_result.success
     )
     if should_try_de:
         try:
-            de_result = differential_evolution(
-                egarch_negative_log_likelihood,
-                bounds=bounds,
-                args=(log_returns, distribution, dof),
-                maxiter=max(max_iter * 5, 2000),
-                seed=42,
-                tol=1e-8,
-                polish=True,  # L-BFGS-B polish after DE
+            candidates.append(
+                differential_evolution(
+                    egarch_negative_log_likelihood,
+                    bounds=bounds,
+                    args=(log_returns, distribution, dof),
+                    maxiter=max(max_iter * 5, 2000),
+                    seed=42,
+                    tol=1e-8,
+                    polish=True,  # L-BFGS-B polish after DE
+                )
             )
-            if de_result.fun < best_nll:
-                best_nll = float(de_result.fun)
-                best_result = de_result
+            best_result, best_degenerate_result = _select_best_candidate(
+                candidates, log_returns, distribution, dof
+            )
         except Exception as exc:
             last_exception = exc
+
+    if best_result is None and best_degenerate_result is not None:
+        # Every basin landed degenerate (measured: the repaired full-density
+        # R_100 corpus — alpha/beta pinned at floors, persistence ~0.01, no
+        # vol clustering).  There is NO trustworthy calibration in this
+        # data.  Return the best-NLL degenerate fit but force
+        # convergence=False so load_calibrated_garch_state skips it (falls
+        # back to default priors); _params_at_bounds would reject it as a
+        # second layer of defense.
+        result = best_degenerate_result
+        omega_fit, alpha_fit, beta_fit, gamma_fit = result.x
+        nll = float(result.fun)
+        persistence, half_life, long_run_vol, realized_vol, vol_ratio = compute_egarch_diagnostics(
+            omega_fit, alpha_fit, beta_fit, gamma_fit, log_returns,
+            distribution=distribution, dof=dof,
+        )
+        msg = (
+            f"All {len(initial_guesses)} multi-start basins degenerate "
+            f"(bound-pinned or no vol clustering; best NLL {nll:.2f}) — "
+            "fit rejected, forecaster falls back to default priors"
+        )
+        return CalibrationResult(
+            symbol=symbol,
+            omega=float(omega_fit),
+            alpha=float(alpha_fit),
+            beta=float(beta_fit),
+            gamma=float(gamma_fit),
+            n_observations=len(log_returns),
+            negative_log_likelihood=nll,
+            convergence=False,
+            message=msg,
+            persistence=persistence,
+            half_life=half_life,
+            long_run_vol=long_run_vol,
+            realized_vol=realized_vol,
+            vol_ratio=vol_ratio,
+            ljung_box_p_value=0.5,
+            arch_test_p_value=0.5,
+        )
 
     if best_result is None:
         return CalibrationResult(
@@ -343,15 +575,10 @@ def fit_egarch(
     converged = result.success
 
     # Compute diagnostics
-    persistence = alpha_fit + beta_fit
-    half_life = math.log(0.5) / math.log(persistence) if 0.0 < persistence < 1.0 else float("inf")
-    # omega is a LOG-variance intercept: unconditional variance is
-    # exp(omega / (1 - persistence)).  The old code treated omega as a
-    # raw variance (omega / (1 - persistence)), which produced
-    # long_run_vol ~ 0.0 for every real fit and a vol_ratio of ~0.0001.
-    log_long_run_var = min(omega_fit / max(1.0 - persistence, 1e-10), 5.0)
-    long_run_var = math.exp(log_long_run_var)
-    long_run_vol = math.sqrt(max(long_run_var, 1e-10))
+    persistence, half_life, long_run_vol, realized_vol, vol_ratio = compute_egarch_diagnostics(
+        omega_fit, alpha_fit, beta_fit, gamma_fit, log_returns,
+        distribution=distribution, dof=dof,
+    )
 
     # Goodness-of-fit diagnostics (skip if fit didn't converge)
     if converged:
@@ -386,7 +613,7 @@ def fit_egarch(
         half_life=float(half_life),
         long_run_vol=float(long_run_vol),
         realized_vol=realized_vol,
-        vol_ratio=float(long_run_vol / max(realized_vol, 1e-10)),
+        vol_ratio=float(vol_ratio),
         ljung_box_p_value=float(ljung_box_p),
         arch_test_p_value=float(arch_p),
     )
@@ -401,7 +628,7 @@ def _compute_standardized_residuals(
     """Compute standardized residuals from fitted EGARCH parameters."""
     ez = ez_student_t(dof) if distribution == "studentt" else EZ_NORMAL
     n = len(log_returns)
-    log_var = math.log(max(np.var(log_returns), 1e-10))
+    log_var = math.log(max(float(np.var(log_returns)), 1e-10))
     std_resid = np.empty(n)
     for t in range(n):
         var_t = math.exp(log_var)
@@ -441,7 +668,7 @@ def _ljung_box_test_with_residuals(
         return 0.5
 
     # Autocorrelation of squared standardized residuals
-    sq_resid = std_resid ** 2
+    sq_resid: np.ndarray = std_resid ** 2
     mean_sq = np.mean(sq_resid)
     centered = sq_resid - mean_sq
     acf_full = np.correlate(centered, centered, mode="full")
@@ -485,7 +712,7 @@ def _arch_test_with_residuals(
     if n < max_lag + 10:
         return 0.5
 
-    sq = std_resid ** 2
+    sq: np.ndarray = std_resid ** 2
     T = n - max_lag
     if T < max_lag + 2:
         return 0.5
@@ -502,8 +729,8 @@ def _arch_test_with_residuals(
     try:
         beta_hat = np.linalg.lstsq(X_with_const, y, rcond=None)[0]
         y_hat = X_with_const @ beta_hat
-        ss_res = np.sum((y - y_hat) ** 2)
-        ss_tot = np.sum((y - np.mean(y)) ** 2)
+        ss_res: Any = np.sum((y - y_hat) ** 2)
+        ss_tot: Any = np.sum((y - np.mean(y)) ** 2)
         r_squared = 1.0 - ss_res / max(ss_tot, 1e-10)
         lm_stat = T * max(r_squared, 0.0)
         p_value = min(1.0, math.exp(-lm_stat / (2 * max_lag))) if lm_stat > 0 else 1.0
@@ -717,29 +944,18 @@ def _params_at_bounds(result: CalibrationResult) -> bool:
     Bounds (matching fit_egarch):
         omega: [-30, 2], alpha: [0.001, 0.95], beta: [0.01, 0.999], gamma: [-0.99, 0.99]
     """
-    BOUND_EPS = 0.001  # within 0.1% of bound edge
-    at_bounds = 0
-    if result.omega >= 2.0 - BOUND_EPS or result.omega <= -30.0 + BOUND_EPS:
-        at_bounds += 1
-    if result.alpha >= 0.95 - BOUND_EPS or result.alpha <= 0.001 + BOUND_EPS:
-        at_bounds += 1
-    if result.beta >= 0.999 - BOUND_EPS or result.beta <= 0.01 + BOUND_EPS:
-        at_bounds += 1
-    if abs(result.gamma) >= 0.99 - BOUND_EPS:
-        at_bounds += 1
-    if at_bounds >= 1:
+    if _degenerate_params(
+        result.omega, result.alpha, result.beta, result.gamma,
+        result.persistence, result.long_run_vol, result.realized_vol,
+    ):
         return True
-    if result.persistence < 0.05:
-        return True
-    # Rule 3 (long-run vs realized vol sanity) is only meaningful for
-    # moderate-persistence fits.  At near-unit-root persistence
-    # (>= 0.95) the theoretical long-run vol exp(omega/(1-persistence))
-    # underflows to ~0 by construction — the known unit-root issue the
-    # forecaster itself avoids by anchoring on a realized-scale EMA — so
-    # the ratio test would reject every healthy vol-clustering fit.
-    if result.realized_vol > 0 and result.persistence < 0.95:
-        ratio = result.long_run_vol / result.realized_vol
-        if ratio < 0.02 or ratio > 50.0:
+    # An absurd per-observation NLL is also degenerate even when the
+    # parameters alone look sane — an optimizer blow-up or the
+    # stability-penalty basin (measured: the R_100 full-corpus refit
+    # reported a predicate-clean fit at +2500 per obs).
+    if result.n_observations > 0 and math.isfinite(result.negative_log_likelihood):
+        per_obs = result.negative_log_likelihood / result.n_observations
+        if per_obs > ABSURD_PER_OBS_NLL:
             return True
     return False
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from synthetic_trader.backtest.engine import load_ticks_csv
 from synthetic_trader.backtest.vol_reversion import dedupe_ticks
@@ -39,7 +40,7 @@ VERDICT_CACHE_REL = "data/forecast_verdicts.json"
 def _resolve_tick_csv(engine_root: str, symbol: str) -> Path | None:
     """Find the best tick CSV for a symbol inside the engine root.
 
-    Prefers the multi-day backfill file (correct Blueberry scale), then the
+    Prefers the multi-day backfill file (correct Deriv scale), then the
     live capture file (``data/{symbol_lower}_ticks.csv`` or ``{symbol}``).
     """
     root = Path(engine_root)
@@ -179,7 +180,8 @@ def get_horizon_forecast_stats(engine_root: str) -> dict[str, object]:
                 p50_mult=p50,
                 p90_mult=p90,
             )
-            entry["horizons"][horizon_key] = {
+            horizons: dict[str, Any] = entry["horizons"]  # type: ignore[assignment]
+            horizons[horizon_key] = {
                 "horizon_sec": horizon_sec,
                 "verdict": horizon_verdict(validation),
                 "multipliers_applied": mult is not None,

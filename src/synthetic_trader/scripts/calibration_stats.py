@@ -80,9 +80,9 @@ def get_calibration_stats(engine_root: str) -> dict[str, object]:
             if milestones_dirty:
                 try:
                     versioning["milestones"] = milestones
-                    state["versioning"] = versioning
+                    data["versioning"] = versioning
                     state_file.write_text(
-                        json.dumps(state, indent=2), encoding="utf-8"
+                        json.dumps(data, indent=2), encoding="utf-8"
                     )
                 except Exception:
                     pass  # best-effort — don't crash stats read for a write failure

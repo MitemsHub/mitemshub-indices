@@ -27,6 +27,9 @@ from pathlib import Path
 
 # ── Import-time guard against river's dead dataset payload ────────────
 # river.drift.__init__ unconditionally does `from . import datasets`, and
+from typing import Any
+
+
 # river/drift/datasets/__init__.py parses the embedded airline_passengers
 # CSV (~20-30s) on EVERY import.  The bridge runs a Python import smoke test
 # with an 8s budget before each live snapshot, so this dead import alone
@@ -61,7 +64,7 @@ try:  # pragma: no cover - river is an optional dependency
     _river_stub("river.drift.binary")
     from river.drift import ADWIN
 except Exception:  # pragma: no cover
-    ADWIN = None
+    ADWIN = None  # type: ignore[assignment,misc]
 
 
 class DriftDetector:
@@ -98,7 +101,7 @@ class DriftDetector:
         self.last_value: float | None = None
         self._window = self._new_window()
 
-    def _new_window(self) -> object | None:
+    def _new_window(self) -> Any:
         if ADWIN is None:
             return None
         return ADWIN(

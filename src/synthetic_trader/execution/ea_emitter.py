@@ -264,7 +264,7 @@ def read_ea_state(symbol: str, *, files_dir: Path | None = None) -> dict[str, An
     """Read the EA's execution-state file back (None when absent/unparseable)."""
     path = state_file_path(symbol, files_dir)
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return dict(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return None
 

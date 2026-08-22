@@ -200,11 +200,11 @@ class SessionVolatilityFilter:
             trend = max(-1.0, min(1.0, vol_change))
         
         # Consistency: how stable is this hour's volatility?
-        stats = self.state.hourly_stats.get(current_hour)
+        hour_stats = self.state.hourly_stats.get(current_hour)
         consistency = 0.5
-        if stats and stats.total_returns >= self.min_observations_per_hour * 2:
+        if hour_stats and hour_stats.total_returns >= self.min_observations_per_hour * 2:
             # Low coefficient of variation = consistent
-            cv = stats.realized_vol / max(stats.mean_abs_return, 1e-10)
+            cv = hour_stats.realized_vol / max(hour_stats.mean_abs_return, 1e-10)
             consistency = max(0.0, min(1.0, 1.0 - cv * 0.5))
         
         return {

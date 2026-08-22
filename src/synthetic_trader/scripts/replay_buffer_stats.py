@@ -10,6 +10,8 @@ It loads the model, inspects the replay buffer, and prints a JSON object
 with the buffer statistics to stdout.
 """
 
+from __future__ import annotations
+
 import json
 import sys
 from pathlib import Path
@@ -34,7 +36,7 @@ def get_replay_buffer_stats(engine_root: str) -> dict:
     }
     """
     state_dir = Path(engine_root) / "data" / "model_state"
-    stats = {}
+    stats: dict[str, dict | None] = {}
 
     for symbol in ("r_75", "r_100"):
         # Model state is saved as {symbol}_sniper.json (sniper-only mode)

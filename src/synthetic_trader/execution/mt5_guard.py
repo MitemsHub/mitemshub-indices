@@ -1,6 +1,6 @@
 """Cross-process single-flight guard for MT5 terminal initialization.
 
-The Blueberry MT5 terminal accepts IPC clients, but two processes calling
+The Deriv MT5 terminal accepts IPC clients, but two processes calling
 ``mt5.initialize()`` at the SAME instant race the terminal's startup
 handshake — one of them gets ``(-10005, 'IPC timeout')`` (see §41).  The
 scheduled collector, the dashboard warmup cycle, and manual CLI runs are all

@@ -49,7 +49,7 @@ def detect_swings(candles: list[Candle], left: int = 2, right: int = 2) -> list[
     # Filter out price outliers — if any candle's price is more than
     # 5x the median price, exclude it from swing detection. This
     # prevents corrupt data (e.g. old Deriv prices mixed with
-    # Blueberry MT5 prices) from creating impossible swing levels.
+    # Deriv MT5 prices) from creating impossible swing levels.
     all_prices = [c.high for c in candles] + [c.low for c in candles]
     sorted_prices = sorted(all_prices)
     median_price = sorted_prices[len(sorted_prices) // 2] if sorted_prices else 1.0

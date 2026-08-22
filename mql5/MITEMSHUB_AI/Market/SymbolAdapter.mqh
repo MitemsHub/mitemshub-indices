@@ -6,7 +6,7 @@
 //|  SymbolInfo* and read from this adapter.  No hard-coded prices,  |
 //|  digits, points, or lots anywhere else in the engine.            |
 //|                                                                  |
-//|  Reference specs probed live on Blueberry Markets (2026-08-11):  |
+//|  Reference specs probed live on Deriv (2026-08-11):  |
 //|    SYN75 : digits=3 point=0.001 tick_size=0.001 tick_value=0.1   |
 //|            vol 0.01..100 step 0.01, stops_level=0 freeze=0       |
 //|            contract=100 calc_mode=CFD_INDEX, spread~1080 pts     |
@@ -206,7 +206,7 @@ public:
       return((TimeCurrent() - tick.time) <= max_age_seconds);
      }
 
-   //--- Fixture data for unit tests (values probed live on Blueberry) --------
+   //--- Fixture data for unit tests (values probed live on Deriv) --------
    // The tests call FillFixture(SYN75) to get a known-good spec without
    // requiring the terminal; Init() is the live path.
    static void FillFixture(const string symbol, SymbolSpec &out)

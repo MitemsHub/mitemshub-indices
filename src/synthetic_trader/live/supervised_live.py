@@ -110,7 +110,7 @@ async def execute_supervised_order(
     *,
     mode: LiveMode,
     readiness_ok: bool,
-    client: object,
+    client: Any,
     proposal_id: str,
     price: float,
 ):

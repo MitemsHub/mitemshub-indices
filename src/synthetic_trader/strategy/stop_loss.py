@@ -131,7 +131,7 @@ def find_order_block_stop(
                 # Use the most recent bullish OB (highest index = most recent)
                 # Place stop below the OB's bottom with ATR buffer
                 most_recent = max(bullish_obs, key=lambda ob: ob.get("index", 0))
-                return most_recent["bottom"] - buffer
+                return float(most_recent["bottom"]) - buffer
 
         elif direction == "sell":
             # Find bearish OBs ABOVE current price (supply zones)
@@ -144,7 +144,7 @@ def find_order_block_stop(
                 # Use the most recent bearish OB (highest index = most recent)
                 # Place stop above the OB's top with ATR buffer
                 most_recent = max(bearish_obs, key=lambda ob: ob.get("index", 0))
-                return most_recent["top"] + buffer
+                return float(most_recent["top"]) + buffer
 
     # ── Priority 2: Fallback to custom BOS-based detection ──
     bos_index = _detect_bos_index(candles, direction, lookback=50)

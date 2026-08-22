@@ -84,6 +84,8 @@ def summarize_trigger_rates(
 
     per_symbol: dict[str, dict[str, dict[str, float | int]]] = {}
     for (symbol, trigger_type, _status), stats in summary.items():
+        if symbol is None or trigger_type is None:
+            continue
         count = int(stats.get("count") or 0)
         bucket = per_symbol.setdefault(symbol, {}).setdefault(trigger_type, {"count": 0})
         bucket["count"] = int(bucket["count"]) + count

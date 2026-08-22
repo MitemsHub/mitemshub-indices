@@ -6,7 +6,7 @@ moment nobody runs ``backfill-mt5`` by hand.  This service keeps
 ``data/backfill/{symbol}_ticks.csv`` compounding **in the background** by
 reusing the exact machinery that powers ``backfill-mt5``
 (:func:`~synthetic_trader.calibration.mt5_collector.fetch_m1_candles` —
-server-backed M1 OHLC from the Blueberry MT5 terminal, at the CORRECT
+server-backed M1 OHLC from the Deriv MT5 terminal, at the CORRECT
 SYN75/SYN100 price scale).
 
 Design:

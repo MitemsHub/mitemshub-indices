@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from collections.abc import Callable
+from typing import Any
 import json
 import logging
 import re
@@ -23,7 +24,7 @@ from synthetic_trader.config import (
 )
 from synthetic_trader.data.collector import deriv_credentials_from_env
 from synthetic_trader.data.candles import MultiTimeframeCandleBuilder
-from synthetic_trader.domain import Tick, FeatureSnapshot
+from synthetic_trader.domain import Candle, Tick, FeatureSnapshot
 from synthetic_trader.execution.deriv_ws import DerivWebSocketClient
 from synthetic_trader.execution.venues import MarketDataClient
 from synthetic_trader.features.assembler import build_snapshot
@@ -133,7 +134,7 @@ _missed_trade_tracker = MissedTradeTracker()
 # into future confidence scores so the engine becomes more willing
 # to trade range-bound markets when it keeps missing opportunities.
 _confidence_scorer = ConfidenceScorer(
-    model=None,  # model not needed for range-boost learning
+    model=None,  # type: ignore[arg-type]  # model not needed for range-boost learning
 )
 
 # ── Persistent DecisionEngine singleton ────────────────────────
@@ -175,7 +176,7 @@ def _get_persistent_decision_engine(
     """
     key = f"{symbol}_{trading_mode}"
     if key not in _decision_engines:
-        engine = DecisionEngine(config, model=model)
+        engine = DecisionEngine(config, model=model)  # type: ignore[arg-type]
         # Try to load saved state from disk
         state_path = _MODEL_STATE_DIR / f"{key}.json"
         if state_path.exists():
@@ -301,7 +302,7 @@ def _check_symbol_deal_history(symbol: str) -> None:
         return
 
     cfg = mt5_config_from_env()
-    login = int(cfg["login"])
+    login = int(cfg["login"] or 0)
     password = cfg.get("password") or ""
     server = cfg.get("server") or ""
 
@@ -486,7 +487,7 @@ def _compute_outcome_label(
     *,
     symbol: str,
     features: dict[str, float] | None = None,
-) -> tuple[int | None, str]:
+) -> tuple[int | None, str] | None:
     """Compute an outcome-based label for the replay buffer.
 
     Returns (label, source) where:
@@ -966,7 +967,7 @@ async def collect_live_snapshot_ticks(
     # swapped mid-flight:
     #   * MT5 configured  → MT5 ONLY.  A failure here is a hard error — the
     #     system refuses to hand back Deriv 1HZ-scale prices (~7,000 for
-    #     R_75) as a "fallback" when the Blueberry terminal is down.  The
+    #     R_75) as a "fallback" when the Deriv terminal is down.  The
     #     caller (run_live_snapshot) turns the exception into an honest
     #     stand-aside so the operator knows the broker link is down.
     #   * MT5 not configured → Deriv WebSocket is the explicit venue.
@@ -1283,12 +1284,12 @@ def _guardian_position_scale(guardian_state: str) -> float:
 
 
 def build_guardian_snapshot(
-    snapshot: dict[str, object],
+    snapshot: dict[str, Any],
     ticks: list[Tick],
     guardian_thresholds: GuardianThresholds | None = None,
     trading_mode: str = "sniper",
     guardian_memory_dir: str | Path | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     current_close = ticks[-1].price if ticks else snapshot.get("current_close")
     enriched = dict(snapshot)
     enriched["current_close"] = current_close
@@ -1367,7 +1368,7 @@ def build_guardian_snapshot(
     # trade-through only cancels once a full candle confirms it.
     # The sniper execution timeframe is 900s (swing_execution_timeframe_sec);
     # the snapshot may carry an override.
-    execution_tf = int(snapshot.get("execution_timeframe_sec") or 900)
+    execution_tf: int = int(snapshot.get("execution_timeframe_sec") or 900)
     # Bound the closed-candle check by the plan's confirmation time when a
     # confirmed plan already exists (so a genuine stop confirmed by any closed
     # candle since confirmation cancels, even if no evaluation ran for a while).
@@ -1577,7 +1578,7 @@ def build_guardian_snapshot(
     return enriched
 
 
-def build_decision_summary(alert: dict[str, object]) -> str | None:
+def build_decision_summary(alert: dict[str, Any]) -> str | None:
     existing_summary = alert.get("decision_summary")
     if isinstance(existing_summary, str) and existing_summary.strip():
         existing_summary = existing_summary.strip()
@@ -1595,7 +1596,7 @@ def build_decision_summary(alert: dict[str, object]) -> str | None:
     return f"{direction} setup valid; {why}; {wait_for}"
 
 
-def classify_alert_type(alert: dict[str, object]) -> str:
+def classify_alert_type(alert: dict[str, Any]) -> str:
     call = str(alert.get("call", ""))
     trade_status = str(alert.get("trade_status", ""))
     if trade_status == "valid" and call in {"buy_candidate", "sell_candidate"}:
@@ -1604,10 +1605,10 @@ def classify_alert_type(alert: dict[str, object]) -> str:
 
 
 def build_watch_alert(
-    snapshot: dict[str, object],
+    snapshot: dict[str, Any],
     *,
     guardian_memory_dir: str | Path | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Convert a raw snapshot dict into a JSON-serializable alert dict.
 
     This is the bridge between the Python engine and the Next.js frontend.
@@ -1652,7 +1653,7 @@ def build_watch_alert(
     return alert
 
 
-def _maybe_emit_ea_call(alert: dict[str, object]) -> None:
+def _maybe_emit_ea_call(alert: dict[str, Any]) -> None:
     """Write a proven call to the EA folder when SYNTH_EA_EMIT=1.
 
     The call is emitted only when the Stage-3 gate says the call type is
@@ -1660,7 +1661,7 @@ def _maybe_emit_ea_call(alert: dict[str, object]) -> None:
     ``execution_allowed``).  Volume comes from ``SYNTH_EA_VOLUME`` (default
     0.2) scaled by the empirical ``size_multiplier`` from the gate.  The
     venue symbol resolves through the same ``SYNTHETIC_MT5_SYMBOL_MAP`` env
-    the collector uses (R_75 -> SYN75 on Blueberry).
+    the collector uses (R_75 -> SYN75 on Deriv).
     """
     if os.getenv("SYNTH_EA_EMIT") != "1":
         return
@@ -1701,9 +1702,9 @@ def _ea_venue_symbol(symbol: str) -> str:
 
 def _band_gate_state(
     symbol: str,
-    execution_candles: list[object],
+    execution_candles: list[Candle],
     hold_horizon_sec: int,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Report why the live band strategy is standing aside (operator visibility).
 
     Mirrors ``decision_engine._live_band_signal`` exactly — same config
@@ -1742,7 +1743,7 @@ def _band_gate_state(
             config=VolBandConfig(**band_kwargs),
             garch_state=load_calibrated_garch_state(symbol),
         )
-        last: object | None = None
+        last = None
         for candle in execution_candles:
             emitted = strategy.on_candle(candle)
             if emitted is not None:
@@ -1792,7 +1793,7 @@ def _band_gate_state(
 HELD_PLAN_REANCHOR_FRACTION = 0.5
 
 
-def _restore_held_plan(alert: dict[str, object], memory_dir: str | Path | None = None) -> None:
+def _restore_held_plan(alert: dict[str, Any], memory_dir: str | Path | None = None) -> None:
     """Restore a persisted confirmed plan when the fresh alert has none.
 
     Only fires when ALL of the following hold:
@@ -1973,7 +1974,7 @@ def _restore_held_plan(alert: dict[str, object], memory_dir: str | Path | None =
 
 
 def build_watch_state(
-    snapshot: dict[str, object],
+    snapshot: dict[str, Any],
     *,
     confidence_above: float = 0.58,
     confidence_near: float = 0.50,
@@ -2181,17 +2182,17 @@ def _resolve_regime_max_age(regime: str | None) -> int:
 
 
 # ── Price sanity check ─────────────────────────────────────────
-# Expected price ranges for each symbol on Blueberry Markets MT5.
+# Expected price ranges for each symbol on Deriv MT5.
 # When tick prices fall outside these ranges, a warning is surfaced
 # in the snapshot result. This catches the common case where the system
 # falls back to the Deriv API (wrong prices) instead of MT5.
 #
 # These ranges are intentionally wide to avoid false positives during
 # extreme volatility. The check flags gross mismatches (e.g. Vol 75 at
-# ~7,000 from Deriv API instead of ~1,542 from Blueberry Markets).
+# ~7,000 from Deriv API instead of ~1,542 from Deriv).
 EXPECTED_PRICE_RANGES: dict[str, tuple[float, float]] = {
-    "R_75": (800.0, 4_000.0),     # Blueberry Volatility 75 trades ~1,200-1,800
-    "R_100": (150.0, 600.0),      # Blueberry Volatility 100 trades ~250-350
+    "R_75": (800.0, 4_000.0),     # Deriv Volatility 75 trades ~1,200-1,800
+    "R_100": (150.0, 600.0),      # Deriv Volatility 100 trades ~250-350
 }
 
 # One-time warning flag — only warn once per process lifetime to avoid log spam
@@ -2201,7 +2202,7 @@ _PRICE_WARNING_SHOWN = False
 def validate_tick_prices(
     symbol: str,
     ticks: list[Tick],
-) -> dict[str, object] | None:
+) -> dict[str, Any] | None:
     """Check tick prices against expected ranges for the symbol.
 
     Returns a warning dict if prices are outside the expected range,
@@ -2240,7 +2241,7 @@ def validate_tick_prices(
         warning = (
             f"PRICE MISMATCH: {symbol} median price {median_price:.2f} is {deviation_text}. "
             f"Expected range: {low:.0f}-{high:.0f}. "
-            f"This likely means the system is using Deriv API data instead of Blueberry Markets MT5. "
+            f"This likely means the system is using Deriv API data instead of Deriv MT5. "
             f"Trade levels (entry/stop/target) will be WRONG."
         )
         global _PRICE_WARNING_SHOWN
@@ -2423,11 +2424,11 @@ def _load_csv_ticks(
         Returns an empty list if all ticks are older than max_age_seconds.
     """
     if max_age_seconds is None:
-        age_limit = MAX_TICK_AGE_SECONDS  # default: 6-hour filter
+        age_limit: float = MAX_TICK_AGE_SECONDS  # default: 6-hour filter
     elif max_age_seconds < 0:
         age_limit = float("inf")  # sentinel: negative = no filter (stale-data path)
     else:
-        age_limit = max_age_seconds
+        age_limit = float(max_age_seconds)
 
     candidates = [
         Path(f"data/{symbol}_ticks.csv"),
@@ -2466,7 +2467,7 @@ def _load_csv_ticks(
         # by on-demand live reads — it is NOT a continuous record, so on a
         # quiet morning the engine saw "need 20 candles, have 19" despite
         # 7 days of clean history sitting in data/backfill/.  Merge the
-        # continuous M1 corpus in (same Blueberry SYN scale — verified by
+        # continuous M1 corpus in (same Deriv SYN scale — verified by
         # the price sanity check downstream) so analysis always has full
         # candle history.  The live CSV wins on epoch ties (it is fresher).
         #
@@ -2597,7 +2598,7 @@ def analyze_live_snapshot(
     guardian_thresholds: GuardianThresholds | None = None,
     trading_mode: str = "sniper",
     model: OnlineLogisticModel | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     mode = trading_mode if trading_mode in TRADING_MODE_PRESETS else "sniper"
     preset = TRADING_MODE_PRESETS[mode]
     if config is None:
@@ -2634,7 +2635,7 @@ def analyze_live_snapshot(
     price_check = validate_tick_prices(symbol, all_ticks)
 
     builder = MultiTimeframeCandleBuilder(symbol, requested_timeframes)
-    histories: dict[int, list[object]] = {tf: [] for tf in requested_timeframes}
+    histories: dict[int, list[Candle]] = {tf: [] for tf in requested_timeframes}
 
     for tick in all_ticks:
         closed = builder.update(tick)
@@ -2730,10 +2731,13 @@ def analyze_live_snapshot(
     # 3. Otherwise → use delayed price movement (1 ATR in 6 hours)
     if primary_candles:
         try:
-            _live_label, _label_source = _compute_outcome_label(
+            _outcome = _compute_outcome_label(
                 symbol=symbol,
                 features=dict(feature_snapshot.features) if primary_candles else None,
             )
+            if _outcome is None:
+                raise ValueError("no outcome label")
+            _live_label, _label_source = _outcome
             _label_source_counts[_label_source] = _label_source_counts.get(_label_source, 0) + 1
             if _live_label is not None:
                 decision_engine.model.replay_buffer.add(
@@ -2936,7 +2940,7 @@ def _maybe_cleanup_knowledge_base() -> None:
     try:
         from synthetic_trader.research.knowledge import KnowledgeBase
         kb = KnowledgeBase(Path("data/research/knowledge"))
-        result = kb.cleanup(max_days=90, archive_dir=Path("data/research/knowledge/archive"))
+        result = kb.cleanup(max_days=90, archive_dir=Path("data/research/knowledge/archive"))  # type: ignore[attr-defined]
         total = sum(result.values())
         if total > 0:
             print(f"[knowledge] Cleanup: {result}", flush=True)
@@ -2955,7 +2959,7 @@ _JOURNAL_CLEANUP_INTERVAL_SEC = 86400
 _JOURNAL_CLEANUP_MAX_DAYS = 90
 
 
-def _extract_journal_entry_epoch(entry: dict[str, object]) -> float | None:
+def _extract_journal_entry_epoch(entry: dict[str, Any]) -> float | None:
     """Extract a numeric epoch from a journal JSONL entry.
 
     Journal entries have different timestamp fields depending on type:
@@ -2999,7 +3003,7 @@ def _maybe_cleanup_journal() -> None:
                 continue
 
             kept: list[str] = []
-            pruned: list[dict[str, object]] = []
+            pruned: list[dict[str, Any]] = []
 
             for line in lines:
                 line = line.strip()
@@ -3051,7 +3055,7 @@ async def run_live_snapshot(
     trading_mode: str = "sniper",
     model_path: str | None = None,
     skip_api: bool = False,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     # Once-per-day cleanup (best-effort, time-gated)
     _maybe_cleanup_knowledge_base()
     _maybe_cleanup_journal()
@@ -3068,7 +3072,7 @@ async def run_live_snapshot(
 
     # The venue is decided ONCE, before any collection, so the corpus
     # append below can never mix scales: Deriv 1HZ ticks (~7,000 for
-    # R_75) must NOT be appended into the Blueberry MT5 corpus (~1,850).
+    # R_75) must NOT be appended into the Deriv MT5 corpus (~1,850).
     # A snapshot subprocess whose env lost the MT5 vars would otherwise
     # silently run the Deriv path and pollute the compounding corpus
     # with 3.7x-wrong prices.
@@ -3189,7 +3193,7 @@ async def run_live_snapshot(
             # ONLY append MT5-sourced ticks to the MT5 corpus.  When this
             # subprocess ran the Deriv path (MT5 env not visible here), the
             # collected ticks are on the Deriv 1HZ scale (~7,000 for R_75) —
-            # appending them would corrupt the compounding Blueberry corpus
+            # appending them would corrupt the compounding Deriv corpus
             # with ~3.7x-wrong prices (the exact corruption seen in
             # data/R_75_ticks.csv).  The scale guard in append_ticks_csv is
             # defense-in-depth; the venue gate is the root fix.
@@ -3227,13 +3231,13 @@ async def run_live_snapshot(
         result = build_guardian_snapshot({
             "call": "stand_aside", "trade_status": "not_valid",
             "direction_bias": "none",
-            "briefing": "MT5 unavailable — no Deriv fallback; start the Blueberry MT5 terminal",
+            "briefing": "MT5 unavailable — no Deriv fallback; start the Deriv MT5 terminal",
             "symbol": symbol, "trading_mode": trading_mode,
             "regime": "unknown", "regime_explanation": "Broker link down (no fallback)",
             "structure_summary": "structure still forming",
             "confidence": None, "model_long_probability": None,
             "current_close": None,
-            "wait_for": "start the Blueberry MT5 terminal, then refresh",
+            "wait_for": "start the Deriv MT5 terminal, then refresh",
             "reasons": ["mt5 terminal unavailable, no deriv fallback"],
             "risk_state": {
                 "equity": 1000.0, "open_positions": 0, "consecutive_losses": 0,
@@ -3294,7 +3298,7 @@ async def run_live_snapshot(
 
 # ── Render helpers (CLI text output) ─────────────────────────
 
-def render_live_snapshot_text(snapshot: dict[str, object]) -> str:
+def render_live_snapshot_text(snapshot: dict[str, Any]) -> str:
     """Render a snapshot dict as human-readable CLI text.
 
     Briefing is printed *before* structured fields so that the human
@@ -3330,7 +3334,7 @@ def render_live_snapshot_text(snapshot: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def render_live_watch_alert_text(alert: dict[str, object]) -> str:
+def render_live_watch_alert_text(alert: dict[str, Any]) -> str:
     """Render a live-watch alert dict as human-readable CLI text.
 
     Field ordering rules:
@@ -3387,7 +3391,7 @@ async def _build_watch_baseline(
     timeframe_sec: int,
     higher_timeframe_sec: int,
     app_id: str | None,
-) -> tuple[list, dict[str, object], WatchState]:
+) -> tuple[list, dict[str, Any], WatchState]:
     """Collect warm-up ticks, build a snapshot, and return (ticks, alert, WatchState).
 
     This is the shared logic used for both the initial baseline and the
@@ -3475,7 +3479,7 @@ async def run_live_watch(
     auto_score_interval_sec: float | None = None,
     auto_score_outcomes_path: str = DEFAULT_OUTCOMES_PATH,
     auto_score_status_path: str = DEFAULT_STATUS_PATH,
-) -> list[dict[str, object]]:
+) -> list[dict[str, Any]]:
     """Monitor a symbol and emit read-only operator calls on meaningful change.
 
     Uses ``collect_live_snapshot_ticks`` for warm-up history, then loops
@@ -3484,7 +3488,7 @@ async def run_live_watch(
     resulting alert is compared against the previous one via
     ``has_material_context_change`` / ``should_emit_watch_alert``.
     """
-    alert_log: list[dict[str, object]] = []
+    alert_log: list[dict[str, Any]] = []
     journal_file = Path(journal_path)
     journal_file.parent.mkdir(parents=True, exist_ok=True)
     calls_journal = Path(calls_journal_path) if calls_journal_path else None
@@ -3519,13 +3523,13 @@ async def run_live_watch(
             baseline_alert = build_guardian_snapshot({
                 "call": "stand_aside", "trade_status": "not_valid",
                 "direction_bias": "none",
-                "briefing": f"MT5 unavailable ({exc}) — no Deriv fallback; start the Blueberry terminal",
+                "briefing": f"MT5 unavailable ({exc}) — no Deriv fallback; start the Deriv terminal",
                 "symbol": symbol, "trading_mode": "sniper",
                 "regime": "unknown", "regime_explanation": "Broker link down",
                 "structure_summary": "structure still forming",
                 "confidence": None, "model_long_probability": None,
                 "current_close": None,
-                "wait_for": "start the Blueberry MT5 terminal, then refresh",
+                "wait_for": "start the Deriv MT5 terminal, then refresh",
                 "reasons": [f"mt5 unavailable: {exc}"],                    "risk_state": {
                         "equity": 1000.0, "open_positions": 0, "consecutive_losses": 0,
                         "realized_pnl": 0.0, "trades_today": 0, "max_open_positions": 1,
@@ -3652,7 +3656,7 @@ def build_live_watch_review_snapshot(
     limit: int = 5,
     call_filter: str | None = None,
     valid_only: bool = False,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Build a review snapshot from a live-watch journal JSONL file.
 
     Returns a flat dict with ``latest_*`` summary fields, ``alert_count``,
@@ -3662,7 +3666,7 @@ def build_live_watch_review_snapshot(
     if not journal_path.exists():
         raise ValueError(f"Journal file not found: {journal_path}")
 
-    all_records: list[dict[str, object]] = []
+    all_records: list[dict[str, Any]] = []
     for line in journal_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -3684,9 +3688,9 @@ def build_live_watch_review_snapshot(
         raise ValueError(f"No valid entries found in journal: {journal_path}")
 
     # Separate by record type
-    alert_entries: list[dict[str, object]] = []
-    suppressed_entries: list[dict[str, object]] = []
-    transport_entries: list[dict[str, object]] = []
+    alert_entries: list[dict[str, Any]] = []
+    suppressed_entries: list[dict[str, Any]] = []
+    transport_entries: list[dict[str, Any]] = []
     for entry in all_records:
         rtype = entry.get("record_type", "")
         if rtype == "suppressed_context":
@@ -3697,7 +3701,7 @@ def build_live_watch_review_snapshot(
             alert_entries.append(entry)
 
     # Apply filters to alert entries
-    filtered: list[dict[str, object]] = []
+    filtered: list[dict[str, Any]] = []
     for entry in alert_entries:
         if symbol and entry.get("symbol") != symbol:
             continue
@@ -3708,7 +3712,7 @@ def build_live_watch_review_snapshot(
         filtered.append(entry)
 
     # Filter suppressed entries by the same criteria (except transport)
-    filtered_suppressed: list[dict[str, object]] = []
+    filtered_suppressed: list[dict[str, Any]] = []
     for entry in suppressed_entries:
         if symbol and entry.get("symbol") != symbol:
             continue
@@ -3723,7 +3727,7 @@ def build_live_watch_review_snapshot(
     latest_suppressed = filtered_suppressed[-1] if filtered_suppressed else None
     latest_transport = transport_entries[-1] if transport_entries else None
 
-    result: dict[str, object] = {
+    result: dict[str, Any] = {
         "alert_count": len(filtered),
         "latest_call": latest.get("call") if latest else None,
         "latest_symbol": latest.get("symbol") if latest else None,
@@ -3752,7 +3756,7 @@ def build_live_watch_review_snapshot(
     return result
 
 
-def render_live_watch_review_text(snapshot: dict[str, object]) -> str:
+def render_live_watch_review_text(snapshot: dict[str, Any]) -> str:
     """Render a live-watch review snapshot as CLI text."""
     lines: list[str] = []
     # Summary header
@@ -3807,7 +3811,7 @@ def render_live_watch_review_text(snapshot: dict[str, object]) -> str:
 
 def build_watch_alert_from_prepared_state(
     prepared: PreparedSymbolState,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Convert a PreparedSymbolState into a watch alert dict."""
     call = prepared.call
     direction_bias = (
@@ -3816,7 +3820,7 @@ def build_watch_alert_from_prepared_state(
         else "none"
     )
     trade_status = "valid" if prepared.state in ("actionable", "confirmed") else "not_valid"
-    alert: dict[str, object] = {
+    alert: dict[str, Any] = {
         "symbol": prepared.symbol,
         "call": call,
         "guardian_state": prepared.state,
@@ -3849,7 +3853,7 @@ def build_watch_alert_from_prepared_state(
     return apply_stage3_gate(alert)
 
 
-def _auto_log_call(calls_journal: Path, alert: dict[str, object]) -> None:
+def _auto_log_call(calls_journal: Path, alert: dict[str, Any]) -> None:
     """Append one emitted live call to the calibration calls journal.
 
     Called for every alert the live-watch loop emits, so the auto-scoring
@@ -3872,7 +3876,7 @@ async def _auto_sweep_forever(
     status_path: Path,
     interval_sec: float = 300.0,
     app_id: str | None = None,
-    log: Callable[[str], None] = logging.info,
+    log: Callable[..., None] = logging.info,
 ) -> None:
     """Sweep the calls journal on a schedule while the live watch runs.
 
@@ -3891,13 +3895,14 @@ async def _auto_sweep_forever(
         # fetches (Deriv websocket / MT5) that would otherwise stall the
         # live-watch tick loop for the duration of the sweep.
         result = await asyncio.to_thread(
-            sweep_once,
-            calls_path=calls_path,
-            outcomes_path=outcomes_path,
-            symbol=None,
-            window_minutes=None,
-            app_id=app_id,
-            status_path=status_path,
+            lambda: sweep_once(
+                calls_path=calls_path,
+                outcomes_path=outcomes_path,
+                symbol=None,
+                window_minutes=None,
+                app_id=app_id,
+                status_path=status_path,
+            )
         )
         if result.error is None:
             consecutive_errors = 0
@@ -3922,7 +3927,7 @@ async def _auto_sweep_forever(
         await asyncio.sleep(interval_sec if consecutive_errors == 0 else SWEEP_BACKOFF_SEC)
 
 
-def _append_journal(path: Path, record: dict[str, object]) -> None:
+def _append_journal(path: Path, record: dict[str, Any]) -> None:
     """Append a single JSON record to a JSONL journal file.
 
     Logs a warning on disk-full or permission errors instead of failing silently

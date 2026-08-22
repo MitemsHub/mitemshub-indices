@@ -1,4 +1,4 @@
-"""Tick-level feature engine for Blueberry Volatility indices.
+"""Tick-level feature engine for Deriv Volatility indices.
 
 Computes high-frequency features from raw tick data that capture
 micro-structure dynamics invisible in candle-based analysis:

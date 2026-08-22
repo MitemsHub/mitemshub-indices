@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from synthetic_trader.domain import Direction, TradeSignal
 
@@ -217,7 +217,7 @@ class VolatilityHarvester:
             base_confidence = min(base_confidence + 0.05, 0.85)
         
         # ── Build rationale ───────────────────────────────────────
-        rationale = (
+        rationale: tuple[str, ...] = (
             f"volatility harvesting: z={garch_z:.2f} mr_signal={garch_mr_signal:.2f}",
             f"extreme move detected — betting on mean reversion",
             f"high vol regime (garch_vol_regime={garch_vol_regime:.1f})",
@@ -246,7 +246,7 @@ class VolatilityHarvester:
         symbol: str,
         min_confidence: float,
         position_scale: float,
-        snapshot: object,
+        snapshot: Any,
         model_version: str,
     ) -> TradeSignal:
         """Convert a VolatilityHarvestSignal to a TradeSignal."""
