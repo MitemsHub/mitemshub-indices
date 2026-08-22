@@ -22,7 +22,7 @@ InpWarmupCandles=60
 InpStopSigmaMult=1.5
 InpTargetSigmaMult=2.0
 InpHoldSec=3600
-InpMinTargetRR=1.8
+InpMinTargetRR=1.0
 InpMaxStopPct=0.015
 ;
 ; === GARCH PARAMETERS (calibrated) ===
