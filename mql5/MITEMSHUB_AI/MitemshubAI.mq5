@@ -20,7 +20,7 @@
 //+------------------------------------------------------------------+
 input int    InpBarSec           = 300;      // Bar period in seconds (300=M5)
 input double InpZEntry           = 1.5;      // z-score threshold to enter
-input double InpVolGateRatio     = 1.03;     // vol must be > ratio * vol_ema
+input double InpVolGateRatio     = 1.0;     // vol must be > ratio * vol_ema
 input double InpMinRevertSignal  = 0.02;     // min mean-reversion signal
 input int    InpEmaPeriod        = 20;       // EMA period for price average
 input int    InpSigmaEmaPeriod   = 30;       // EMA period for sigma smoothing
