@@ -11,7 +11,7 @@
 InpBarSec=300
 ;
 ; === ENTRY SIGNALS ===
-InpZEntry=2.5
+InpZEntry=2.0
 InpVolGateRatio=1.0
 InpMinRevertSignal=0.0
 InpEmaPeriod=20
