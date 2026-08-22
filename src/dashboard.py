@@ -252,7 +252,9 @@ def _fetch_trade_history():
 
 
 def _parse_ea_log_trades():
-    """Parse MITEM trades from the EA's MQL5 log files — merge with existing MT5 trades."""
+    """Parse MITEM trades from EA logs, merge with MT5 deals for accurate P&L.
+    EA_LOG is PRIMARY source (has z-score, SL, TP, R-multiple).
+    MT5 deals provide accurate broker P&L when available."""
     mt5_dir = os.path.expanduser("~/AppData/Roaming/MetaQuotes/Terminal")
     if not os.path.isdir(mt5_dir):
         return
@@ -269,12 +271,10 @@ def _parse_ea_log_trades():
             try:
                 with open(fp, 'rb') as fh:
                     text = fh.read(200000).decode('utf-16-le', errors='replace')
-                    open_trades = []  # stack of open trades from this log session
                     for line in text.split('\n'):
                         if '[MITEM]' not in line:
                             continue
-                        # Skip old session entries (from previous EA runs)
-                        if '$10000' in line or 'MITEMSHUB AI v10 starting' in line:
+                        if '$10000' in line:
                             continue
                         # Parse SELL/BUY entries
                         if any(kw in line for kw in ['SELL @', 'BUY @']):
@@ -328,24 +328,64 @@ def _parse_ea_log_trades():
             except Exception:
                 pass
 
-    # Merge EA log trades into cache, deduplicate against MT5 trades
+    # Build final trade list: EA_LOG is primary, MT5 fills gaps
     with lock:
-        existing = cache.get('trades', [])
-        # Build set of existing (time, symbol, direction) to avoid duplicates
-        existing_keys = set()
-        for t in existing:
-            key = (t.get('time', '')[:16], t.get('symbol', ''), t.get('direction', t.get('type', '')))
-            existing_keys.add(key)
-        for lt in log_trades:
-            if lt['status'] == 'OPEN':
-                continue  # skip unmatched open trades
-            key = (lt.get('time', '')[:16], lt.get('symbol', ''), lt.get('direction', ''))
-            if key not in existing_keys:
-                existing.append(lt)
-                existing_keys.add(key)
+        mt5_trades = cache.get('trades', [])  # from _fetch_trade_history
+
+        # Completed EA_LOG trades
+        completed_ea = [lt for lt in log_trades if lt['status'] != 'OPEN']
+
+        # Match each EA_LOG trade to closest MT5 trade by (symbol, direction, time within 2min)
+        used_mt5 = set()
+        merged = []
+        for ea_t in completed_ea:
+            t = dict(ea_t)
+            # Parse EA_LOG time HH:MM:SS
+            ea_hhmm = ea_t.get('time', '')[:5]  # '16:40'
+            best_mt = None
+            best_dist = 999
+            for i, mt in enumerate(mt5_trades):
+                if i in used_mt5:
+                    continue
+                if mt['symbol'] != ea_t['symbol']:
+                    continue
+                if mt['direction'] != ea_t['direction']:
+                    continue
+                # Parse MT5 time HH:MM
+                mt_hhmm = mt['time'][-5:]  # '16:40' from '2026-08-22 16:40'
+                if ea_hhmm == mt_hhmm:
+                    best_mt = mt
+                    best_dist = 0
+                    break
+                # Approximate distance
+                try:
+                    eh, em = map(int, ea_hhmm.split(':'))
+                    mh, mm = map(int, mt_hhmm.split(':'))
+                    dist = abs((eh * 60 + em) - (mh * 60 + mm))
+                    if dist < best_dist and dist <= 2:
+                        best_dist = dist
+                        best_mt = mt
+                except:
+                    pass
+            if best_mt:
+                t['pnl'] = best_mt.get('pnl', ea_t.get('pnl', 0))
+                t['exit_price'] = best_mt.get('exit_price', ea_t.get('exit_price', 0))
+                t['status'] = best_mt.get('status', ea_t.get('status', ''))
+                if not t.get('sl') and best_mt.get('sl'):
+                    t['sl'] = best_mt['sl']
+                if not t.get('tp') and best_mt.get('tp'):
+                    t['tp'] = best_mt['tp']
+                used_mt5.add(i)
+            merged.append(t)
+
+        # Add any unmatched MT5 trades as fallback
+        for i, mt in enumerate(mt5_trades):
+            if i not in used_mt5:
+                merged.append(mt)
+
         # Sort by time descending
-        existing.sort(key=lambda x: x.get('time', ''), reverse=True)
-        cache['trades'] = existing[-200:]
+        merged.sort(key=lambda x: x.get('time', ''), reverse=True)
+        cache['trades'] = merged[-200:]
 
 
 def _compute_metrics():
