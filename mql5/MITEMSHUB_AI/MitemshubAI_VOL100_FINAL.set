@@ -11,7 +11,7 @@
 InpBarSec=300
 ;
 ; === ENTRY SIGNALS ===
-InpZEntry=2.0
+InpZEntry=1.8
 InpVolGateRatio=1.0
 InpMinRevertSignal=0.0
 InpEmaPeriod=20
@@ -70,7 +70,7 @@ InpDrawSignals=true
 InpZDecayExit=true
 InpZDecayTarget=1.0
 InpVol75StopMult=2.0
-InpSessionStart=8
-InpSessionEnd=20
+InpSessionStart=0
+InpSessionEnd=24
 InpCorrelationGuard=true
 InpCorrelThreshold=2.0
