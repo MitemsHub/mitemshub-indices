@@ -20,6 +20,7 @@
 //+------------------------------------------------------------------+
 input int    InpBarSec           = 300;      // Bar period in seconds (300=M5)
 input double InpZEntry           = 1.9;      // z-score threshold to enter (optimized v11: balanced signal quality)
+input double InpZCap              = 3.5;      // z-score cap: skip if above (trending too hard for mean reversion)
 input double InpVolGateRatio     = 1.0;     // vol must be > ratio * vol_ema
 input double InpMinRevertSignal  = 0.0;     // min mean-reversion signal
 input int    InpEmaPeriod        = 20;       // EMA period for price average
@@ -516,6 +517,9 @@ void ProcessOneBar(const AggregatedBar &bar)
      { if(MeanRevertSignal(g_garch.LastZ())<InpMinRevertSignal) return; }
    double z_dev=MathLog(bar.close/g_ema)/g_prev_sigma;
    if(MathAbs(z_dev)<InpZEntry) return;
+   //--- Z-cap: skip if z too high (market trending, not reverting)
+   if(InpZCap>0 && MathAbs(z_dev)>InpZCap)
+     { Print(StringFormat("[MITEM] ZCAP: z=%.2f > %.1f, skipping (trending)",z_dev,InpZCap)); return; }
 
    int direction=(z_dev>0)?-1:1;
    double entry=bar.close;

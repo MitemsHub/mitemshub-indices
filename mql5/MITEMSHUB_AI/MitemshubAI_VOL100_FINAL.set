@@ -18,4 +18,5 @@ InpCorrelationGuard=true
 InpCorrelThreshold=2.0
 InpZDecayExit=true
 InpZDecayTarget=1.0
+InpZCap=3.5
 InpEAComment=MITEM_v11
