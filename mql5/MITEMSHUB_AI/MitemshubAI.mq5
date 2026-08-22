@@ -301,7 +301,7 @@ CTrailManager    g_trail;
 double g_prev_close=0, g_ema=0, g_sigma=0, g_sigma_ema=0, g_prev_sigma=0;
 long   g_bars_seen=0;
 datetime g_last_bar_end=0;
-double g_atr_ema=0, g_equity=10000, g_peak_equity=10000;
+double g_atr_ema=0, g_equity=0, g_peak_equity=0;
 double g_daily_pnl=0;
 int    g_cooldown=0, g_consec_loss=0;
 bool   g_preloading=false, g_paused=false;
@@ -530,6 +530,9 @@ void ProcessOneBar(const AggregatedBar &bar)
 int OnInit()
   {
    Print("[MITEM] === MITEMSHUB AI v10 starting ===");
+   g_equity = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_peak_equity = g_equity;
+   Print(StringFormat("[MITEM] Account balance: $%.2f", g_equity));
    g_agg.Reset(InpBarSec);
    g_garch=new CGarchForecaster(InpGarchMode,InpGarchOmega,InpGarchAlpha,InpGarchGamma,InpGarchBeta);
    if(InpGarchMode==0) g_garch.SeedCalibrated(InpGarchOmega,InpGarchAlpha,InpGarchGamma,InpGarchBeta);
