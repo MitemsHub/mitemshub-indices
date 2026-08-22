@@ -1,35 +1,31 @@
-; MitemshubAI_VOL75_FINAL.set — v13 SMA50 Distance Fade Strategy
-; Volatility 75 Index: fade price extensions from SMA50 with RSI+BB confirmation
+; MitemshubAI_VOL75_FINAL.set — v14 Regime+Pullback Strategy
+; Volatility 75 Index: Trend pullback + compression breakout
+; Conservative: 0.5% risk, 2% daily loss, fixed exits
 ;
 InpBarSec=300
-InpStrategy=1
-InpSmaPeriod=50
-InpSmaDistPct=1.5
-InpConsecBars=5
-InpConsecLookback=7
+InpEmaFast=20
+InpEmaMid=50
+InpEmaSlow=100
+InpPullbackMin=0.3
+InpPullbackMax=2.0
 InpRsiPeriod=14
-InpRsiOversold=35.0
-InpRsiOverbought=65.0
-InpUseRsiConfirm=true
-InpBbPeriod=20
-InpBbDev=2.0
-InpUseBbFilter=true
-InpRiskPerTrade=0.05
+InpAtrPeriod=14
+InpAtrPercentile=200
+InpAtrLowPct=15.0
+InpAtrHighPct=85.0
+InpCompressBars=20
+InpCompressATR=0.7
+InpBreakoutMin=0.15
+InpRiskPerTrade=0.005
 InpAtrStopMult=1.5
-InpAtrTargetMult=2.5
-InpHoldSec=3600
-InpMaxDailyLossPct=0.08
+InpAtrTargetMult=2.0
+InpHoldBars=12
+InpMaxDailyLossPct=0.02
 InpMaxConsecLoss=3
 InpCoolDownBars=3
-InpMinTargetRR=1.2
-InpTrailOn=true
-InpTrailATRMult=1.0
-InpUseTrendFilter=true
-InpTrendSmaFast=20
-InpTrendSmaSlow=50
 InpLiveExecution=true
 InpMagic=7788123
 InpMaxSlippagePts=50
-InpWarmupCandles=100
+InpWarmupCandles=200
 InpDrawDashboard=true
 InpDrawSignals=true

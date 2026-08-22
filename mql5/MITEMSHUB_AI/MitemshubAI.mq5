@@ -1,92 +1,76 @@
 //+------------------------------------------------------------------+
 //|                                            MitemshubAI.mq5       |
-//|                        MITEMSHUB AI MARKETING ENGINE v13         |
-//|                   Multi-Indicator Mean-Reversion Engine           |
+//|                        MITEMSHUB AI MARKET ENGINE v14             |
+//|             Trend-Regime + Pullback Entry + ATR Filter            |
 //|                                                                    |
-//|  Strategy (v13 - rebuilt from autopsy of v11 losses):             |
-//|  - Vol 75: SMA50 distance fade + RSI confirmation                 |
-//|  - Vol 100: Momentum exhaustion (5+ bars) + RSI confirmation     |
-//|  - ATR-based adaptive stops and targets                           |
-//|  - Cool-down after losses, max daily loss cap                     |
-//|                                                                    |
-//|  Root cause of v11 failure: single-bar z-score was noise (15% WR) |
-//|  v13 uses MULTI-BAR indicators that actually have statistical edge |
+//|  Based on expert recommendation:                                  |
+//|  - Classify regime (trending/ranging/high-vol)                    |
+//|  - Trade WITH trend using pullback entries                        |
+//|  - M5 entries with M15 regime confirmation                        |
+//|  - ATR volatility filter (percentile-based)                       |
+//|  - Compression breakout as second mode                            |
+//|  - Fixed exits, no trailing initially                             |
+//|  - Conservative fixed risk (0.5%)                                 |
+//|  - Preserve original R for reliable tracking                      |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "13.00"
+#property version   "14.00"
 #property strict
 
 //+------------------------------------------------------------------+
 //| INPUTS                                                             |
 //+------------------------------------------------------------------+
 input int    InpBarSec           = 300;       // Bar period in seconds (300=M5)
-//--- Strategy Selection
-input int    InpStrategy         = 0;         // 0=auto (symbol-based), 1=SMA50 fade, 2=momentum exhaust
-//--- SMA50 Distance Strategy (Vol 75 primary)
-input int    InpSmaPeriod        = 50;        // SMA period for distance calculation
-input double InpSmaDistPct       = 1.5;       // min % distance from SMA to trigger signal
-//--- Momentum Exhaustion Strategy (Vol 100 primary)
-input int    InpConsecBars       = 5;         // consecutive bars required for exhaustion
-input int    InpConsecLookback   = 7;         // lookback window for counting
-//--- RSI Confirmation
+//--- Regime Detection (M15)
+input int    InpEmaFast          = 20;        // Fast EMA for regime (M15)
+input int    InpEmaMid           = 50;        // Mid EMA for regime (M15)
+input int    InpEmaSlow          = 100;       // Slow EMA for regime (M15)
+//--- Pullback Entry (M5)
+input double InpPullbackMin      = 0.3;       // Min pullback to EMA (ATR units)
+input double InpPullbackMax      = 2.0;       // Max pullback to EMA (ATR units)
 input int    InpRsiPeriod        = 14;        // RSI period
-input double InpRsiOversold      = 35.0;      // RSI oversold threshold (buy below this)
-input double InpRsiOverbought    = 65.0;      // RSI overbought threshold (sell above this)
-input bool   InpUseRsiConfirm    = true;      // require RSI confirmation
-//--- Bollinger Band Filter
-input int    InpBbPeriod         = 20;        // BB period
-input double InpBbDev            = 2.0;       // BB standard deviation multiplier
-input bool   InpUseBbFilter      = true;      // require price near BB extreme
-//--- Risk Management
-input double InpRiskPerTrade     = 0.05;      // 5% of equity per trade (conservative after losses)
-input double InpAtrStopMult      = 1.5;       // stop loss = ATR * multiplier
-input double InpAtrTargetMult    = 2.5;       // take profit = ATR * multiplier
-input int    InpHoldSec          = 3600;      // max hold time in seconds (60 min)
-input double InpMaxDailyLossPct  = 0.08;      // max daily loss (8% of equity)
-input int    InpMaxConsecLoss    = 3;         // max consecutive losses before pause
-input int    InpCoolDownBars     = 3;         // bars to wait after a loss
-input double InpMinTargetRR      = 1.2;       // minimum reward:risk ratio
-//--- Trailing Stop
-input bool   InpTrailOn          = true;      // enable trailing stop
-input double InpTrailATRMult     = 1.0;       // trail distance as ATR multiple
-//--- Trend Filter
-input bool   InpUseTrendFilter   = true;      // filter trades against the trend
-input int    InpTrendSmaFast     = 20;        // fast SMA for trend detection
-input int    InpTrendSmaSlow     = 50;        // slow SMA for trend detection
+//--- ATR Volatility Filter
+input int    InpAtrPeriod        = 14;        // ATR period
+input int    InpAtrPercentile    = 200;       // Lookback for percentile calc
+input double InpAtrLowPct        = 15.0;      // Below this percentile = too quiet
+input double InpAtrHighPct       = 85.0;      // Above this percentile = too volatile
+//--- Compression Breakout
+input int    InpCompressBars     = 20;        // Bars to measure compression range
+input double InpCompressATR      = 0.7;       // ATR must be below this * avg ATR
+input double InpBreakoutMin      = 0.15;      // Min breakout distance (ATR units)
+//--- Risk Management (CONSERVATIVE)
+input double InpRiskPerTrade     = 0.005;     // 0.5% of equity per trade
+input double InpAtrStopMult      = 1.5;       // Stop = ATR * multiplier
+input double InpAtrTargetMult    = 2.0;       // Target = ATR * multiplier
+input int    InpHoldBars         = 12;        // Max hold in bars (60 min on M5)
+input double InpMaxDailyLossPct  = 0.02;      // Max daily loss (2%)
+input int    InpMaxConsecLoss    = 3;         // Max consecutive losses
+input int    InpCoolDownBars     = 3;         // Bars to wait after loss
 //--- Execution
 input bool   InpLiveExecution    = true;      // false=paper, true=live
 input long   InpMagic            = 7788123;   // EA magic number
-input int    InpMaxSlippagePts   = 50;        // max slippage (points)
-input int    InpWarmupCandles    = 100;       // min bars before trading
-input bool   InpDrawDashboard    = true;      // draw dashboard on chart
-input bool   InpDrawSignals      = true;      // draw entry/exit arrows
+input int    InpMaxSlippagePts   = 50;        // Max slippage
+input int    InpWarmupCandles    = 200;       // Min bars before trading
+input bool   InpDrawDashboard    = true;      // Draw dashboard on chart
+input bool   InpDrawSignals      = true;      // Draw entry/exit arrows
 
 //+------------------------------------------------------------------+
-//| ATR CALCULATOR                                                     |
+//| REGIME CLASSIFIER                                                   |
 //+------------------------------------------------------------------+
-class CVolatilityEngine
+enum ENUM_REGIME { REGIME_BULLISH, REGIME_BEARISH, REGIME_RANGING, REGIME_HIGH_VOL, REGIME_NO_TRADE };
+
+string RegimeToString(ENUM_REGIME r)
   {
-private:
-   double m_atr;
-   double m_tr[14];
-   int    m_tr_idx,m_tr_cnt;
-public:
-   CVolatilityEngine(): m_atr(0),m_tr_idx(0),m_tr_cnt(0) {}
-   void OnBar(double prev_close, double high, double low, double close)
+   switch(r)
      {
-      double tv=high-low;
-      if(prev_close>0)
-        {
-         double t1=MathAbs(high-prev_close), t2=MathAbs(low-prev_close);
-         if(t1>tv) tv=t1; if(t2>tv) tv=t2;
-        }
-      m_tr[m_tr_idx]=tv; m_tr_idx=(m_tr_idx+1)%14;
-      if(m_tr_cnt<14) m_tr_cnt++;
-      double s=0; for(int i=0;i<m_tr_cnt;i++) s+=m_tr[i];
-      m_atr=s/m_tr_cnt;
+      case REGIME_BULLISH:   return "BULLISH";
+      case REGIME_BEARISH:   return "BEARISH";
+      case REGIME_RANGING:   return "RANGING";
+      case REGIME_HIGH_VOL:  return "HIGH_VOL";
+      case REGIME_NO_TRADE:  return "NO_TRADE";
      }
-   double ATR() const { return m_atr; }
-  };
+   return "UNKNOWN";
+  }
 
 //+------------------------------------------------------------------+
 //| BAR AGGREGATOR                                                    |
@@ -133,125 +117,39 @@ public:
   };
 
 //+------------------------------------------------------------------+
-//| TRAILING STOP MANAGER                                              |
+//| POSITION MANAGER — preserves original R                           |
 //+------------------------------------------------------------------+
 struct PositionInfo
   {
    int      direction;
    double   entry_price,stop_loss,take_profit;
+   double   original_risk;    // FIXED: store original SL distance
    datetime entry_time;
+   int      entry_bar;
    double   stake;
    bool     active;
   };
 
-class CTrailManager
-  {
-private:
-   PositionInfo m_pos;
-   double       m_atr_ema;
-   double       m_peak_pnl;
-public:
-   CTrailManager(): m_atr_ema(0),m_peak_pnl(0) { m_pos.active=false; }
-   void Reset() { m_pos.active=false; m_peak_pnl=0; }
-   void OpenPosition(int dir,double entry,double sl,double tp,datetime t,double stake)
-     {
-      m_pos.direction=dir; m_pos.entry_price=entry; m_pos.stop_loss=sl;
-      m_pos.take_profit=tp; m_pos.entry_time=t; m_pos.stake=stake;
-      m_pos.active=true; m_peak_pnl=0;
-     }
-   void UpdateATR(double atr)
-     { if(m_atr_ema<=0) m_atr_ema=atr; else m_atr_ema=m_atr_ema*0.98+atr*0.02; }
-   int Manage(double high,double low,double close,datetime bar_time,
-              int bar_sec,double &exit_price,string &reason)
-     {
-      if(!m_pos.active) return 0;
-      if((int)(bar_time-m_pos.entry_time)>=InpHoldSec)
-        { exit_price=close; reason="TIME"; return 1; }
-      double risk=MathAbs(m_pos.entry_price-m_pos.stop_loss);
-      if(risk<1e-12) risk=1e-12;
-      double pnl=(m_pos.direction>0)?close-m_pos.entry_price:m_pos.entry_price-close;
-      double rr=pnl/risk;
-      //--- Check SL and TP
-      if(m_pos.direction>0 && low<=m_pos.stop_loss)
-        { exit_price=m_pos.stop_loss; reason="STOP"; return 1; }
-      if(m_pos.direction<0 && high>=m_pos.stop_loss)
-        { exit_price=m_pos.stop_loss; reason="STOP"; return 1; }
-      if(m_pos.direction>0 && high>=m_pos.take_profit)
-        { exit_price=m_pos.take_profit; reason="TARGET"; return 1; }
-      if(m_pos.direction<0 && low<=m_pos.take_profit)
-        { exit_price=m_pos.take_profit; reason="TARGET"; return 1; }
-      if(pnl>m_peak_pnl) m_peak_pnl=pnl;
-      //--- Break-even at 0.5R
-      if(InpTrailOn && rr>=0.5)
-        {
-         if(m_pos.direction>0)
-           { double be=m_pos.entry_price+risk*0.1; if(be>m_pos.stop_loss) m_pos.stop_loss=be; }
-         else
-           { double be=m_pos.entry_price-risk*0.1; if(be<m_pos.stop_loss) m_pos.stop_loss=be; }
-        }
-      //--- Trailing stop: tighter as profit grows
-      if(InpTrailOn && rr>=1.0 && m_atr_ema>0)
-        {
-         double td=InpTrailATRMult*m_atr_ema;
-         double trail_frac=0.6;
-         if(rr>=2.0) trail_frac=0.45;
-         if(rr>=3.0) trail_frac=0.3;
-         if(m_pos.direction>0)
-           {
-            double ns=close-td*trail_frac;
-            if(ns>m_pos.stop_loss) m_pos.stop_loss=ns;
-           }
-         else
-           {
-            double ns=close+td*trail_frac;
-            if(ns<m_pos.stop_loss) m_pos.stop_loss=ns;
-           }
-        }
-      return 0;
-     }
-   bool IsOpen() const { return m_pos.active; }
-   PositionInfo GetPosition() const { return m_pos; }
-  };
-
 //+------------------------------------------------------------------+
-//| TRADE RECORD                                                       |
+//| INDICATOR BUFFERS                                                  |
 //+------------------------------------------------------------------+
-struct TradeRecord
-  {
-   datetime entry_time,exit_time;
-   int      direction;
-   double   entry_price,exit_price,stop_loss,take_profit,return_r,pnl;
-   string   exit_reason;
-   string   signal_type;
-  };
-#define MAX_TRADES 10000
-TradeRecord g_trades[MAX_TRADES];
-int         g_trade_count=0;
-
-//+------------------------------------------------------------------+
-//| GLOBALS                                                            |
-//+------------------------------------------------------------------+
-CBarAggregator   g_agg;
-CVolatilityEngine g_vol;
-CTrailManager    g_trail;
-
-double g_prev_close=0, g_ema=0;
-long   g_bars_seen=0;
-datetime g_last_bar_end=0;
-double g_atr_ema=0, g_equity=0, g_peak_equity=0;
-double g_daily_pnl=0;
-int    g_cooldown=0, g_consec_loss=0, g_consec_win=0;
-bool   g_preloading=false, g_paused=false;
-datetime g_day_start=0;
-bool   g_last_trade_won=false;
-
-//--- History buffers for indicator calculation
 #define MAX_HISTORY 500
 double g_close_buf[MAX_HISTORY];
 double g_high_buf[MAX_HISTORY];
 double g_low_buf[MAX_HISTORY];
 int    g_buf_count=0;
 int    g_buf_head=0;
+
+// M15 regime buffers (loaded at startup)
+#define MAX_M15 500
+double g_m15_close[MAX_M15];
+double g_m15_high[MAX_M15];
+double g_m15_low[MAX_M15];
+int    g_m15_count=0;
+
+// ATR history for percentile calculation
+double g_atr_history[500];
+int    g_atr_hist_count=0;
 
 void PushBar(double close, double high, double low)
   {
@@ -287,12 +185,29 @@ double GetLow(int bars_ago)
 //+------------------------------------------------------------------+
 //| INDICATOR CALCULATIONS                                              |
 //+------------------------------------------------------------------+
-double CalcSMA(int period)
+double CalcEMA_M5(int period)
   {
    if(g_buf_count<period) return GetClose(0);
-   double s=0;
-   for(int i=0;i<period;i++) s+=GetClose(i);
-   return s/period;
+   double alpha=2.0/(period+1.0);
+   double ema=GetClose(g_buf_count-1);
+   for(int i=g_buf_count-2;i>=0;i--)
+     {
+      double c=GetClose(i);
+      ema=c*alpha+ema*(1.0-alpha);
+     }
+   return ema;
+  }
+
+double CalcEMA_M15(int period)
+  {
+   if(g_m15_count<period) return (g_m15_count>0)?g_m15_close[g_m15_count-1]:0;
+   double alpha=2.0/(period+1.0);
+   double ema=g_m15_close[0];
+   for(int i=1;i<g_m15_count;i++)
+     {
+      ema=g_m15_close[i]*alpha+ema*(1.0-alpha);
+     }
+   return ema;
   }
 
 double CalcRSI(int period)
@@ -310,36 +225,112 @@ double CalcRSI(int period)
    return 100.0-100.0/(1.0+rs);
   }
 
-double CalcBollingerUpper(int period, double dev)
+double CalcATR(int period)
   {
-   double sma=CalcSMA(period);
-   if(g_buf_count<period) return sma+dev*g_vol.ATR();
-   double var=0;
+   if(g_buf_count<period+1) return 0.001;
+   double sum=0;
    for(int i=0;i<period;i++)
-     { double d=GetClose(i)-sma; var+=d*d; }
-   return sma+dev*MathSqrt(var/period);
-  }
-
-double CalcBollingerLower(int period, double dev)
-  {
-   double sma=CalcSMA(period);
-   if(g_buf_count<period) return sma-dev*g_vol.ATR();
-   double var=0;
-   for(int i=0;i<period;i++)
-     { double d=GetClose(i)-sma; var+=d*d; }
-   return sma-dev*MathSqrt(var/period);
-  }
-
-int CountConsecutiveBars(int lookback)
-  {
-   int up=0, down=0;
-   for(int i=1;i<=lookback && i<g_buf_count;i++)
      {
-      if(GetClose(i-1)>GetClose(i)) up++;
-      else if(GetClose(i-1)<GetClose(i)) down++;
+      double tr=g_high_buf[(g_buf_head-1-i+MAX_HISTORY)%MAX_HISTORY]
+                -g_low_buf[(g_buf_head-1-i+MAX_HISTORY)%MAX_HISTORY];
+      if(i+1<g_buf_count)
+        {
+         double prev_c=GetClose(i+1);
+         double h=g_high_buf[(g_buf_head-1-i+MAX_HISTORY)%MAX_HISTORY];
+         double l=g_low_buf[(g_buf_head-1-i+MAX_HISTORY)%MAX_HISTORY];
+         double t1=MathAbs(h-prev_c), t2=MathAbs(l-prev_c);
+         if(t1>tr) tr=t1; if(t2>tr) tr=t2;
+        }
+      sum+=tr;
      }
-   return (up>=down)?up:(-down);
+   return sum/period;
   }
+
+double CalcATRPercentile()
+  {
+   if(g_atr_hist_count<InpAtrPercentile) return 50.0;
+   double current=g_atr_history[(g_atr_hist_count-1)%500];
+   int below=0;
+   for(int i=0;i<InpAtrPercentile && i<g_atr_hist_count;i++)
+     {
+      double h=g_atr_history[(g_atr_hist_count-1-i+500)%500];
+      if(current>h) below++;
+     }
+   return (double)below/InpAtrPercentile*100.0;
+  }
+
+//+------------------------------------------------------------------+
+//| REGIME CLASSIFIER                                                   |
+//+------------------------------------------------------------------+
+ENUM_REGIME ClassifyRegime()
+  {
+   // Need enough M15 data
+   if(g_m15_count<InpEmaSlow) return REGIME_NO_TRADE;
+   
+   double ema_fast=CalcEMA_M15(InpEmaFast);
+   double ema_mid=CalcEMA_M15(InpEmaMid);
+   double ema_slow=CalcEMA_M15(InpEmaSlow);
+   double price=g_m15_close[g_m15_count-1];
+   
+   // ATR percentile check
+   double atr_pct=CalcATRPercentile();
+   if(atr_pct>InpAtrHighPct) return REGIME_HIGH_VOL;
+   if(atr_pct<InpAtrLowPct) return REGIME_NO_TRADE;
+   
+   // EMA alignment: all three must be ordered
+   if(ema_fast>ema_mid && ema_mid>ema_slow && price>ema_fast)
+     return REGIME_BULLISH;
+   if(ema_fast<ema_mid && ema_mid<ema_slow && price<ema_fast)
+     return REGIME_BEARISH;
+   
+   return REGIME_RANGING;
+  }
+
+//+------------------------------------------------------------------+
+//| COMPRESSION DETECTION                                               |
+//+------------------------------------------------------------------+
+bool IsCompressed()
+  {
+   if(g_buf_count<InpCompressBars) return false;
+   double atr_current=CalcATR(InpAtrPeriod);
+   
+   // Average ATR over last 100 bars
+   double avg_atr=0;
+   int cnt=MathMin(100,g_buf_count);
+   for(int i=0;i<cnt;i++) avg_atr+=CalcATR(InpAtrPeriod); // simplified
+   avg_atr/=cnt;
+   
+   return atr_current<avg_atr*InpCompressATR;
+  }
+
+//+------------------------------------------------------------------+
+//| GLOBALS                                                            |
+//+------------------------------------------------------------------+
+CBarAggregator   g_agg;
+PositionInfo     g_pos;
+
+double g_prev_close=0;
+long   g_bars_seen=0;
+datetime g_last_bar_end=0;
+double g_equity=0, g_peak_equity=0;
+double g_daily_pnl=0;
+int    g_cooldown=0, g_consec_loss=0;
+bool   g_preloading=false, g_paused=false;
+datetime g_day_start=0;
+ENUM_REGIME g_current_regime=REGIME_NO_TRADE;
+
+// Trade history
+#define MAX_TRADES 10000
+struct TradeRecord
+  {
+   datetime entry_time,exit_time;
+   int      direction;
+   double   entry_price,exit_price,original_sl;
+   double   return_r,pnl;
+   string   exit_reason,signal_type,regime;
+  };
+TradeRecord g_trades[MAX_TRADES];
+int g_trade_count=0;
 
 //+------------------------------------------------------------------+
 //| DASHBOARD                                                          |
@@ -347,11 +338,11 @@ int CountConsecutiveBars(int lookback)
 #define DASH_Y 20
 #define DASH_H 18
 #define DASH_X 10
-string g_dl[22];
+string g_dl[24];
 
 void DashCreate()
   {
-   for(int i=0;i<22;i++)
+   for(int i=0;i<24;i++)
      {
       g_dl[i]="MITEM_D_"+IntegerToString(i);
       ObjectCreate(0,g_dl[i],OBJ_LABEL,0,0,0);
@@ -372,58 +363,58 @@ void DashUpdate()
    double wr=(g_trade_count>0)?(double)wins/g_trade_count*100:0;
    double dd=(g_peak_equity>0)?(g_peak_equity-g_equity)/g_peak_equity*100:0;
    
-   double sma50=CalcSMA(InpSmaPeriod);
+   double atr=CalcATR(InpAtrPeriod);
+   double atr_pct=CalcATRPercentile();
    double rsi=CalcRSI(InpRsiPeriod);
-   int consec=CountConsecutiveBars(InpConsecLookback);
-   double atr=g_vol.ATR();
+   double ema20=CalcEMA_M5(InpEmaFast);
    double price=GetClose(0);
-   double sma_dist=(price>0&&sma50>0)?(price-sma50)/sma50*100:0;
    
-   string L[22];
-   L[0]="=== MITEMSHUB AI v13 ===";
+   string L[24];
+   L[0]="=== MITEMSHUB AI v14 ===";
    L[1]="Balance: $"+DoubleToString(g_equity,2);
    L[2]="Trades: "+IntegerToString(g_trade_count);
    L[3]="Win Rate: "+DoubleToString(wr,1)+"%";
    L[4]="Total R: "+DoubleToString(total_r,3);
-   L[5]="ATR: "+DoubleToString(atr,4);
-   L[6]="RSI(14): "+DoubleToString(rsi,1);
-   L[7]="Bars: "+IntegerToString(g_bars_seen);
+   L[5]="Regime: "+RegimeToString(g_current_regime);
+   L[6]="ATR %ile: "+DoubleToString(atr_pct,0)+"%";
+   L[7]="RSI: "+DoubleToString(rsi,1);
    L[8]="Drawdown: "+DoubleToString(dd,2)+"%";
    L[9]="Consec Loss: "+IntegerToString(g_consec_loss);
    L[10]="Status: "+(g_paused?"PAUSED":(g_preloading?"PRELOAD":"ACTIVE"));
    L[11]=InpLiveExecution?"MODE: LIVE":"MODE: PAPER";
    L[12]="Risk: "+DoubleToString(InpRiskPerTrade*100,1)+"%/trade";
-   L[13]="SMA50 Dist: "+DoubleToString(sma_dist,3)+"%";
-   L[14]="SMA Dist Thresh: "+DoubleToString(InpSmaDistPct,1)+"%";
-   L[15]="Consec Bars: "+IntegerToString(consec);
-   L[16]="SL: "+DoubleToString(InpAtrStopMult,1)+"x ATR";
-   L[17]="TP: "+DoubleToString(InpAtrTargetMult,1)+"x ATR";
-   L[18]="Hold: "+IntegerToString(InpHoldSec/60)+"min";
-   L[19]="Strategy: "+(IsVol75()?"SMA50 Fade":"Mom Exhaust");
-   L[20]="Cooldown: "+IntegerToString(g_cooldown);
-   L[21]="Daily P&L: $"+DoubleToString(g_daily_pnl,2);
+   L[13]="SL: "+DoubleToString(InpAtrStopMult,1)+"x ATR";
+   L[14]="TP: "+DoubleToString(InpAtrTargetMult,1)+"x ATR";
+   L[15]="Hold: "+IntegerToString(InpHoldBars*5)+"min";
+   L[16]="EMA20(M5): "+DoubleToString(ema20,_Digits>3?2:5);
+   L[17]="Price: "+DoubleToString(price,_Digits>3?2:5);
+   L[18]="Compressed: "+(IsCompressed()?"YES":"NO");
+   L[19]="Cooldown: "+IntegerToString(g_cooldown);
+   L[20]="Daily P&L: $"+DoubleToString(g_daily_pnl,2);
+   L[21]="MaxDD: 2% daily";
+   L[22]="Risk: 0.5% fixed";
+   L[23]="v14: Regime+Pullback";
    
-   for(int i=0;i<22;i++)
+   for(int i=0;i<24;i++)
      {
       ObjectSetString(0,g_dl[i],OBJPROP_TEXT,L[i]);
       color c=clrWhite;
       if(i==0) c=clrGold;
       else if(i==3) c=wr>=50?clrLime:(wr>=35?clrYellow:clrRed);
-      else if(i==6) c=rsi<30?clrLime:(rsi>70?clrRed:clrWhite);
+      else if(i==5) c=(g_current_regime==REGIME_BULLISH)?clrLime:
+                       (g_current_regime==REGIME_BEARISH)?clrRed:
+                       (g_current_regime==REGIME_RANGING)?clrYellow:clrGray;
+      else if(i==6) c=(atr_pct>85||atr_pct<15)?clrRed:clrLime;
       else if(i==8) c=dd>5?clrRed:(dd>2?clrYellow:clrLime);
       else if(i==10) c=g_paused?clrRed:(g_preloading?clrYellow:clrLime);
       else if(i==11) c=InpLiveExecution?clrRed:clrDodgerBlue;
-      else if(i==13) c=MathAbs(sma_dist)>InpSmaDistPct?clrGold:clrGray;
-      else if(i==19) c=clrDodgerBlue;
-      else if(i==21) c=g_daily_pnl>=0?clrLime:clrRed;
+      else if(i==18) c=IsCompressed()?clrGold:clrGray;
+      else if(i==20) c=g_daily_pnl>=0?clrLime:clrRed;
       ObjectSetInteger(0,g_dl[i],OBJPROP_COLOR,c);
      }
    ChartRedraw(0);
   }
 
-//+------------------------------------------------------------------+
-//| SIGNAL ARROW                                                       |
-//+------------------------------------------------------------------+
 void DrawSignal(int direction, datetime t, double price, string tag)
   {
    string name="MITEM_SIG_"+tag+"_"+IntegerToString(t);
@@ -436,261 +427,333 @@ void DrawSignal(int direction, datetime t, double price, string tag)
   }
 
 //+------------------------------------------------------------------+
-//| SYMBOL HELPERS                                                      |
+//| GENERATE SIGNAL — v14: Regime + Pullback                          |
 //+------------------------------------------------------------------+
-bool IsVol75()
-  { return StringFind(_Symbol,"75")>=0; }
-
-bool IsVol100()
-  { return StringFind(_Symbol,"100")>=0; }
-
-int GetStrategy()
-  {
-   if(InpStrategy>0) return InpStrategy;
-   return IsVol75()?1:2;  // Vol75=SMA50 fade, Vol100=momentum exhaust
-  }
-
-//+------------------------------------------------------------------+
-//| GENERATE SIGNAL — THE NEW BRAIN                                     |
-//+------------------------------------------------------------------+
-// Returns: 1=BUY, -1=SELL, 0=no signal
-// Also outputs signal_type for logging
 int GenerateSignal(string &signal_type)
   {
    if(g_buf_count<InpWarmupCandles) return 0;
    
-   double price=GetClose(0);
-   double rsi=CalcRSI(InpRsiPeriod);
-   int strategy=GetStrategy();
+   ENUM_REGIME regime=ClassifyRegime();
+   g_current_regime=regime;
    
-   //--- STRATEGY 1: SMA50 Distance Fade (Vol 75 primary)
-   if(strategy==1)
+   // No trade in bad regimes
+   if(regime==REGIME_NO_TRADE || regime==REGIME_HIGH_VOL) return 0;
+   
+   double price=GetClose(0);
+   double atr=CalcATR(InpAtrPeriod);
+   double rsi=CalcRSI(InpRsiPeriod);
+   double ema20_m5=CalcEMA_M5(InpEmaFast);
+   
+   //--- MODE 1: TRENDING REGIME → PULLBACK ENTRY
+   if(regime==REGIME_BULLISH || regime==REGIME_BEARISH)
      {
-      double sma=CalcSMA(InpSmaPeriod);
-      if(sma<=0) return 0;
-      double dist_pct=(price-sma)/sma*100.0;
+      // Direction aligns with regime
+      int dir=(regime==REGIME_BULLISH)?1:-1;
       
-      // Need price to be far from SMA
-      if(MathAbs(dist_pct)<InpSmaDistPct) return 0;
+      // Price must have pulled back toward EMA20
+      double pullback_dist=MathAbs(price-ema20_m5);
+      if(pullback_dist<InpPullbackMin*atr) return 0;  // not enough pullback
+      if(pullback_dist>InpPullbackMax*atr) return 0;  // too far, trend may have broken
       
-      // RSI confirmation
-      if(InpUseRsiConfirm)
-        {
-         if(dist_pct>0 && rsi<InpRsiOversold) return 0;  // don't sell if RSI already oversold
-         if(dist_pct<0 && rsi>InpRsiOverbought) return 0;  // don't buy if RSI already overbought
-         // Confirm: sell when price above SMA AND RSI elevated, buy when below AND RSI depressed
-         if(dist_pct>0 && rsi<50) return 0;  // need RSI to confirm overbought
-         if(dist_pct<0 && rsi>50) return 0;  // need RSI to confirm oversold
-        }
+      // Price must be on the correct side of EMA20 for pullback
+      if(dir>0 && price>ema20_m5+atr) return 0;  // BUY: price should be near/below EMA20
+      if(dir<0 && price<ema20_m5-atr) return 0;  // SELL: price should be near/above EMA20
       
-      // BB filter: price should be near outer band
-      if(InpUseBbFilter)
-        {
-         double upper=CalcBollingerUpper(InpBbPeriod,InpBbDev);
-         double lower=CalcBollingerLower(InpBbPeriod,InpBbDev);
-         if(dist_pct>0 && price<upper*0.998) return 0;  // must be near upper band
-         if(dist_pct>0 && price>(upper+(upper-lower)*0.1)) return 0;  // skip if WAY above band
-         if(dist_pct<0 && price>lower*1.002) return 0;  // must be near lower band
-         if(dist_pct<0 && price<(lower-(upper-lower)*0.1)) return 0;  // skip if WAY below band
-        }
+      // RSI confirmation: not extreme
+      if(dir>0 && rsi>60) return 0;  // BUY: RSI shouldn't be too high
+      if(dir<0 && rsi<40) return 0;  // SELL: RSI shouldn't be too low
       
-      // Trend filter: don't fade strong trends
-      if(InpUseTrendFilter)
-        {
-         double sma_fast=CalcSMA(InpTrendSmaFast);
-         double sma_slow=CalcSMA(InpTrendSmaSlow);
-         // Don't sell if fast > slow (uptrend)
-         if(dist_pct>0 && sma_fast>sma_slow*1.001) return 0;
-         // Don't buy if fast < slow (downtrend)
-         if(dist_pct<0 && sma_fast<sma_slow*0.999) return 0;
-        }
+      // Confirmation candle: last bar must be in our direction
+      double last_body=GetClose(0)-GetClose(1);
+      if(dir>0 && last_body<=0) return 0;  // BUY: need bullish candle
+      if(dir<0 && last_body>=0) return 0;  // SELL: need bearish candle
       
-      signal_type="SMA50_FADE";
-      return (dist_pct>0)?-1:1;  // above SMA=SELL, below=BUY
+      // Gap check: current open shouldn't be too far from previous close
+      double gap=MathAbs(GetClose(0)-GetClose(1));
+      if(gap>atr*0.5) return 0;  // gap too large
+      
+      signal_type="PULLBACK_"+(dir>0?"LONG":"SHORT");
+      return dir;
      }
    
-   //--- STRATEGY 2: Momentum Exhaustion (Vol 100 primary)
-   if(strategy==2)
+   //--- MODE 2: RANGING REGIME → COMPRESSION BREAKOUT
+   if(regime==REGIME_RANGING && IsCompressed())
      {
-      int consec=CountConsecutiveBars(InpConsecLookback);
-      int abs_consec=MathAbs(consec);
-      
-      if(abs_consec<InpConsecBars) return 0;
-      
-      // RSI confirmation
-      if(InpUseRsiConfirm)
+      // Find range high/low over last N bars
+      double range_high=0, range_low=999999;
+      for(int i=1;i<=InpCompressBars && i<g_buf_count;i++)
         {
-         if(consec>0 && rsi<55) return 0;   // need RSI >55 for sell exhaustion
-         if(consec<0 && rsi>45) return 0;   // need RSI <45 for buy exhaustion
-         // Stronger confirmation: require RSI to be in extreme zone
-         if(consec>0 && rsi<InpRsiOverbought) return 0;
-         if(consec<0 && rsi>InpRsiOversold) return 0;
+         double h=GetHigh(i);
+         double l=GetLow(i);
+         if(h>range_high) range_high=h;
+         if(l<range_low) range_low=l;
+         }
+      
+      double range_mid=(range_high+range_low)/2.0;
+      double range_size=range_high-range_low;
+      
+      if(range_size<atr*0.5) return 0;  // range too small
+      
+      // Breakout: close outside range
+      double close=GetClose(0);
+      int dir=0;
+      
+      if(close>range_high+InpBreakoutMin*atr)
+        {
+         dir=1;  // breakout UP
+         // Check candle not too large (exhaustion)
+         double candle_size=GetHigh(0)-GetLow(0);
+         if(candle_size>atr*2.0) return 0;  // too large, may be exhaustion
+        }
+      else if(close<range_low-InpBreakoutMin*atr)
+        {
+         dir=-1;  // breakout DOWN
+         double candle_size=GetHigh(0)-GetLow(0);
+         if(candle_size>atr*2.0) return 0;
         }
       
-      // BB filter: price should be extended
-      if(InpUseBbFilter)
-        {
-         double upper=CalcBollingerUpper(InpBbPeriod,InpBbDev);
-         double lower=CalcBollingerLower(InpBbPeriod,InpBbDev);
-         if(consec>0 && price<upper*0.995) return 0;  // sell only near upper band
-         if(consec<0 && price>lower*1.005) return 0;  // buy only near lower band
-        }
+      if(dir==0) return 0;
       
-      // Trend filter
-      if(InpUseTrendFilter)
-        {
-         double sma_fast=CalcSMA(InpTrendSmaFast);
-         double sma_slow=CalcSMA(InpTrendSmaSlow);
-         if(consec>0 && sma_fast>sma_slow*1.002) return 0;  // don't fade uptrend
-         if(consec<0 && sma_fast<sma_slow*0.998) return 0;  // don't fade downtrend
-        }
+      // RSI confirmation for breakout
+      if(dir>0 && rsi<50) return 0;  // bullish breakout needs RSI >50
+      if(dir<0 && rsi>50) return 0;  // bearish breakout needs RSI <50
       
-      signal_type="MOM_EXHAUST";
-      return (consec>0)?-1:1;  // up exhaustion=SELL, down=BUY
+      signal_type="BREAKOUT_"+(dir>0?"UP":"DOWN");
+      return dir;
      }
    
    return 0;
   }
 
 //+------------------------------------------------------------------+
-//| PROCESS ONE CLOSED BAR                                             |
+//| PROCESS ONE BAR                                                     |
 //+------------------------------------------------------------------+
 void ProcessOneBar(const AggregatedBar &bar)
   {
    g_bars_seen++;
    if(g_last_bar_end>0 && bar.time>g_last_bar_end+(datetime)MathMax(3*InpBarSec,600))
-     { g_prev_close=bar.close; g_ema=bar.close; g_last_bar_end=bar.time+InpBarSec; return; }
+     { g_prev_close=bar.close; g_last_bar_end=bar.time+InpBarSec; return; }
    g_last_bar_end=bar.time+InpBarSec;
-   if(g_prev_close<=0) { g_prev_close=bar.close; g_ema=bar.close; return; }
+   if(g_prev_close<=0) { g_prev_close=bar.close; return; }
    
    double prev_close=g_prev_close;
    g_prev_close=bar.close;
    
-   //--- Update ATR
-   g_vol.OnBar(prev_close,bar.high,bar.low,bar.close);
-   double atr=g_vol.ATR();
-   g_atr_ema=(g_atr_ema<=0)?atr:g_atr_ema*0.98+atr*0.02;
-   g_trail.UpdateATR(atr);
-   
-   //--- Push to history buffer
+   // Push to buffer
    PushBar(bar.close,bar.high,bar.low);
    
-   //--- Update cooldown
+   // Update ATR history
+   double atr=CalcATR(InpAtrPeriod);
+   g_atr_history[g_atr_hist_count%500]=atr;
+   if(g_atr_hist_count<500) g_atr_hist_count++;
+   
+   // Update cooldown
    if(g_cooldown>0) g_cooldown--;
    
-   //--- Daily reset
+   // Daily reset
    datetime ds=bar.time-(bar.time%86400);
    if(ds!=g_day_start) { g_day_start=ds; g_daily_pnl=0; }
    
    if(g_preloading) return;
    
-   //--- MANAGE POSITION ---
-   if(g_trail.IsOpen())
+   //--- MANAGE POSITION (FIXED: use original_risk for R calc)
+   if(g_pos.active)
      {
-      double ep=0; string reason="";
-      if(g_trail.Manage(bar.high,bar.low,bar.close,bar.time,InpBarSec,ep,reason)==1)
+      g_pos.entry_bar++;
+      
+      // Time exit
+      if(g_pos.entry_bar>=InpHoldBars)
         {
-         PositionInfo pos=g_trail.GetPosition();
-         double slipped=(pos.direction>0)?ep-0.05:ep+0.05;
-         double risk=MathAbs(pos.entry_price-pos.stop_loss);
-         if(risk<1e-12) risk=1e-12;
-         double rr=(pos.direction>0)?(slipped-pos.entry_price)/risk:(pos.entry_price-slipped)/risk;
-         double pnl=pos.stake*rr;
+         double exit_p=bar.close;
+         double r_mult=(g_pos.direction>0)?
+                       (exit_p-g_pos.entry_price)/g_pos.original_risk:
+                       (g_pos.entry_price-exit_p)/g_pos.original_risk;
+         double pnl=g_pos.stake*r_mult;
          g_equity+=pnl; g_daily_pnl+=pnl;
          g_peak_equity=MathMax(g_peak_equity,g_equity);
          
-         //--- Track consecutive losses and wins
-         if(rr<0)
-           {
-            g_consec_loss++;
-            g_consec_win=0;
-            g_cooldown=InpCoolDownBars;  // cool down after loss
-           }
-         else
-           {
-            g_consec_win++;
-            g_consec_loss=0;
-           }
+         if(r_mult<0) { g_consec_loss++; g_cooldown=InpCoolDownBars; }
+         else g_consec_loss=0;
          
-         //--- Pause conditions
-         if(g_consec_loss>=InpMaxConsecLoss)
-           {
-            g_paused=true;
-            Print("[MITEM] PAUSED: "+IntegerToString(g_consec_loss)+" consecutive losses");
-           }
-         if(g_daily_pnl<-g_equity*InpMaxDailyLossPct)
-           {
-            g_paused=true;
-            Print("[MITEM] PAUSED: daily loss limit hit ($"+DoubleToString(g_daily_pnl,2)+")");
-           }
-         if((g_peak_equity-g_equity)>g_peak_equity*0.15)
-           {
-            g_paused=true;
-            Print("[MITEM] PAUSED: max drawdown 15% reached");
-           }
+         if(g_consec_loss>=InpMaxConsecLoss) g_paused=true;
+         if(g_daily_pnl<-g_equity*InpMaxDailyLossPct) g_paused=true;
+         if((g_peak_equity-g_equity)>g_peak_equity*0.10) g_paused=true;
          
-         //--- Record trade
          if(g_trade_count<MAX_TRADES)
            {
-            g_trades[g_trade_count].entry_time=pos.entry_time;
+            g_trades[g_trade_count].entry_time=g_pos.entry_time;
             g_trades[g_trade_count].exit_time=bar.time+InpBarSec;
-            g_trades[g_trade_count].direction=pos.direction;
-            g_trades[g_trade_count].entry_price=pos.entry_price;
-            g_trades[g_trade_count].exit_price=slipped;
-            g_trades[g_trade_count].stop_loss=pos.stop_loss;
-            g_trades[g_trade_count].take_profit=pos.take_profit;
-            g_trades[g_trade_count].return_r=rr;
+            g_trades[g_trade_count].direction=g_pos.direction;
+            g_trades[g_trade_count].entry_price=g_pos.entry_price;
+            g_trades[g_trade_count].exit_price=exit_p;
+            g_trades[g_trade_count].original_sl=g_pos.original_risk;
+            g_trades[g_trade_count].return_r=r_mult;
             g_trades[g_trade_count].pnl=pnl;
-            g_trades[g_trade_count].exit_reason=reason;
+            g_trades[g_trade_count].exit_reason="TIME";
             g_trade_count++;
            }
          
-         Print(StringFormat("[MITEM] %s @%.5f R=%.3f $%.2f #trade=%d",reason,slipped,rr,pnl,g_trade_count));
-         g_last_trade_won=(rr>0);
-         g_trail.Reset();
+         Print(StringFormat("[MITEM] TIME @%.5f R=%.3f $%.2f #trade=%d",exit_p,r_mult,pnl,g_trade_count));
+         g_pos.active=false;
+         return;
         }
+      
+      // SL check
+      if(g_pos.direction>0 && bar.low<=g_pos.stop_loss)
+        {
+         double exit_p=g_pos.stop_loss;
+         double r_mult=(exit_p-g_pos.entry_price)/g_pos.original_risk;
+         double pnl=g_pos.stake*r_mult;
+         g_equity+=pnl; g_daily_pnl+=pnl;
+         g_peak_equity=MathMax(g_peak_equity,g_equity);
+         
+         g_consec_loss++; g_cooldown=InpCoolDownBars;
+         if(g_consec_loss>=InpMaxConsecLoss) g_paused=true;
+         if(g_daily_pnl<-g_equity*InpMaxDailyLossPct) g_paused=true;
+         if((g_peak_equity-g_equity)>g_peak_equity*0.10) g_paused=true;
+         
+         if(g_trade_count<MAX_TRADES)
+           {
+            g_trades[g_trade_count].entry_time=g_pos.entry_time;
+            g_trades[g_trade_count].exit_time=bar.time+InpBarSec;
+            g_trades[g_trade_count].direction=g_pos.direction;
+            g_trades[g_trade_count].entry_price=g_pos.entry_price;
+            g_trades[g_trade_count].exit_price=exit_p;
+            g_trades[g_trade_count].original_sl=g_pos.original_risk;
+            g_trades[g_trade_count].return_r=r_mult;
+            g_trades[g_trade_count].pnl=pnl;
+            g_trades[g_trade_count].exit_reason="STOP";
+            g_trade_count++;
+           }
+         
+         Print(StringFormat("[MITEM] STOP @%.5f R=%.3f $%.2f #trade=%d",exit_p,r_mult,pnl,g_trade_count));
+         g_pos.active=false;
+         return;
+        }
+      
+      if(g_pos.direction<0 && bar.high>=g_pos.stop_loss)
+        {
+         double exit_p=g_pos.stop_loss;
+         double r_mult=(g_pos.entry_price-exit_p)/g_pos.original_risk;
+         double pnl=g_pos.stake*r_mult;
+         g_equity+=pnl; g_daily_pnl+=pnl;
+         g_peak_equity=MathMax(g_peak_equity,g_equity);
+         
+         g_consec_loss++; g_cooldown=InpCoolDownBars;
+         if(g_consec_loss>=InpMaxConsecLoss) g_paused=true;
+         if(g_daily_pnl<-g_equity*InpMaxDailyLossPct) g_paused=true;
+         if((g_peak_equity-g_equity)>g_peak_equity*0.10) g_paused=true;
+         
+         if(g_trade_count<MAX_TRADES)
+           {
+            g_trades[g_trade_count].entry_time=g_pos.entry_time;
+            g_trades[g_trade_count].exit_time=bar.time+InpBarSec;
+            g_trades[g_trade_count].direction=g_pos.direction;
+            g_trades[g_trade_count].entry_price=g_pos.entry_price;
+            g_trades[g_trade_count].exit_price=exit_p;
+            g_trades[g_trade_count].original_sl=g_pos.original_risk;
+            g_trades[g_trade_count].return_r=r_mult;
+            g_trades[g_trade_count].pnl=pnl;
+            g_trades[g_trade_count].exit_reason="STOP";
+            g_trade_count++;
+           }
+         
+         Print(StringFormat("[MITEM] STOP @%.5f R=%.3f $%.2f #trade=%d",exit_p,r_mult,pnl,g_trade_count));
+         g_pos.active=false;
+         return;
+        }
+      
+      // TP check
+      if(g_pos.direction>0 && bar.high>=g_pos.take_profit)
+        {
+         double exit_p=g_pos.take_profit;
+         double r_mult=(exit_p-g_pos.entry_price)/g_pos.original_risk;
+         double pnl=g_pos.stake*r_mult;
+         g_equity+=pnl; g_daily_pnl+=pnl;
+         g_peak_equity=MathMax(g_peak_equity,g_equity);
+         g_consec_loss=0;
+         
+         if(g_trade_count<MAX_TRADES)
+           {
+            g_trades[g_trade_count].entry_time=g_pos.entry_time;
+            g_trades[g_trade_count].exit_time=bar.time+InpBarSec;
+            g_trades[g_trade_count].direction=g_pos.direction;
+            g_trades[g_trade_count].entry_price=g_pos.entry_price;
+            g_trades[g_trade_count].exit_price=exit_p;
+            g_trades[g_trade_count].original_sl=g_pos.original_risk;
+            g_trades[g_trade_count].return_r=r_mult;
+            g_trades[g_trade_count].pnl=pnl;
+            g_trades[g_trade_count].exit_reason="TARGET";
+            g_trade_count++;
+           }
+         
+         Print(StringFormat("[MITEM] TARGET @%.5f R=%.3f $%.2f #trade=%d",exit_p,r_mult,pnl,g_trade_count));
+         g_pos.active=false;
+         return;
+        }
+      
+      if(g_pos.direction<0 && bar.low<=g_pos.take_profit)
+        {
+         double exit_p=g_pos.take_profit;
+         double r_mult=(g_pos.entry_price-exit_p)/g_pos.original_risk;
+         double pnl=g_pos.stake*r_mult;
+         g_equity+=pnl; g_daily_pnl+=pnl;
+         g_peak_equity=MathMax(g_peak_equity,g_equity);
+         g_consec_loss=0;
+         
+         if(g_trade_count<MAX_TRADES)
+           {
+            g_trades[g_trade_count].entry_time=g_pos.entry_time;
+            g_trades[g_trade_count].exit_time=bar.time+InpBarSec;
+            g_trades[g_trade_count].direction=g_pos.direction;
+            g_trades[g_trade_count].entry_price=g_pos.entry_price;
+            g_trades[g_trade_count].exit_price=exit_p;
+            g_trades[g_trade_count].original_sl=g_pos.original_risk;
+            g_trades[g_trade_count].return_r=r_mult;
+            g_trades[g_trade_count].pnl=pnl;
+            g_trades[g_trade_count].exit_reason="TARGET";
+            g_trade_count++;
+           }
+         
+         Print(StringFormat("[MITEM] TARGET @%.5f R=%.3f $%.2f #trade=%d",exit_p,r_mult,pnl,g_trade_count));
+         g_pos.active=false;
+         return;
+        }
+      
+      return;  // position still open, no entry
      }
    
-   //--- ENTRY GATE ---
-   if(g_trail.IsOpen()) return;
+   //--- ENTRY GATE
+   if(g_pos.active) return;
    if(g_paused) return;
    if(g_bars_seen<(long)InpWarmupCandles) return;
    if(g_cooldown>0) return;
-   if(g_vol.ATR()<=0) return;
+   if(atr<=0) return;
    
-   //--- Generate signal
+   // Generate signal
    string signal_type="";
    int direction=GenerateSignal(signal_type);
    if(direction==0) return;
    
-   //--- Calculate entry, SL, TP using ATR
+   // Calculate SL/TP
    double entry=bar.close;
-   double atr_val=g_vol.ATR();
-   double sd=InpAtrStopMult*atr_val;
-   double td=InpAtrTargetMult*atr_val;
+   double sd=InpAtrStopMult*atr;
+   double td=InpAtrTargetMult*atr;
    
-   //--- Sanity check: stop must be reasonable
-   double max_stop=entry*0.02;  // max 2% of price
+   // Sanity: max stop 2% of price
+   double max_stop=entry*0.02;
    if(sd>max_stop) sd=max_stop;
-   if(sd<atr_val*0.5) sd=atr_val*0.5;  // min 0.5 ATR
+   if(sd<atr*0.5) sd=atr*0.5;
    
    double sl,tp;
    if(direction>0) { sl=entry-sd; tp=entry+td; }
    else            { sl=entry+sd; tp=entry-td; }
    
-   double rr=td/sd;
-   if(rr<InpMinTargetRR) return;
-   
-   //--- Risk sizing
+   // Fixed risk sizing (NO anti-martingale)
    double risk_pct=InpRiskPerTrade;
-   if(g_consec_loss>=2) risk_pct*=0.7;  // reduce after losses
-   if(g_consec_win>=3) risk_pct*=1.2;   // increase after wins (but cap)
-   risk_pct=MathMin(risk_pct,0.10);     // max 10% per trade
-   risk_pct=MathMax(risk_pct,0.01);     // min 1% per trade
-   
    double stake=g_equity*risk_pct;
    
-   //--- Execute trade
+   // Execute
    if(InpLiveExecution)
      {
       MqlTradeRequest  req={};
@@ -704,41 +767,66 @@ void ProcessOneBar(const AggregatedBar &bar)
       req.tp=NormalizeDouble(tp,_Digits);
       req.deviation=InpMaxSlippagePts;
       req.magic=InpMagic;
-      req.comment="MITEM_v13";
+      req.comment="MITEM_v14";
       if(!OrderSend(req,res))
         { Print("[MITEM] ORDER FAIL:",res.retcode,"-",res.comment); g_cooldown=InpCoolDownBars; return; }
       stake=res.volume*SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE)
             *(td/SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE));
      }
    
-   g_trail.OpenPosition(direction,entry,sl,tp,bar.time+InpBarSec,stake);
-   if(InpDrawSignals) DrawSignal(direction,bar.time+InpBarSec,entry,direction>0?"BUY":"SELL");
+   // Open position with ORIGINAL risk preserved
+   g_pos.direction=direction;
+   g_pos.entry_price=entry;
+   g_pos.stop_loss=sl;
+   g_pos.take_profit=tp;
+   g_pos.original_risk=sd;  // CRITICAL: preserve original SL distance
+   g_pos.entry_time=bar.time+InpBarSec;
+   g_pos.entry_bar=0;
+   g_pos.stake=stake;
+   g_pos.active=true;
    
-   Print(StringFormat("[MITEM] %s %s @%.5f SL=%.5f TP=%.5f RR=%.2f ATR=%.4f $%.2f",
-                      signal_type,direction>0?"BUY":"SELL",entry,sl,tp,rr,atr_val,stake));
+   if(InpDrawSignals) DrawSignal(direction,bar.time+InpBarSec,entry,signal_type);
+   
+   Print(StringFormat("[MITEM] %s %s @%.5f SL=%.5f TP=%.5f ATR=%.4f $%.2f Regime=%s",
+                      signal_type,direction>0?"BUY":"SELL",entry,sl,tp,atr,stake,
+                      RegimeToString(g_current_regime)));
   }
 
 //+------------------------------------------------------------------+
-//| OnInit — with HISTORICAL PRELOAD                                   |
+//| OnInit                                                             |
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   Print("[MITEM] === MITEMSHUB AI v13 starting ===");
-   g_equity = AccountInfoDouble(ACCOUNT_BALANCE);
-   g_peak_equity = g_equity;
-   Print(StringFormat("[MITEM] Account balance: $%.2f", g_equity));
+   Print("[MITEM] === MITEMSHUB AI v14 starting ===");
+   g_equity=AccountInfoDouble(ACCOUNT_BALANCE);
+   g_peak_equity=g_equity;
+   Print(StringFormat("[MITEM] Account balance: $%.2f",g_equity));
    g_agg.Reset(InpBarSec);
    if(InpDrawDashboard) DashCreate();
    
-   //--- HISTORICAL PRELOAD
+   // Load M15 data for regime detection
+   MqlRates m15_rates[];
+   int m15_got=CopyRates(_Symbol,PERIOD_M15,0,MAX_M15,m15_rates);
+   if(m15_got>0)
+     {
+      for(int i=0;i<m15_got;i++)
+        {
+         g_m15_close[i]=m15_rates[i].close;
+         g_m15_high[i]=m15_rates[i].high;
+         g_m15_low[i]=m15_rates[i].low;
+        }
+      g_m15_count=m15_got;
+      Print(StringFormat("[MITEM] M15 preload: %d bars",m15_got));
+     }
+   
+   // Preload M5 data
    g_preloading=true;
    int preload=MathMax(InpWarmupCandles*3,500);
-   ENUM_TIMEFRAMES tf=TfFromBarSec(InpBarSec);
    MqlRates rates[];
-   int got=CopyRates(_Symbol,tf,0,preload,rates);
+   int got=CopyRates(_Symbol,PERIOD_M5,0,preload,rates);
    if(got>0)
      {
-      Print(StringFormat("[MITEM] PRELOAD: %d historical %s bars",got,EnumToString(tf)));
+      Print(StringFormat("[MITEM] M5 preload: %d bars",got));
       for(int i=got-1;i>=0;i--)
         {
          AggregatedBar ab;
@@ -748,24 +836,13 @@ int OnInit()
          ProcessOneBar(ab);
         }
       g_preloading=false;
-      Print(StringFormat("[MITEM] PRELOAD done: bars=%I64d ATR=%.6f",g_bars_seen,g_vol.ATR()));
      }
-   else
-     { g_preloading=false; Print("[MITEM] PRELOAD: CopyRates failed"); }
+   else g_preloading=false;
    
-   int strat=GetStrategy();
-   Print(StringFormat("[MITEM] Strategy: %s | SL=%.1f ATR | TP=%.1f ATR | Risk=%.0f%% | Trail=%s | Live=%s",
-                      strat==1?"SMA50 Fade":"Mom Exhaust",
-                      InpAtrStopMult,InpAtrTargetMult,InpRiskPerTrade*100,
-                      InpTrailOn?"ON":"OFF",InpLiveExecution?"LIVE":"PAPER"));
-   if(strat==1)
-     Print(StringFormat("[MITEM] SMA50: dist_thresh=%.1f%% RSI_confirm=%s BB=%s Trend=%s",
-                        InpSmaDistPct,InpUseRsiConfirm?"ON":"OFF",
-                        InpUseBbFilter?"ON":"OFF",InpUseTrendFilter?"ON":"OFF"));
-   if(strat==2)
-     Print(StringFormat("[MITEM] MOM: consec=%d RSI_confirm=%s BB=%s Trend=%s",
-                        InpConsecBars,InpUseRsiConfirm?"ON":"OFF",
-                        InpUseBbFilter?"ON":"OFF",InpUseTrendFilter?"ON":"OFF"));
+   Print(StringFormat("[MITEM] v14: Regime+Pullback | SL=%.1f ATR | TP=%.1f ATR | Risk=%.1f%% | MaxDD=2%%",
+                      InpAtrStopMult,InpAtrTargetMult,InpRiskPerTrade*100));
+   Print(StringFormat("[MITEM] Regime: EMA %d/%d/%d M15 | ATR filter: %.0f-%.0f%%",
+                      InpEmaFast,InpEmaMid,InpEmaSlow,InpAtrLowPct,InpAtrHighPct));
    return INIT_SUCCEEDED;
   }
 
@@ -791,7 +868,7 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-   for(int i=0;i<22;i++) ObjectDelete(0,g_dl[i]);
+   for(int i=0;i<24;i++) ObjectDelete(0,g_dl[i]);
    double total_r=0; int wins=0,ns=0,nt=0,ntm=0;
    for(int i=0;i<g_trade_count;i++)
      {
@@ -804,20 +881,11 @@ void OnDeinit(const int reason)
    double wr=(g_trade_count>0)?(double)wins/g_trade_count*100:0;
    double dd=(g_peak_equity>0)?(g_peak_equity-g_equity)/g_peak_equity*100:0;
    Print("========================================");
-   Print("[MITEM] === SESSION SUMMARY ===");
+   Print("[MITEM] === SESSION SUMMARY v14 ===");
    Print(StringFormat("[MITEM] trades=%d wr=%.1f%% R=%+.3f",g_trade_count,wr,total_r));
    Print(StringFormat("[MITEM] exits: stop=%d target=%d time=%d",ns,nt,ntm));
    Print(StringFormat("[MITEM] equity=$%.2f peak=$%.2f dd=%.2f%%",g_equity,g_peak_equity,dd));
    Print("[MITEM] === END ===");
    Print("========================================");
-  }
-
-ENUM_TIMEFRAMES TfFromBarSec(int bs)
-  {
-   if(bs<=60) return PERIOD_M1;
-   if(bs<=300) return PERIOD_M5;
-   if(bs<=900) return PERIOD_M15;
-   if(bs<=3600) return PERIOD_H1;
-   return PERIOD_H4;
   }
 //+------------------------------------------------------------------+
