@@ -46,6 +46,13 @@ input int    InpMaxSlippagePts   = 50;       // max slippage (points)
 input double InpMaxSpreadPts     = 1500.0;   // max spread (points, 0=off)
 input bool   InpDrawDashboard    = true;     // draw dashboard on chart
 input bool   InpDrawSignals      = true;     // draw entry/exit arrows
+input bool   InpZDecayExit       = true;     // exit when z-score decays from peak
+input double InpZDecayTarget     = 1.0;      // z-score level to trigger decay exit
+input double InpVol75StopMult    = 2.0;      // stop multiplier for Vol 75 (wider for spread)
+input int    InpSessionStart     = 8;        // trading session start hour (server time)
+input int    InpSessionEnd       = 20;       // trading session end hour (server time)
+input bool   InpCorrelationGuard = true;     // reduce size if correlated extreme
+input double InpCorrelThreshold  = 2.0;      // z-score threshold for correlation warning
 
 //+------------------------------------------------------------------+
 //| GARCH(1,1) FORECASTER                                             |
@@ -221,21 +228,38 @@ private:
    PositionInfo m_pos;
    double       m_atr_ema;
    double       m_peak_pnl;
+   double       m_peak_z;       // peak z-score since entry
+   bool         m_z_decay_exit; // z-decay exit pending
 public:
-   CTrailManager(): m_atr_ema(0),m_peak_pnl(0) { m_pos.active=false; }
-   void Reset() { m_pos.active=false; m_peak_pnl=0; }
+   CTrailManager(): m_atr_ema(0),m_peak_pnl(0),m_peak_z(0),m_z_decay_exit(false) { m_pos.active=false; }
+   void Reset() { m_pos.active=false; m_peak_pnl=0; m_peak_z=0; m_z_decay_exit=false; }
    void OpenPosition(int dir,double entry,double sl,double tp,datetime t,double stake)
      {
       m_pos.direction=dir; m_pos.entry_price=entry; m_pos.stop_loss=sl;
       m_pos.take_profit=tp; m_pos.entry_time=t; m_pos.stake=stake;
-      m_pos.active=true; m_peak_pnl=0;
+      m_pos.active=true; m_peak_pnl=0; m_peak_z=0; m_z_decay_exit=false;
      }
+   void UpdateZScore(double z)
+     {
+      if(!m_pos.active) return;
+      double az=MathAbs(z);
+      if(az>m_peak_z) m_peak_z=az;
+      // Z-decay exit: if peak was >2.5 and now drops below InpZDecayTarget
+      if(InpZDecayExit && m_peak_z>2.5 && az<InpZDecayTarget && !m_z_decay_exit)
+        m_z_decay_exit=true;
+     }
+   bool IsZDecayExit() const { return m_z_decay_exit; }
    void UpdateATR(double atr)
      { if(m_atr_ema<=0) m_atr_ema=atr; else m_atr_ema=m_atr_ema*0.98+atr*0.02; }
    int Manage(double high,double low,double close,datetime bar_time,
               int bar_sec,double &exit_price,string &reason)
      {
       if(!m_pos.active) return 0;
+      //--- Z-decay exit: peak z was >2.5, now dropped below threshold
+      if(InpZDecayExit && m_z_decay_exit)
+        {
+         exit_price=close; reason="ZDECAY"; return 1;
+        }
       if((int)(bar_time-m_pos.entry_time)>=InpHoldSec)
         { exit_price=close; reason="TIME"; return 1; }
       double risk=MathAbs(m_pos.entry_price-m_pos.stop_loss);
@@ -306,6 +330,9 @@ double g_daily_pnl=0;
 int    g_cooldown=0, g_consec_loss=0;
 bool   g_preloading=false, g_paused=false;
 datetime g_day_start=0;
+//--- Z-score decay tracking
+double g_peak_z=0;              // peak z-score since entry
+bool   g_z_decay_exit=false;    // flag to exit on z decay
 
 //+------------------------------------------------------------------+
 //| HELPERS                                                            |
@@ -425,6 +452,8 @@ void ProcessOneBar(const AggregatedBar &bar)
    double atr=g_vol.ATR();
    g_atr_ema=(g_atr_ema<=0)?atr:g_atr_ema*0.98+atr*0.02;
    g_trail.UpdateATR(atr);
+   //--- Update z-score decay tracking
+   g_trail.UpdateZScore(g_garch.LastZ());
    if(g_cooldown>0) g_cooldown--;
 
    datetime ds=bar.time-(bar.time%86400);
@@ -477,6 +506,12 @@ void ProcessOneBar(const AggregatedBar &bar)
    if(g_cooldown>0) return;
    if(g_sigma_ema<=0 || g_prev_sigma<=0) return;
    if(!(g_prev_sigma>InpVolGateRatio*g_sigma_ema)) return;
+   //--- Session filter: only trade during active hours
+   if(InpSessionStart<InpSessionEnd)
+     {
+      MqlDateTime dt; TimeCurrent(dt);
+      if(dt.hour<InpSessionStart || dt.hour>=InpSessionEnd) return;
+     }
    if(InpMinRevertSignal>0)
      { if(MeanRevertSignal(g_garch.LastZ())<InpMinRevertSignal) return; }
    double z_dev=MathLog(bar.close/g_ema)/g_prev_sigma;
@@ -484,7 +519,10 @@ void ProcessOneBar(const AggregatedBar &bar)
 
    int direction=(z_dev>0)?-1:1;
    double entry=bar.close;
-   double sd=InpStopSigmaMult*entry*g_prev_sigma;
+   //--- Symbol-specific stop: Vol 75 needs wider stops due to spread
+   double stop_mult=InpStopSigmaMult;
+   if(StringFind(_Symbol,"75")>=0) stop_mult=InpVol75StopMult;
+   double sd=stop_mult*entry*g_prev_sigma;
    double td=InpTargetSigmaMult*entry*g_prev_sigma;
    if(sd>entry*InpMaxStopPct) sd=entry*InpMaxStopPct;
    double sl,tp;
@@ -493,9 +531,24 @@ void ProcessOneBar(const AggregatedBar &bar)
    double rr=td/sd;
    if(rr<InpMinTargetRR) return;
 
+   //--- Publish z-score for cross-EA correlation detection
+   string gv_name="MITEM_Z_"+_Symbol;
+   GlobalVariableSet(gv_name,z_dev);
+
    double risk_pct=InpRiskPerTrade;
    if(g_consec_loss>=5) risk_pct*=0.5;
    if((g_peak_equity-g_equity)>g_peak_equity*0.08) risk_pct*=0.5;
+   //--- Correlation guard: reduce size if both symbols extreme same direction
+   if(InpCorrelationGuard)
+     {
+      string other=(StringFind(_Symbol,"75")>=0)?"MITEM_Z_Volatility 100 Index":"MITEM_Z_Volatility 75 Index";
+      if(GlobalVariableCheck(other))
+        {
+         double other_z=GlobalVariableGet(other);
+         if(MathAbs(other_z)>=InpCorrelThreshold && (other_z*z_dev)>0)
+           { risk_pct*=0.5; Print("[MITEM] CORRELATION GUARD: both extreme, halving risk"); }
+        }
+     }
    double stake=g_equity*risk_pct;
 
    if(InpLiveExecution)
@@ -591,7 +644,7 @@ void OnTick()
 void OnDeinit(const int reason)
   {
    for(int i=0;i<20;i++) ObjectDelete(0,g_dl[i]);
-   double total_r=0; int wins=0,ns=0,nt=0,ng=0,ntm=0;
+   double total_r=0; int wins=0,ns=0,nt=0,ng=0,ntm=0,ndz=0;
    for(int i=0;i<g_trade_count;i++)
      {
       total_r+=g_trades[i].return_r;
@@ -599,13 +652,14 @@ void OnDeinit(const int reason)
       if(g_trades[i].exit_reason=="STOP") ns++;
       if(g_trades[i].exit_reason=="TARGET") nt++;
       if(g_trades[i].exit_reason=="TIME") ntm++;
+      if(g_trades[i].exit_reason=="ZDECAY") ndz++;
      }
    double wr=(g_trade_count>0)?(double)wins/g_trade_count*100:0;
    double dd=(g_peak_equity>0)?(g_peak_equity-g_equity)/g_peak_equity*100:0;
    Print("========================================");
    Print("[MITEM] === SESSION SUMMARY ===");
    Print(StringFormat("[MITEM] trades=%d wr=%.1f%% R=%+.3f",g_trade_count,wr,total_r));
-   Print(StringFormat("[MITEM] exits: stop=%d target=%d time=%d",ns,nt,ntm));
+   Print(StringFormat("[MITEM] exits: stop=%d target=%d time=%d zdecay=%d",ns,nt,ntm,ndz));
    Print(StringFormat("[MITEM] equity=$%.2f peak=$%.2f dd=%.2f%%",g_equity,g_peak_equity,dd));
    Print("[MITEM] === END ===");
    Print("========================================");

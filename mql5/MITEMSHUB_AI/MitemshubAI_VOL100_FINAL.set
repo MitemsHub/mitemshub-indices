@@ -67,3 +67,10 @@ InpMaxSpreadPts=0
 ; === UI ===
 InpDrawDashboard=true
 InpDrawSignals=true
+InpZDecayExit=true
+InpZDecayTarget=1.0
+InpVol75StopMult=2.0
+InpSessionStart=8
+InpSessionEnd=20
+InpCorrelationGuard=true
+InpCorrelThreshold=2.0
