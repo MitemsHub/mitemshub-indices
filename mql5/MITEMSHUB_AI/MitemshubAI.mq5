@@ -35,7 +35,7 @@ input double InpMomRsiThreshSell = 60.0;      // RSI threshold for momentum sell
 input group "=== ATR Volatility Filter ==="
 input int    InpAtrPeriod        = 14;
 input int    InpAtrLookback      = 200;
-input double InpAtrLowPct        = 8.0;       // v16.7: wider range (was 12%)
+input double InpAtrLowPct        = 2.0;       // v16.73: lower filter (was 8%, blocked trending markets)
 input double InpAtrHighPct       = 92.0;      // v16.7: wider range (was 88%)
 
 input group "=== Compression Breakout ==="
