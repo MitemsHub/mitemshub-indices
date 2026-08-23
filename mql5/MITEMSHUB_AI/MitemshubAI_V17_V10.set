@@ -1,47 +1,48 @@
-; MITEMSHUB AI v17.1 — V10 H1+H4 Optimized Settings
+; MITEMSHUB AI v17.2 — V10 H1+H4 Strengthened Trend Logic
 ; Optimized for Volatility 10 Index, H1 Entry + H4 Regime
-; Walk-Forward: +280R in 90 days, 71.8% WR, PF 2.14
+; Strengthened pullback, EMA separation filter, trend-only
 
 InpEmaFast=20
 InpEmaMid=50
 InpEmaSlow=100
-InpTrendOnly=false
+InpTrendOnly=true
+InpMinEmaSeparation=0.25
 
-InpPullbackMin=0.10
-InpPullbackMax=2.5
+InpPullbackMin=0.40
+InpPullbackMax=2.20
 InpRsiPeriod=14
-InpRsiBuyMax=68.0
-InpRsiSellMin=32.0
+InpRsiBuyMax=62.0
+InpRsiSellMin=38.0
 
 InpUseMomentum=true
-InpMomLookback=12
-InpMomMinMove=0.8
-InpMomRsiThresh=38.0
-InpMomRsiThreshSell=62.0
-InpSlopeThresh=0.3
+InpMomLookback=10
+InpMomMinMove=1.0
+InpMomRsiBuy=52.0
+InpMomRsiSell=48.0
+InpSlopeThresh=0.35
 
 InpAtrPeriod=14
-InpAtrLookback=200
-InpAtrLowPct=2.0
-InpAtrHighPct=92.0
+InpAtrLookback=150
+InpAtrLowPct=8.0
+InpAtrHighPct=90.0
 
 InpRiskPerTrade=0.004
-InpAtrStopMult=1.5
-InpAtrTargetMult=2.0
-InpHoldBars=24
+InpAtrStopMult=1.6
+InpAtrTargetMult=2.5
+InpHoldBars=18
 InpMaxDailyLossPct=0.025
 InpMaxConsecLoss=3
-InpCoolDownBars=2
+InpCoolDownBars=3
 InpUseTrailing=true
-InpTrailStartATR=1.0
-InpTrailDistATR=1.2
+InpTrailStartATR=0.9
+InpTrailDistATR=0.9
 InpUseBreakeven=true
-InpBETriggerATR=2.0
+InpBETriggerATR=1.1
 
-InpMagic=7788127
-InpMaxSlippagePts=40
-InpWarmupBars=250
+InpMagic=7788130
+InpMaxSlippagePts=50
+InpWarmupBars=300
 InpDrawDashboard=true
 InpDrawSignals=true
 InpLiveExecution=true
-InpDebugLog=true
+InpDebugLog=false
