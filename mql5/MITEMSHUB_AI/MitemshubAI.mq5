@@ -39,15 +39,15 @@ input double InpBreakoutMin      = 0.12;
 
 input group "=== Risk & Exits ==="
 input double InpRiskPerTrade     = 0.005;     // 0.5% equity risk
-input double InpAtrStopMult      = 1.6;
-input double InpAtrTargetMult    = 2.4;
+input double InpAtrStopMult      = 2.0;
+input double InpAtrTargetMult    = 2.8;
 input int    InpHoldBars         = 14;        // Max bars held (~70 min)
 input double InpMaxDailyLossPct  = 0.025;
 input int    InpMaxConsecLoss    = 3;
 input int    InpCoolDownBars     = 4;
 input bool   InpUseTrailing      = true;
-input double InpTrailStartATR    = 1.2;       // Start trail after this profit (ATR)
-input double InpTrailDistATR     = 0.9;       // Trail distance (ATR)
+input double InpTrailStartATR    = 0.8;       // Start trail after this profit (ATR)
+input double InpTrailDistATR     = 0.7;       // Trail distance (ATR)
 input bool   InpUseBreakeven     = true;
 input double InpBETriggerATR     = 1.0;
 
