@@ -1,0 +1,61 @@
+; MITEMSHUB AI v19.0 - Step Index M15
+; Multi-Layer Decision Engine with 0-100 Scoring
+; Risk-Based Sizing • M5 Confirmation • Trade Journal
+
+InpSymbol=Step Index
+InpUseSessionFilter=0
+InpSessionStartHour=0
+InpSessionEndHour=24
+
+; Regime (H1)
+InpEmaFast=20
+InpEmaMid=50
+InpEmaSlow=100
+InpSwingLookback=5
+
+; Structure
+InpStructureBars=20
+InpBosMinATR=0.5
+
+; Scoring
+InpMinScore=70
+InpMinTrend=15
+InpMinStructure=10
+
+; Risk Engine
+InpRiskPerTrade=0.01
+InpMaxDailyLossPct=0.03
+InpMaxConsecLoss=3
+InpMaxTradesPerDay=5
+InpCoolDownBars=2
+InpMaxDDPct=0.10
+
+; SL/TP (Volatility Aware)
+InpSL_AtrMult=1.5
+InpTP_RewardMult=2.0
+InpMinSL_Pts=2.0
+InpMaxSL_Pts=15.0
+
+; Trade Management
+InpBE_RTrigger=0.8
+InpBE_Offset=0.2
+InpTrail_RTrigger=1.0
+InpTrailDist_ATR=0.8
+InpLock_RTrigger=1.5
+InpLockMin_Pts=1.0
+InpMaxHoldBars=16
+
+; M5 Confirmation
+InpUseM5Confirm=1
+InpM5EmaFast=8
+InpM5EmaSlow=21
+
+; Execution
+InpMagic=7788190
+InpMaxSlippagePts=20
+InpWarmupBars=300
+InpDrawDashboard=1
+InpDrawSignals=1
+InpLiveExecution=0
+InpDebugLog=1
+InpWriteJournal=1
