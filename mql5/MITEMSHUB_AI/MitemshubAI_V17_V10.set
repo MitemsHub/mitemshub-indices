@@ -1,0 +1,46 @@
+; MITEMSHUB AI v17.0 — V10 H1+H4 Optimized Settings
+; Optimized for Volatility 10 Index, H1 Entry + H4 Regime
+; Backtest: +47.9R in 90 days, 89.7% WR, PF 12.28
+
+InpEmaFast=20
+InpEmaMid=50
+InpEmaSlow=100
+InpTrendOnly=true
+
+InpPullbackMin=0.15
+InpPullbackMax=2.5
+InpRsiPeriod=14
+InpRsiBuyMax=70.0
+InpRsiSellMin=30.0
+
+InpUseMomentum=false
+InpMomLookback=12
+InpMomMinMove=0.8
+InpMomRsiThresh=35.0
+InpMomRsiThreshSell=65.0
+
+InpAtrPeriod=14
+InpAtrLookback=200
+InpAtrLowPct=2.0
+InpAtrHighPct=92.0
+
+InpRiskPerTrade=0.004
+InpAtrStopMult=1.5
+InpAtrTargetMult=2.0
+InpHoldBars=36
+InpMaxDailyLossPct=0.025
+InpMaxConsecLoss=3
+InpCoolDownBars=2
+InpUseTrailing=true
+InpTrailStartATR=1.0
+InpTrailDistATR=1.5
+InpUseBreakeven=true
+InpBETriggerATR=2.0
+
+InpMagic=7788127
+InpMaxSlippagePts=40
+InpWarmupBars=250
+InpDrawDashboard=true
+InpDrawSignals=true
+InpLiveExecution=true
+InpDebugLog=true
