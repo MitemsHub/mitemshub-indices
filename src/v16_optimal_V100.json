@@ -1,0 +1,64 @@
+{
+  "symbol": "Volatility 100 Index",
+  "version": "v16.5",
+  "params": {
+    "atr_stop": 1.6,
+    "atr_target": 2.8,
+    "trail_start": 0.6,
+    "trail_dist": 0.7
+  },
+  "full_result": {
+    "name": "opt",
+    "trades": 49,
+    "wins": 35,
+    "losses": 14,
+    "win_rate": 71.42857142857143,
+    "pnl": 1141.6724079865944,
+    "pnl_pct": 11.416724079865945,
+    "profit_factor": 3.6713315823132207,
+    "avg_win_r": 1.064463779749843,
+    "avg_loss_r": -0.7212780953971993,
+    "expectancy_r": 0.5542518154221169,
+    "total_r": 27.15833895568374,
+    "max_drawdown": 0.725965719407844,
+    "avg_bars_held": 8.857142857142858,
+    "regimes": {
+      "BEARISH": {
+        "wins": 22,
+        "losses": 10,
+        "pnl": 703.5937798176711
+      },
+      "BULLISH": {
+        "wins": 13,
+        "losses": 4,
+        "pnl": 438.0786281689229
+      }
+    }
+  },
+  "walk_forward": [
+    {
+      "name": "W1",
+      "trades": 43,
+      "win_rate": 67.44186046511628,
+      "pnl": 739.4461354019585,
+      "profit_factor": 2.638476600772199,
+      "max_drawdown": 0.7259657194078359
+    },
+    {
+      "name": "W2",
+      "trades": 45,
+      "win_rate": 71.11111111111111,
+      "pnl": 950.6915544931861,
+      "profit_factor": 3.140545684150633,
+      "max_drawdown": 0.9033635721728763
+    },
+    {
+      "name": "W3",
+      "trades": 7,
+      "win_rate": 42.857142857142854,
+      "pnl": 95.45261339990697,
+      "profit_factor": 1.9172013830094545,
+      "max_drawdown": 0.8392866693391156
+    }
+  ]
+}

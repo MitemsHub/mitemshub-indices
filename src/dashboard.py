@@ -272,13 +272,68 @@ def _parse_ea_log_trades():
                 with open(fp, 'rb') as fh:
                     text = fh.read(200000).decode('utf-16-le', errors='replace')
                     for line in text.split('\n'):
-                        if '[MITEM]' not in line:
+                        if '[MITEM]' not in line and '[v16.5]' not in line:
                             continue
                         if '$10000' in line:
                             continue
 
+                        # --- v16.5 log format: [v16.5] Symbol PULLBACK_LONG BUY @... SL=... TP=... Vol=... Regime=...
+                        if 'v16.5' in line and ('BUY @' in line or 'SELL @' in line):
+                            try:
+                                parts = line.split('\t')
+                                time_str = parts[2].strip() if len(parts) > 2 else ''
+                                msg = line.split('[v16.5]')[1].strip()
+                                # Extract symbol (first token after the bracket)
+                                sym_token = msg.split()[0] if msg.split() else ''
+                                symbol = 'Volatility 100 Index' if '100' in sym_token else 'Volatility 75 Index' if '75' in sym_token else sym_token
+                                direction = 'BUY' if 'BUY @' in msg else 'SELL'
+                                entry_price = float(msg.split('@')[1].split()[0])
+                                sl = float(msg.split('SL=')[1].split()[0]) if 'SL=' in msg else 0
+                                tp = float(msg.split('TP=')[1].split()[0]) if 'TP=' in msg else 0
+                                vol = float(msg.split('Vol=')[1].split()[0]) if 'Vol=' in msg else 0
+                                regime = msg.split('Regime=')[1].split()[0] if 'Regime=' in msg else ''
+                                # Signal type is second token (after symbol)
+                                sig_tokens = msg.split()
+                                sig = sig_tokens[1] if len(sig_tokens) > 1 else ''
+                                log_trades.append({
+                                    'time': time_str,
+                                    'symbol': symbol,
+                                    'direction': direction,
+                                    'entry_price': entry_price,
+                                    'sl': sl,
+                                    'tp': tp,
+                                    'rr': 0,
+                                    'z_score': 0,
+                                    'risk': vol,
+                                    'regime': regime,
+                                    'signal_type': sig,
+                                    'status': 'OPEN',
+                                    'source': 'EA_LOG',
+                                    'version': 'v16.5',
+                                })
+                            except Exception:
+                                pass
+
+                        # --- v16.5 exit: [v16.5] Symbol CLOSE STOP R=...
+                        elif 'v16.5' in line and 'CLOSE' in line:
+                            try:
+                                parts = line.split('\t')
+                                time_str = parts[2].strip() if len(parts) > 2 else ''
+                                msg = line.split('[v16.5]')[1].strip()
+                                r_mult = float(msg.split('R=')[1].split()[0]) if 'R=' in msg else 0
+                                # v16.5 exit: [v16.5] Symbol CLOSE STOP R=...
+                                reason = 'STOP' if 'STOP' in msg else 'TARGET' if 'TARGET' in msg else 'TIME' if 'TIME' in msg else 'CLOSE'
+                                for ot in reversed(log_trades):
+                                    if ot['status'] == 'OPEN':
+                                        ot['status'] = reason
+                                        ot['exit_time'] = time_str
+                                        ot['r_multiple'] = r_mult
+                                        break
+                            except Exception:
+                                pass
+
                         # --- v15 log format: [MITEM v15] PULLBACK_LONG BUY @... SL=... TP=...
-                        if 'v15' in line and 'BUY @' in line or 'v15' in line and 'SELL @' in line:
+                        elif 'v15' in line and ('BUY @' in line or 'SELL @' in line):
                             try:
                                 parts = line.split('\t')
                                 time_str = parts[2].strip() if len(parts) > 2 else ''
