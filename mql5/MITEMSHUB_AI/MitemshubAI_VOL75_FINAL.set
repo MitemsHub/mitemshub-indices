@@ -1,31 +1,37 @@
-; MitemshubAI_VOL75_FINAL.set — v14 Regime+Pullback Strategy
-; Volatility 75 Index: Trend pullback + compression breakout
-; Conservative: 0.5% risk, 2% daily loss, fixed exits
+; MITEMSHUB AI v15 — Volatility 75 Index
+; Regime + Pullback + ATR Engine
+; Best on: Volatility 75
 ;
-InpBarSec=300
 InpEmaFast=20
 InpEmaMid=50
 InpEmaSlow=100
-InpPullbackMin=0.3
-InpPullbackMax=2.0
+InpPullbackMin=0.25
+InpPullbackMax=1.8
 InpRsiPeriod=14
+InpRsiBuyMax=58.0
+InpRsiSellMin=42.0
 InpAtrPeriod=14
-InpAtrPercentile=200
-InpAtrLowPct=15.0
-InpAtrHighPct=85.0
-InpCompressBars=20
-InpCompressATR=0.7
-InpBreakoutMin=0.15
+InpAtrLookback=200
+InpAtrLowPct=12.0
+InpAtrHighPct=88.0
+InpCompressBars=18
+InpCompressATRMult=0.65
+InpBreakoutMin=0.12
 InpRiskPerTrade=0.005
-InpAtrStopMult=1.5
-InpAtrTargetMult=2.0
-InpHoldBars=12
-InpMaxDailyLossPct=0.02
+InpAtrStopMult=1.6
+InpAtrTargetMult=2.4
+InpHoldBars=14
+InpMaxDailyLossPct=0.025
 InpMaxConsecLoss=3
-InpCoolDownBars=3
-InpLiveExecution=true
-InpMagic=7788123
-InpMaxSlippagePts=50
-InpWarmupCandles=200
+InpCoolDownBars=4
+InpUseTrailing=true
+InpTrailStartATR=1.2
+InpTrailDistATR=0.9
+InpUseBreakeven=true
+InpBETriggerATR=1.0
+InpMagic=7788125
+InpMaxSlippagePts=40
+InpWarmupBars=250
 InpDrawDashboard=true
 InpDrawSignals=true
+InpLiveExecution=true

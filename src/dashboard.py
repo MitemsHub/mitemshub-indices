@@ -276,8 +276,60 @@ def _parse_ea_log_trades():
                             continue
                         if '$10000' in line:
                             continue
-                        # Parse SELL/BUY entries
-                        if any(kw in line for kw in ['SELL @', 'BUY @']):
+
+                        # --- v15 log format: [MITEM v15] PULLBACK_LONG BUY @... SL=... TP=...
+                        if 'v15' in line and 'BUY @' in line or 'v15' in line and 'SELL @' in line:
+                            try:
+                                parts = line.split('\t')
+                                time_str = parts[2].strip() if len(parts) > 2 else ''
+                                msg = line.split('[MITEM')[1].split(']')[1].strip()
+                                direction = 'BUY' if 'BUY @' in msg else 'SELL'
+                                entry_price = float(msg.split('@')[1].split()[0])
+                                sl = float(msg.split('SL=')[1].split()[0]) if 'SL=' in msg else 0
+                                tp = float(msg.split('TP=')[1].split()[0]) if 'TP=' in msg else 0
+                                vol = float(msg.split('Vol=')[1].split()[0]) if 'Vol=' in msg else 0
+                                regime = msg.split('Regime=')[1].split()[0] if 'Regime=' in msg else ''
+                                # Extract signal type (PULLBACK_LONG, BREAKOUT_UP, etc)
+                                sig = msg.split()[0] if msg.split() else ''
+                                log_trades.append({
+                                    'time': time_str,
+                                    'symbol': 'Volatility 100 Index' if '100' in line else 'Volatility 75 Index',
+                                    'direction': direction,
+                                    'entry_price': entry_price,
+                                    'sl': sl,
+                                    'tp': tp,
+                                    'rr': 0,
+                                    'z_score': 0,
+                                    'risk': vol,
+                                    'regime': regime,
+                                    'signal_type': sig,
+                                    'status': 'OPEN',
+                                    'source': 'EA_LOG',
+                                })
+                            except Exception:
+                                pass
+
+                        # --- v15 exit: [MITEM v15] CLOSE STOP R=... PnL=$... Equity=$...
+                        elif 'v15' in line and 'CLOSE' in line:
+                            try:
+                                parts = line.split('\t')
+                                time_str = parts[2].strip() if len(parts) > 2 else ''
+                                msg = line.split('[MITEM')[1].split(']')[1].strip()
+                                r_mult = float(msg.split('R=')[1].split()[0]) if 'R=' in msg else 0
+                                pnl = float(msg.split('PnL=$')[1].split()[0]) if 'PnL=$' in msg else 0
+                                reason = 'STOP' if 'STOP' in msg else 'TARGET' if 'TARGET' in msg else 'TIME' if 'TIME' in msg else 'CLOSE'
+                                for ot in reversed(log_trades):
+                                    if ot['status'] == 'OPEN':
+                                        ot['status'] = reason
+                                        ot['exit_time'] = time_str
+                                        ot['r_multiple'] = r_mult
+                                        ot['pnl'] = pnl
+                                        break
+                            except Exception:
+                                pass
+
+                        # --- Legacy v11-v14 format: SELL @ / BUY @ ---
+                        elif any(kw in line for kw in ['SELL @', 'BUY @']):
                             try:
                                 parts = line.split('\t')
                                 time_str = parts[2].strip() if len(parts) > 2 else ''
@@ -305,7 +357,7 @@ def _parse_ea_log_trades():
                             except Exception:
                                 pass
 
-                        # Parse STOP/TARGET/TIME/ZDECAY exit entries
+                        # Legacy exit format
                         elif any(kw in line for kw in ['STOP @', 'TARGET @', 'TIME @', 'ZDECAY @']):
                             try:
                                 parts = line.split('\t')
