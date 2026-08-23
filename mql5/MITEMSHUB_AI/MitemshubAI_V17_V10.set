@@ -1,6 +1,23 @@
-; MITEMSHUB AI v17.2 — V10 H1+H4 Strengthened Trend Logic
-; Optimized for Volatility 10 Index, H1 Entry + H4 Regime
-; Strengthened pullback, EMA separation filter, trend-only
+; MITEMSHUB AI v17.3 — V10 H1+H4 Session-Aware SL + Early Exit
+; Volatility 10 Index, H1 Entry + H4 Regime
+; Session SL: quiet hours 1.4 ATR, active hours 1.6 ATR
+; Early exit: close after 6h if R < 0.15
+
+InpUseSessionFilter=false
+InpSessionStartHour=0
+InpSessionEndHour=24
+
+InpUseSessionSL=true
+InpSL_Quiet=1.40
+InpSL_Active=1.60
+InpQuietStartHour=0
+InpQuietEndHour=7
+
+InpHoldBars=18
+InpEarlyExitHours=6
+InpEarlyExitMinR=0.15
+InpUseHardClose=false
+InpHardCloseHour=21
 
 InpEmaFast=20
 InpEmaMid=50
@@ -27,9 +44,7 @@ InpAtrLowPct=8.0
 InpAtrHighPct=90.0
 
 InpRiskPerTrade=0.004
-InpAtrStopMult=1.6
 InpAtrTargetMult=2.5
-InpHoldBars=18
 InpMaxDailyLossPct=0.025
 InpMaxConsecLoss=3
 InpCoolDownBars=3
@@ -39,7 +54,7 @@ InpTrailDistATR=0.9
 InpUseBreakeven=true
 InpBETriggerATR=1.1
 
-InpMagic=7788130
+InpMagic=7788131
 InpMaxSlippagePts=50
 InpWarmupBars=300
 InpDrawDashboard=true
