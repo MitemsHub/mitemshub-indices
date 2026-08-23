@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
-//|                                         MitemshubAI_v17_4.mq5    |
-//|                     MITEMSHUB AI MARKET ENGINE v17.4              |
-//|   V100 Optimized • H1 + H4 • Session SL • Early Time Exit         |
+//|                                         MitemshubAI_v17_6.mq5    |
+//|                     MITEMSHUB AI MARKET ENGINE v17.6              |
+//|   V100 • H1+H4 • Early Entry • Structure SL • Smart Exits        |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "17.40"
+#property version   "17.60"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -13,56 +13,59 @@ CTrade trade;
 //+------------------------------------------------------------------+
 //| INPUTS                                                             |
 //+------------------------------------------------------------------+
-input group "=== Session Filter (UTC Server Time) ==="
+input group "=== Session Filter (UTC) ==="
 input bool   InpUseSessionFilter = false;
-input int    InpSessionStartHour = 0;         // 0-23 UTC
-input int    InpSessionEndHour   = 24;        // 24 = full day
+input int    InpSessionStartHour = 0;
+input int    InpSessionEndHour   = 24;
 
 input group "=== Session-Specific Stop Loss (UTC) ==="
-input bool   InpUseSessionSL     = true;      // Enable different SL by hour
-input double InpSL_Quiet         = 1.50;      // SL multiplier during quiet hours
-input double InpSL_Active        = 1.80;      // SL multiplier during active hours
-input int    InpQuietStartHour   = 0;         // Quiet hours start (UTC)
-input int    InpQuietEndHour     = 7;         // Quiet hours end (UTC)
+input bool   InpUseSessionSL     = true;
+input double InpSL_Quiet         = 1.50;
+input double InpSL_Active        = 1.80;
+input int    InpQuietStartHour   = 0;
+input int    InpQuietEndHour     = 7;
 
-input group "=== Time-Based Exit Logic ==="
-input int    InpHoldBars         = 16;        // Maximum hold (hours on H1)
-input int    InpEarlyExitHours   = 5;         // Close early if not profitable after X hours
-input double InpEarlyExitMinR    = 0.20;      // Minimum R to keep the trade alive
-input bool   InpUseHardClose     = false;     // Force close all trades at specific hour
-input int    InpHardCloseHour    = 21;        // Hour to force close (UTC)
+input group "=== Time-Based Exit ==="
+input int    InpHoldBars         = 16;
+input bool   InpUseHardClose     = false;
+input int    InpHardCloseHour    = 21;
 
-input group "=== Regime (Higher TF) ==="
+input group "=== Regime (H4) ==="
 input int    InpEmaFast          = 20;
 input int    InpEmaMid           = 50;
 input int    InpEmaSlow          = 100;
 input bool   InpTrendOnly        = true;
 input double InpMinEmaSeparation = 0.30;
 
-input group "=== Pullback Entry ==="
-input double InpPullbackMin      = 0.45;
-input double InpPullbackMax      = 2.40;
+input group "=== Entry Signals ==="
+// Pullback
+input double InpPullbackMin      = 0.40;
+input double InpPullbackMax      = 2.50;
 input int    InpRsiPeriod        = 14;
-input double InpRsiBuyMax        = 64.0;
-input double InpRsiSellMin       = 36.0;
-
-input group "=== Momentum ==="
+input double InpRsiBuyMax        = 65.0;
+input double InpRsiSellMin       = 35.0;
+input bool   InpRequireEmaAlign  = false;     // false = faster entries
+// Breakout (NEW — catches moves early)
+input bool   InpUseBreakout      = true;
+input int    InpBreakoutLookback = 10;        // bars to find high/low
+input double InpBreakoutBuffer   = 0.10;      // buffer above/below in ATR
+// Momentum
 input bool   InpUseMomentum      = true;
 input int    InpMomLookback      = 10;
-input double InpMomMinMove       = 1.1;
-input double InpMomRsiBuy        = 53.0;
-input double InpMomRsiSell       = 47.0;
-input double InpSlopeThresh      = 0.40;
+input double InpMomMinMove       = 1.0;
+input double InpMomRsiBuy        = 52.0;
+input double InpMomRsiSell       = 48.0;
+input double InpSlopeThresh      = 0.35;
 
-input group "=== ATR Volatility Filter ==="
+input group "=== ATR Filter ==="
 input int    InpAtrPeriod        = 14;
 input int    InpAtrLookback      = 150;
 input double InpAtrLowPct        = 10.0;
 input double InpAtrHighPct       = 88.0;
 
-input group "=== Risk & Trailing ==="
-input double InpRiskPerTrade     = 0.0035;    // 0.35% per trade
-input double InpAtrTargetMult    = 2.6;       // Target = multiplier × Stop distance
+input group "=== Risk & Exits ==="
+input double InpRiskPerTrade     = 0.0035;
+input double InpAtrTargetMult    = 2.6;
 input double InpMaxDailyLossPct  = 0.025;
 input int    InpMaxConsecLoss    = 3;
 input int    InpCoolDownBars     = 3;
@@ -79,7 +82,6 @@ input int    InpWarmupBars       = 300;
 input bool   InpDrawDashboard    = true;
 input bool   InpDrawSignals      = true;
 input bool   InpLiveExecution    = true;
-input bool   InpDebugLog         = false;
 
 //+------------------------------------------------------------------+
 //| GLOBALS                                                            |
@@ -87,7 +89,6 @@ input bool   InpDebugLog         = false;
 enum ENUM_REGIME { REGIME_BULLISH, REGIME_BEARISH, REGIME_RANGING, REGIME_HIGH_VOL, REGIME_NO_TRADE };
 
 ENUM_TIMEFRAMES g_tf_entry, g_tf_regime;
-
 int hEMA_Fast_R, hEMA_Mid_R, hEMA_Slow_R;
 int hEMA_Fast_E, hEMA_Mid_E, hEMA_Slow_E, hRSI_E, hATR_E;
 
@@ -98,12 +99,12 @@ bool g_paused=false;
 ENUM_REGIME g_regime = REGIME_NO_TRADE;
 
 int g_trades=0, g_wins=0, g_losses=0;
-int g_target_exits=0, g_time_exits=0, g_stop_exits=0, g_early_exits=0;
+int g_target_exits=0, g_time_exits=0, g_stop_exits=0;
 double g_total_r=0;
 
 ulong g_ticket=0;
 int g_dir=0;
-double g_entry=0, g_sl=0, g_tp=0, g_orig_risk=0, g_position_volume=0;
+double g_entry=0, g_sl=0, g_tp=0, g_orig_risk=0;
 datetime g_entry_time=0;
 int g_bars_held=0;
 
@@ -120,9 +121,6 @@ ENUM_TIMEFRAMES GetRegimeTF(ENUM_TIMEFRAMES entry_tf)
    return PERIOD_H4;
 }
 
-//+------------------------------------------------------------------+
-//| Session helpers                                                    |
-//+------------------------------------------------------------------+
 bool IsInSession()
 {
    if(!InpUseSessionFilter) return true;
@@ -141,12 +139,11 @@ bool IsQuietHour()
    int h = dt.hour;
    if(InpQuietStartHour < InpQuietEndHour)
       return (h >= InpQuietStartHour && h < InpQuietEndHour);
-   return (h >= InpQuietStartHour || h < InpQuietEndHour);
+   return h >= InpQuietStartHour || h < InpQuietEndHour;
 }
 
 double GetCurrentStopMult()
 {
-   if(!InpUseSessionSL) return 1.60;
    return IsQuietHour() ? InpSL_Quiet : InpSL_Active;
 }
 
@@ -154,7 +151,7 @@ string GetSessionStr()
 {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
-   return StringFormat("%02d:00 UTC %s", dt.hour, IsQuietHour() ? "(Quiet)" : "(Active)");
+   return StringFormat("%02d:00 UTC %s", dt.hour, IsQuietHour()?"(Quiet)":"(Active)");
 }
 
 //+------------------------------------------------------------------+
@@ -176,7 +173,7 @@ int OnInit()
       hEMA_Fast_E==INVALID_HANDLE || hEMA_Mid_E==INVALID_HANDLE || hEMA_Slow_E==INVALID_HANDLE ||
       hRSI_E==INVALID_HANDLE || hATR_E==INVALID_HANDLE)
    {
-      Print("v17.4: Handle creation failed");
+      Print("v17.6: Handle creation failed");
       return INIT_FAILED;
    }
 
@@ -191,7 +188,9 @@ int OnInit()
    trade.SetTypeFillingBySymbol(_Symbol);
 
    RecoverPosition();
-   if(InpDrawDashboard) CreateDashboard();      Print("MITEMSHUB AI v17.4 started | V100 Optimized | Session SL + Early Exit active");
+   if(InpDrawDashboard) CreateDashboard();
+
+   Print("MITEMSHUB AI v17.6 started | V100 Optimized | Early Entry + Structure SL");
    return INIT_SUCCEEDED;
 }
 
@@ -201,13 +200,12 @@ void OnDeinit(const int reason)
    IndicatorRelease(hEMA_Fast_R); IndicatorRelease(hEMA_Mid_R); IndicatorRelease(hEMA_Slow_R);
    IndicatorRelease(hEMA_Fast_E); IndicatorRelease(hEMA_Mid_E); IndicatorRelease(hEMA_Slow_E);
    IndicatorRelease(hRSI_E); IndicatorRelease(hATR_E);
-
    for(int i=0; i<26; i++) ObjectDelete(0, dash_names[i]);
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
    Print("========================================");
-   PrintFormat("v17.4 Summary | Trades:%d WR:%.1f%% TotalR:%+.2f", g_trades, wr, g_total_r);
-   PrintFormat("Exits → Target:%d Time:%d Early:%d Stop:%d", g_target_exits, g_time_exits, g_early_exits, g_stop_exits);
+   PrintFormat("v17.6 Summary | Trades:%d WR:%.1f%% TotalR:%+.2f", g_trades, wr, g_total_r);
+   PrintFormat("Exits -> Target:%d Time:%d Stop:%d", g_target_exits, g_time_exits, g_stop_exits);
    Print("========================================");
 }
 
@@ -231,7 +229,6 @@ void OnTick()
 
    if(g_cooldown > 0) g_cooldown--;
 
-   // Hard close at specific hour
    if(InpUseHardClose && g_ticket > 0)
    {
       MqlDateTime dt;
@@ -268,21 +265,21 @@ void RecoverPosition()
       if(t==0) continue;
       if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-
       g_ticket = t;
       g_dir = PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 1 : -1;
       g_entry = PositionGetDouble(POSITION_PRICE_OPEN);
       g_sl = PositionGetDouble(POSITION_SL);
       g_tp = PositionGetDouble(POSITION_TP);
       g_orig_risk = MathAbs(g_entry - g_sl);
-      g_position_volume = PositionGetDouble(POSITION_VOLUME);
       g_entry_time = (datetime)PositionGetInteger(POSITION_TIME);
       g_bars_held = 0;
-      Print("v17.4: Recovered position #", t);
+      Print("v17.6: Recovered position #", t);
       break;
    }
 }
 
+//+------------------------------------------------------------------+
+//| Regime Classification                                              |
 //+------------------------------------------------------------------+
 ENUM_REGIME ClassifyRegime()
 {
@@ -311,7 +308,6 @@ ENUM_REGIME ClassifyRegime()
       return REGIME_BULLISH;
    if(emaF[0]<emaM[0] && emaM[0]<emaS[0] && price<emaF[0] && sep>=InpMinEmaSeparation)
       return REGIME_BEARISH;
-
    return REGIME_RANGING;
 }
 
@@ -325,41 +321,108 @@ double CalcATRPercentile(double current)
 }
 
 //+------------------------------------------------------------------+
+//| Signal Generation — 3 modes for early entries                     |
+//+------------------------------------------------------------------+
 int GenerateSignal(string &sig_type)
 {
    g_regime = ClassifyRegime();
    if(g_regime==REGIME_NO_TRADE || g_regime==REGIME_HIGH_VOL) return 0;
    if(InpTrendOnly && g_regime==REGIME_RANGING) return 0;
 
-   double emaF[1],emaM[1],emaS[1],rsi[1],atr[1];
+   double emaF[1], emaM[1], emaS[1], rsi[1], atr[1];
    if(CopyBuffer(hEMA_Fast_E,0,1,1,emaF)<1) return 0;
    if(CopyBuffer(hEMA_Mid_E,0,1,1,emaM)<1)  return 0;
    if(CopyBuffer(hEMA_Slow_E,0,1,1,emaS)<1) return 0;
    if(CopyBuffer(hRSI_E,0,1,1,rsi)<1)       return 0;
    if(CopyBuffer(hATR_E,0,1,1,atr)<1)       return 0;
 
-   double price = iClose(_Symbol,g_tf_entry,1);
-   double body  = price - iClose(_Symbol,g_tf_entry,2);
+   double price = iClose(_Symbol, g_tf_entry, 1);
+   double body  = price - iClose(_Symbol, g_tf_entry, 2);
 
+   // ========== MODE 1: BREAKOUT (catches moves EARLY) ==========
+   if(InpUseBreakout && g_regime != REGIME_NO_TRADE)
+   {
+      int dir = 0;
+      if(g_regime == REGIME_BULLISH) dir = 1;
+      else if(g_regime == REGIME_BEARISH) dir = -1;
+      else if(g_regime == REGIME_RANGING)
+      {
+         // In ranging, breakout direction from EMA slope
+         if(Bars(_Symbol, g_tf_entry) >= 6)
+         {
+            double ema_now[1], ema_prev[1];
+            if(CopyBuffer(hEMA_Fast_E,0,1,1,ema_now)>=1 && CopyBuffer(hEMA_Fast_E,0,6,1,ema_prev)>=1)
+            {
+               double slope = ema_now[0] - ema_prev[0];
+               if(slope > InpSlopeThresh * atr[0]) dir = 1;
+               else if(slope < -InpSlopeThresh * atr[0]) dir = -1;
+            }
+         }
+      }
+
+      if(dir != 0 && Bars(_Symbol, g_tf_entry) >= InpBreakoutLookback + 2)
+      {
+         double hh = iHigh(_Symbol, g_tf_entry, 1);
+         double ll = iLow(_Symbol, g_tf_entry, 1);
+         for(int k = 2; k <= InpBreakoutLookback; k++)
+         {
+            hh = MathMax(hh, iHigh(_Symbol, g_tf_entry, k));
+            ll = MathMin(ll, iLow(_Symbol, g_tf_entry, k));
+         }
+
+         double buffer = InpBreakoutBuffer * atr[0];
+
+         // Breakout UP: price closes above recent high + buffer
+         if(dir > 0 && price > hh + buffer && body > 0)
+         {
+            // Additional filters: RSI not overbought, reasonable candle
+            if(rsi[0] < InpRsiBuyMax && MathAbs(body) < atr[0] * 2.0)
+            {
+               sig_type = "BREAKOUT_LONG";
+               return 1;
+            }
+         }
+         // Breakout DOWN: price closes below recent low - buffer
+         if(dir < 0 && price < ll - buffer && body < 0)
+         {
+            if(rsi[0] > InpRsiSellMin && MathAbs(body) < atr[0] * 2.0)
+            {
+               sig_type = "BREAKOUT_SHORT";
+               return -1;
+            }
+         }
+      }
+   }
+
+   // ========== MODE 2: PULLBACK (fast entries) ==========
    if(g_regime==REGIME_BULLISH || g_regime==REGIME_BEARISH)
    {
       int dir = (g_regime==REGIME_BULLISH) ? 1 : -1;
       double pb = MathAbs(price - emaF[0]);
 
+      // Pullback distance filter
       if(pb < InpPullbackMin*atr[0] || pb > InpPullbackMax*atr[0]) return 0;
-      if(dir>0 && price > emaF[0]+0.7*atr[0]) return 0;
-      if(dir<0 && price < emaF[0]-0.7*atr[0]) return 0;
-      if(dir>0 && rsi[0] > InpRsiBuyMax) return 0;
-      if(dir<0 && rsi[0] < InpRsiSellMin) return 0;
-      if(dir>0 && !(emaF[0]>emaM[0] && emaM[0]>emaS[0])) return 0;
-      if(dir<0 && !(emaF[0]<emaM[0] && emaM[0]<emaS[0])) return 0;
-      if(dir>0 && body < -0.15*atr[0]) return 0;
-      if(dir<0 && body >  0.15*atr[0]) return 0;
+
+      // RSI filter
+      if(dir > 0 && rsi[0] > InpRsiBuyMax) return 0;
+      if(dir < 0 && rsi[0] < InpRsiSellMin) return 0;
+
+      // EMA alignment (optional — false = faster entries)
+      if(InpRequireEmaAlign)
+      {
+         if(dir > 0 && !(emaF[0]>emaM[0] && emaM[0]>emaS[0])) return 0;
+         if(dir < 0 && !(emaF[0]<emaM[0] && emaM[0]<emaS[0])) return 0;
+      }
+
+      // Candle confirmation (mild — just not against us)
+      if(dir > 0 && body < -0.10*atr[0]) return 0;
+      if(dir < 0 && body >  0.10*atr[0]) return 0;
 
       sig_type = dir>0 ? "PULLBACK_LONG" : "PULLBACK_SHORT";
       return dir;
    }
 
+   // ========== MODE 3: MOMENTUM (ranging only) ==========
    if(InpUseMomentum && g_regime==REGIME_RANGING)
    {
       double ema_now[1], ema_prev[1];
@@ -372,10 +435,10 @@ int GenerateSignal(string &sig_type)
       if(dir==0) return 0;
 
       double hh=iHigh(_Symbol,g_tf_entry,1), ll=iLow(_Symbol,g_tf_entry,1);
-      for(int i=2;i<=InpMomLookback;i++)
+      for(int k=2;k<=InpMomLookback;k++)
       {
-         hh = MathMax(hh, iHigh(_Symbol,g_tf_entry,i));
-         ll = MathMin(ll, iLow(_Symbol,g_tf_entry,i));
+         hh = MathMax(hh, iHigh(_Symbol,g_tf_entry,k));
+         ll = MathMin(ll, iLow(_Symbol,g_tf_entry,k));
       }
 
       if(dir>0 && (price-ll)>InpMomMinMove*atr[0] && rsi[0]>InpMomRsiBuy && body>0)
@@ -387,53 +450,81 @@ int GenerateSignal(string &sig_type)
 }
 
 //+------------------------------------------------------------------+
+//| Open Trade — margin-based volume, structure SL                     |
+//+------------------------------------------------------------------+
 void OpenTrade(int direction, string sig_type)
 {
    double atr[1];
    if(CopyBuffer(hATR_E,0,1,1,atr)<1) return;
 
-   double entry = direction>0 ? SymbolInfoDouble(_Symbol,SYMBOL_ASK) : SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double entry = direction>0 ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+                              : SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double stop_mult = GetCurrentStopMult();
    double stop_dist = stop_mult * atr[0];
    double tp_dist   = InpAtrTargetMult * stop_dist;
 
+   // Structure-based SL: use recent swing points
+   double structure_sl = 0;
+   if(direction > 0)
+   {
+      // BUY: SL at recent swing low (lowest low of last 5 bars)
+      double swing_low = iLow(_Symbol, g_tf_entry, 1);
+      for(int k=2; k<=5; k++)
+         swing_low = MathMin(swing_low, iLow(_Symbol, g_tf_entry, k));
+      structure_sl = swing_low - 0.2 * atr[0]; // small buffer below swing
+   }
+   else
+   {
+      // SELL: SL at recent swing high (highest high of last 5 bars)
+      double swing_high = iHigh(_Symbol, g_tf_entry, 1);
+      for(int k=2; k<=5; k++)
+         swing_high = MathMax(swing_high, iHigh(_Symbol, g_tf_entry, k));
+      structure_sl = swing_high + 0.2 * atr[0]; // small buffer above swing
+   }
+
+   // Use the WIDER of ATR-based SL and structure SL (never too tight)
+   double sl_dist_atr = stop_dist;
+   double sl_dist_struct = MathAbs(entry - structure_sl);
+   double sl_dist = MathMax(sl_dist_atr, sl_dist_struct);
+
+   // Safety caps
    double max_stop = entry * 0.03;
-   if(stop_dist > max_stop) stop_dist = max_stop;
-   if(stop_dist < atr[0]*0.4) stop_dist = atr[0]*0.4;
+   if(sl_dist > max_stop) sl_dist = max_stop;
+   if(sl_dist < atr[0]*0.4) sl_dist = atr[0]*0.4;
 
-   double sl = direction>0 ? entry-stop_dist : entry+stop_dist;
-   double tp = direction>0 ? entry+tp_dist   : entry-tp_dist;
+   double sl = direction>0 ? entry - sl_dist : entry + sl_dist;
+   double tp = direction>0 ? entry + InpAtrTargetMult*sl_dist : entry - InpAtrTargetMult*sl_dist;
 
-   double equity_now = AccountInfoDouble(ACCOUNT_EQUITY);
-   double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
-   double tick_value = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
-   double margin_req = SymbolInfoDouble(_Symbol,SYMBOL_MARGIN_INITIAL);
-   if(tick_size<=0 || tick_value<=0) return;
-
-   // Margin-based volume: use 70% of equity as margin per trade
-   double margin_budget = equity_now * 0.70;
-   double vol = (margin_req > 0) ? margin_budget / margin_req : 1.0;
-   vol = NormalizeVolume(vol);
-   if(vol<=0) return;
+   // Margin-based volume: 70% of equity
+   double margin_budget = g_eq * 0.70;
+   double margin_per_lot = SymbolInfoDouble(_Symbol, SYMBOL_MARGIN_INITIAL);
+   if(margin_per_lot <= 0) margin_per_lot = 0.62; // V100 fallback
+   double vol = margin_budget / margin_per_lot;
+   double minv = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxv = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step<=0) step=0.01;
+   vol = MathFloor(vol/step)*step;
+   if(vol < minv) vol = minv;
+   if(vol > maxv) vol = maxv;
 
    bool ok=false;
    if(InpLiveExecution)
    {
       if(direction>0)
-         ok = trade.Buy(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v17.4");
+         ok = trade.Buy(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v17.6");
       else
-         ok = trade.Sell(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v17.4");
+         ok = trade.Sell(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v17.6");
    }
    else { g_ticket=(ulong)TimeCurrent(); ok=true; }
 
    if(!ok)
    {
-      Print("v17.4 Order failed: ",trade.ResultRetcode());
+      Print("v17.6 Order failed: ",trade.ResultRetcode());
       g_cooldown = InpCoolDownBars;
       return;
    }
 
-   // Ticket recovery
    g_ticket=0;
    for(int a=0;a<8;a++)
    {
@@ -452,54 +543,28 @@ void OpenTrade(int direction, string sig_type)
    if(g_ticket==0) g_ticket=trade.ResultOrder();
 
    g_dir=direction; g_entry=entry; g_sl=sl; g_tp=tp;
-   g_orig_risk=stop_dist; g_position_volume=vol;
-   g_entry_time=TimeCurrent(); g_bars_held=0;
+   g_orig_risk=sl_dist; g_entry_time=TimeCurrent(); g_bars_held=0;
 
    if(InpDrawSignals) DrawArrow(direction,TimeCurrent(),entry,sig_type);
 
-   PrintFormat("[v17.4] %s %s @%.5f SL=%.5f (mult=%.2f) TP=%.5f",
-               sig_type, direction>0?"BUY":"SELL", entry, sl, stop_mult, tp);
+   PrintFormat("[v17.6] %s %s @%.5f SL=%.5f TP=%.5f Vol=%.1f Regime=%s",
+               sig_type, direction>0?"BUY":"SELL", entry, sl, tp, vol, RegimeToStr(g_regime));
 }
 
-double NormalizeVolume(double vol)
-{
-   double minv=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
-   double maxv=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
-   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
-   if(step<=0) step=0.01;
-   vol=MathFloor(vol/step)*step;
-   if(vol<minv) vol=minv;
-   if(vol>maxv) vol=maxv;
-   return NormalizeDouble(vol,2);
-}
-
+//+------------------------------------------------------------------+
+//| Manage Position — smart trailing, no early exit                    |
 //+------------------------------------------------------------------+
 void ManagePosition()
 {
    if(!PositionSelectByTicket(g_ticket)) { g_ticket=0; return; }
-
    g_bars_held++;
 
    double atr[1];
    CopyBuffer(hATR_E,0,0,1,atr);
-
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-   double current = g_dir>0 ? bid : ask;
 
-   // === Early Exit: not profitable after X hours ===
-   double hours_open = (double)(TimeCurrent() - g_entry_time) / 3600.0;
-   if(hours_open >= InpEarlyExitHours)
-   {
-      double r_now = g_orig_risk>0 ? (g_dir>0 ? (current-g_entry) : (g_entry-current)) / g_orig_risk : 0;
-      if(r_now < InpEarlyExitMinR)
-      {
-         ClosePosition("EARLY");
-         return;
-      }
-   }
-
-   // Max hold
+   // Time exit only
    if(g_bars_held >= InpHoldBars)
    {
       ClosePosition("TIME");
@@ -534,11 +599,12 @@ void ManagePosition()
       }
    }
 
-   // Trailing
+   // Trailing — wider and smarter
    if(InpUseTrailing)
    {
       double start=InpTrailStartATR*atr[0];
       double dist =InpTrailDistATR*atr[0];
+
       if(g_dir>0 && bid>=g_entry+start)
       {
          double newsl=NormalizeDouble(bid-dist,_Digits);
@@ -558,24 +624,18 @@ void ManagePosition()
 void ClosePosition(string reason)
 {
    if(g_ticket==0) return;
-
-   double exit_price = g_dir>0 ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-   if(!trade.PositionClose(g_ticket))
-   {
-      Print("v17.4 Close failed: ",trade.ResultRetcode());
-      return;
-   }
+   double exit_price = g_dir>0 ? SymbolInfoDouble(_Symbol,SYMBOL_BID)
+                               : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   if(!trade.PositionClose(g_ticket)) { Print("v17.6 Close failed"); return; }
 
    double r_mult = g_orig_risk>0 ? (g_dir>0?(exit_price-g_entry):(g_entry-exit_price))/g_orig_risk : 0;
 
-   g_trades++;
-   g_total_r += r_mult;
+   g_trades++; g_total_r += r_mult;
    if(r_mult>0) g_wins++; else g_losses++;
 
-   if(reason=="TARGET")     g_target_exits++;
-   else if(reason=="TIME")  g_time_exits++;
-   else if(reason=="EARLY") g_early_exits++;
-   else if(reason=="STOP")  g_stop_exits++;
+   if(reason=="TARGET") g_target_exits++;
+   else if(reason=="TIME") g_time_exits++;
+   else if(reason=="STOP") g_stop_exits++;
 
    if(r_mult<0){ g_consec_loss++; g_cooldown=InpCoolDownBars; }
    else g_consec_loss=0;
@@ -583,7 +643,7 @@ void ClosePosition(string reason)
    if(g_consec_loss>=InpMaxConsecLoss) g_paused=true;
    if(g_daily_pnl < -AccountInfoDouble(ACCOUNT_EQUITY)*InpMaxDailyLossPct) g_paused=true;
 
-   PrintFormat("[v17.4] CLOSE %s R=%+.3f", reason, r_mult);
+   PrintFormat("[v17.6] CLOSE %s %s R=%+.3f", _Symbol, reason, r_mult);
 
    g_ticket=0; g_dir=0; g_bars_held=0;
 }
@@ -595,7 +655,7 @@ void CreateDashboard()
 {
    for(int i=0;i<26;i++)
    {
-      dash_names[i]="M174_"+IntegerToString(i);
+      dash_names[i]="M176_"+IntegerToString(i);
       ObjectCreate(0,dash_names[i],OBJ_LABEL,0,0,0);
       ObjectSetInteger(0,dash_names[i],OBJPROP_CORNER,CORNER_LEFT_UPPER);
       ObjectSetInteger(0,dash_names[i],OBJPROP_XDISTANCE,10);
@@ -614,22 +674,20 @@ void UpdateDashboard()
    double pct = CalcATRPercentile(atr[0]);
 
    string L[26];
-   L[0]  = "=== MITEMSHUB AI v17.4 ===";
+   L[0]  = "=== MITEMSHUB AI v17.6 ===";
    L[1]  = StringFormat("%s | %s > %s", _Symbol, EnumToString(g_tf_entry), EnumToString(g_tf_regime));
    L[2]  = StringFormat("Equity: $%.2f | Peak: $%.2f", g_eq, g_peak_eq);
    L[3]  = StringFormat("Regime: %s | ATR%%: %.0f", RegimeToStr(g_regime), pct);
    L[4]  = StringFormat("Session: %s", GetSessionStr());
-   L[5]  = StringFormat("SL Mode: %s (%.2f×ATR)", IsQuietHour()?"Quiet":"Active", GetCurrentStopMult());
+   L[5]  = StringFormat("SL: %s (%.2f×ATR) | TP: %.1fxSL", IsQuietHour()?"Quiet":"Active", GetCurrentStopMult(), InpAtrTargetMult);
    L[6]  = StringFormat("Trades: %d | WR: %.1f%% | R: %+.2f", g_trades, wr, g_total_r);
    L[7]  = StringFormat("Daily: $%.2f | ConsecL: %d", g_daily_pnl, g_consec_loss);
    L[8]  = StringFormat("Status: %s | CD: %d", g_paused?"PAUSED":"ACTIVE", g_cooldown);
-   L[9]  = StringFormat("Risk: %.2f%% | TP: %.1fxSL", InpRiskPerTrade*100, InpAtrTargetMult);
-   L[10] = StringFormat("Trail: %.1f/%.1f | BE: %.1f", InpTrailStartATR, InpTrailDistATR, InpBETriggerATR);
-   L[11] = StringFormat("Hold: %d bars | Early: %dh @>%.2fR", InpHoldBars, InpEarlyExitHours, InpEarlyExitMinR);
-   L[12] = StringFormat("MaxDD: %.2f%% | T/T/E/S: %d/%d/%d/%d", dd, g_target_exits, g_time_exits, g_early_exits, g_stop_exits);
-   L[13] = InpLiveExecution ? "MODE: LIVE" : "MODE: PAPER";
+   L[9]  = StringFormat("Volume: 70%% margin | Hold: %d bars", InpHoldBars);
+   L[10] = StringFormat("MaxDD: %.2f%% | T/T/S: %d/%d/%d", dd, g_target_exits, g_time_exits, g_stop_exits);
+   L[11] = InpLiveExecution ? "MODE: LIVE" : "MODE: PAPER";
 
-   int line = 14;
+   int line = 12;
    if(g_ticket>0 && PositionSelectByTicket(g_ticket))
    {
       double cur = g_dir>0 ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
@@ -653,7 +711,6 @@ void UpdateDashboard()
          else if(g_regime==REGIME_RANGING) c=clrYellow;
          else c=clrGray;
       }
-      if(i==5) c = IsQuietHour() ? clrGray : clrLime;
       if(i==7) c = (g_daily_pnl>=0) ? clrLime : clrRed;
       if(i==8) c = g_paused ? clrRed : clrLime;
       ObjectSetInteger(0,dash_names[i],OBJPROP_COLOR,c);
@@ -672,7 +729,7 @@ string RegimeToStr(ENUM_REGIME r)
 
 void DrawArrow(int dir, datetime t, double price, string tag)
 {
-   string name="M174_"+tag+"_"+IntegerToString((int)t);
+   string name="M176_"+tag+"_"+IntegerToString((int)t);
    if(ObjectFind(0,name)>=0) ObjectDelete(0,name);
    ObjectCreate(0,name,OBJ_ARROW,0,t,price);
    ObjectSetInteger(0,name,OBJPROP_ARROWCODE,dir>0?233:234);
