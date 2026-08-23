@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
-//|                                         MitemshubAI_v16_5.mq5    |
-//|                     MITEMSHUB AI MARKET ENGINE v16.5              |
+//|                                         MitemshubAI_v16_6.mq5    |
+//|                     MITEMSHUB AI MARKET ENGINE v16.6              |
 //|   Multi-Symbol • Session Filter • Regime + Pullback + Trailing    |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "16.50"
+#property version   "16.60"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -27,8 +27,8 @@ input int    InpEmaMid           = 50;
 input int    InpEmaSlow          = 100;
 
 input group "=== Pullback Entry (M5) ==="
-input double InpPullbackMin      = 0.25;
-input double InpPullbackMax      = 1.8;
+input double InpPullbackMin      = 0.20;       // v16.6: wider entry window
+input double InpPullbackMax      = 2.2;        // v16.6: wider entry window
 input int    InpRsiPeriod        = 14;
 input double InpRsiBuyMax        = 58.0;
 input double InpRsiSellMin       = 42.0;
@@ -50,9 +50,10 @@ input double InpRiskPerTrade     = 0.004;     // 0.4% per trade (shared)
 input double InpAtrStopMult      = 1.6;       // Optimized for Vol 100
 input double InpAtrTargetMult    = 2.8;
 input int    InpHoldBars         = 14;
+input int    InpMaxPositions     = 2;          // v16.6: concurrent positions per symbol
 input double InpMaxDailyLossPct  = 0.025;
 input int    InpMaxConsecLoss    = 3;
-input int    InpCoolDownBars     = 4;
+input int    InpCoolDownBars     = 3;          // v16.6: faster recovery
 input bool   InpUseTrailing      = true;
 input double InpTrailStartATR    = 0.6;       // Optimized: faster profit lock
 input double InpTrailDistATR     = 0.7;       // Optimized: tighter trail
@@ -73,16 +74,22 @@ input bool   InpLiveExecution    = true;
 //+------------------------------------------------------------------+
 enum ENUM_REGIME { REGIME_BULLISH, REGIME_BEARISH, REGIME_RANGING, REGIME_HIGH_VOL, REGIME_NO_TRADE };
 
-struct SymbolState
+struct PositionInfo
 {
-   string   symbol;
-   int      hEMA_Fast_M15, hEMA_Mid_M15, hEMA_Slow_M15;
-   int      hEMA_Fast_M5, hRSI_M5, hATR_M5;
    ulong    ticket;
    int      dir;
    double   entry, sl, tp, orig_risk;
    datetime entry_time;
    int      bars_held;
+};
+
+struct SymbolState
+{
+   string   symbol;
+   int      hEMA_Fast_M15, hEMA_Mid_M15, hEMA_Slow_M15;
+   int      hEMA_Fast_M5, hRSI_M5, hATR_M5;
+   PositionInfo positions[4];  // up to 4 concurrent positions
+   int      pos_count;        // current open positions
    ENUM_REGIME regime;
    double   atr_hist[300];
    int      atr_hist_count;
@@ -258,17 +265,24 @@ void OnTick()
    {
       if(!g_states[i].valid) continue;
 
-      // Manage open position
-      if(g_states[i].ticket > 0)
+      // Manage open positions
+      for(int p = 0; p < g_states[i].pos_count; p++)
       {
-         if(PositionSelectByTicket(g_states[i].ticket))
-            ManagePosition(i);
-         else
-            g_states[i].ticket = 0;
+         if(g_states[i].positions[p].ticket > 0)
+         {
+            if(PositionSelectByTicket(g_states[i].positions[p].ticket))
+               ManagePosition(i, p);
+            else
+            {
+               // Position closed externally
+               RemovePosition(i, p);
+               p--;
+            }
+         }
       }
 
-      // Entry
-      if(g_states[i].ticket == 0 && !g_paused && in_session &&
+      // Entry (if room for more positions)
+      if(g_states[i].pos_count < InpMaxPositions && !g_paused && in_session &&
          Bars(g_states[i].symbol, PERIOD_M5) >= InpWarmupBars && g_cooldown == 0)
       {
          if(IsSpreadOK(g_states[i].symbol) && IsMinAtrOK(i))
@@ -318,6 +332,18 @@ bool IsMinAtrOK(int idx)
 }
 
 //+------------------------------------------------------------------+
+//| REMOVE POSITION FROM TRACKING                                      |
+//+------------------------------------------------------------------+
+void RemovePosition(int idx, int pos_idx)
+{
+   SymbolState &st = g_states[idx];
+   for(int i = pos_idx; i < st.pos_count - 1; i++)
+      st.positions[i] = st.positions[i + 1];
+   st.pos_count--;
+   ArrayInitialize(st.positions[st.pos_count], 0);
+}
+
+//+------------------------------------------------------------------+
 //| RECOVER POSITIONS                                                  |
 //+------------------------------------------------------------------+
 void RecoverAllPositions()
@@ -332,17 +358,19 @@ void RecoverAllPositions()
 
       for(int s = 0; s < g_symbol_count; s++)
       {
-         if(g_states[s].symbol == sym && g_states[s].ticket == 0)
+         if(g_states[s].symbol == sym && g_states[s].pos_count < InpMaxPositions)
          {
-            g_states[s].ticket     = ticket;
-            g_states[s].dir        = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
-            g_states[s].entry      = PositionGetDouble(POSITION_PRICE_OPEN);
-            g_states[s].sl         = PositionGetDouble(POSITION_SL);
-            g_states[s].tp         = PositionGetDouble(POSITION_TP);
-            g_states[s].orig_risk  = MathAbs(g_states[s].entry - g_states[s].sl);
-            g_states[s].entry_time = (datetime)PositionGetInteger(POSITION_TIME);
-            g_states[s].bars_held  = 0;
-            PrintFormat("v16.5: Recovered %s ticket=%d", sym, ticket);
+            int p = g_states[s].pos_count;
+            g_states[s].positions[p].ticket     = ticket;
+            g_states[s].positions[p].dir        = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+            g_states[s].positions[p].entry      = PositionGetDouble(POSITION_PRICE_OPEN);
+            g_states[s].positions[p].sl         = PositionGetDouble(POSITION_SL);
+            g_states[s].positions[p].tp         = PositionGetDouble(POSITION_TP);
+            g_states[s].positions[p].orig_risk  = MathAbs(g_states[s].positions[p].entry - g_states[s].positions[p].sl);
+            g_states[s].positions[p].entry_time = (datetime)PositionGetInteger(POSITION_TIME);
+            g_states[s].positions[p].bars_held  = 0;
+            g_states[s].pos_count++;
+            PrintFormat("v16.6: Recovered %s ticket=%d", sym, ticket);
             break;
          }
       }
@@ -552,18 +580,22 @@ void OpenTrade(int idx, int direction, string sig_type)
 
    if(ok && st.ticket > 0)
    {
-      st.dir        = direction;
-      st.entry      = entry;
-      st.sl         = sl;
-      st.tp         = tp;
-      st.orig_risk  = stop_dist;
-      st.entry_time = TimeCurrent();
-      st.bars_held  = 0;
+      int p = st.pos_count;
+      st.positions[p].ticket    = st.ticket;
+      st.positions[p].dir       = direction;
+      st.positions[p].entry     = entry;
+      st.positions[p].sl        = sl;
+      st.positions[p].tp        = tp;
+      st.positions[p].orig_risk = stop_dist;
+      st.positions[p].entry_time = TimeCurrent();
+      st.positions[p].bars_held = 0;
+      st.pos_count++;
 
       if(InpDrawSignals) DrawArrow(sym, direction, TimeCurrent(), entry, sig_type);
 
-      PrintFormat("[v16.5] %s %s %s @%.5f SL=%.5f TP=%.5f Vol=%.2f Regime=%s",
-                  sym, sig_type, direction>0?"BUY":"SELL", entry, sl, tp, vol, RegimeToStr(st.regime));
+      PrintFormat("[v16.6] %s %s %s @%.5f SL=%.5f TP=%.5f Vol=%.2f Regime=%s Pos=%d/%d",
+                  sym, sig_type, direction>0?"BUY":"SELL", entry, sl, tp, vol, RegimeToStr(st.regime),
+                  st.pos_count, InpMaxPositions);
    }
 }
 
@@ -583,12 +615,13 @@ double NormalizeVolume(string sym, double vol)
 //+------------------------------------------------------------------+
 //| MANAGE POSITION                                                    |
 //+------------------------------------------------------------------+
-void ManagePosition(int idx)
+void ManagePosition(int idx, int pos_idx)
 {
    SymbolState &st = g_states[idx];
-   if(!PositionSelectByTicket(st.ticket)) { st.ticket = 0; return; }
+   PositionInfo &pos = st.positions[pos_idx];
+   if(!PositionSelectByTicket(pos.ticket)) { RemovePosition(idx, pos_idx); return; }
 
-   st.bars_held++;
+   pos.bars_held++;
 
    double atr[1];
    if(CopyBuffer(st.hATR_M5, 0, 0, 1, atr) < 1) return;
@@ -598,37 +631,37 @@ void ManagePosition(int idx)
    int digits = (int)SymbolInfoInteger(st.symbol, SYMBOL_DIGITS);
 
    // Time exit
-   if(st.bars_held >= InpHoldBars)
+   if(pos.bars_held >= InpHoldBars)
    {
-      ClosePosition(idx, "TIME");
+      ClosePosition(idx, pos_idx, "TIME");
       return;
    }
 
    // SL / TP safety
-   if(st.dir > 0)
+   if(pos.dir > 0)
    {
-      if(bid <= st.sl) { ClosePosition(idx, "STOP"); return; }
-      if(bid >= st.tp) { ClosePosition(idx, "TARGET"); return; }
+      if(bid <= pos.sl) { ClosePosition(idx, pos_idx, "STOP"); return; }
+      if(bid >= pos.tp) { ClosePosition(idx, pos_idx, "TARGET"); return; }
    }
    else
    {
-      if(ask >= st.sl) { ClosePosition(idx, "STOP"); return; }
-      if(ask <= st.tp) { ClosePosition(idx, "TARGET"); return; }
+      if(ask >= pos.sl) { ClosePosition(idx, pos_idx, "STOP"); return; }
+      if(ask <= pos.tp) { ClosePosition(idx, pos_idx, "TARGET"); return; }
    }
 
    // Breakeven
    if(InpUseBreakeven)
    {
       double trigger = InpBETriggerATR * atr[0];
-      if(st.dir > 0 && bid >= st.entry + trigger && st.sl < st.entry)
+      if(pos.dir > 0 && bid >= pos.entry + trigger && pos.sl < pos.entry)
       {
-         double new_sl = NormalizeDouble(st.entry + 2 * SymbolInfoDouble(st.symbol, SYMBOL_POINT), digits);
-         if(trade.PositionModify(st.ticket, new_sl, st.tp)) st.sl = new_sl;
+         double new_sl = NormalizeDouble(pos.entry + 2 * SymbolInfoDouble(st.symbol, SYMBOL_POINT), digits);
+         if(trade.PositionModify(pos.ticket, new_sl, pos.tp)) pos.sl = new_sl;
       }
-      if(st.dir < 0 && ask <= st.entry - trigger && st.sl > st.entry)
+      if(pos.dir < 0 && ask <= pos.entry - trigger && pos.sl > pos.entry)
       {
-         double new_sl = NormalizeDouble(st.entry - 2 * SymbolInfoDouble(st.symbol, SYMBOL_POINT), digits);
-         if(trade.PositionModify(st.ticket, new_sl, st.tp)) st.sl = new_sl;
+         double new_sl = NormalizeDouble(pos.entry - 2 * SymbolInfoDouble(st.symbol, SYMBOL_POINT), digits);
+         if(trade.PositionModify(pos.ticket, new_sl, pos.tp)) pos.sl = new_sl;
       }
    }
 
@@ -638,36 +671,37 @@ void ManagePosition(int idx)
       double start = InpTrailStartATR * atr[0];
       double dist  = InpTrailDistATR  * atr[0];
 
-      if(st.dir > 0 && bid >= st.entry + start)
+      if(pos.dir > 0 && bid >= pos.entry + start)
       {
          double new_sl = NormalizeDouble(bid - dist, digits);
-         if(new_sl > st.sl && new_sl > st.entry)
-            if(trade.PositionModify(st.ticket, new_sl, st.tp)) st.sl = new_sl;
+         if(new_sl > pos.sl && new_sl > pos.entry)
+            if(trade.PositionModify(pos.ticket, new_sl, pos.tp)) pos.sl = new_sl;
       }
-      if(st.dir < 0 && ask <= st.entry - start)
+      if(pos.dir < 0 && ask <= pos.entry - start)
       {
          double new_sl = NormalizeDouble(ask + dist, digits);
-         if(new_sl < st.sl && new_sl > st.entry)
-            if(trade.PositionModify(st.ticket, new_sl, st.tp)) st.sl = new_sl;
+         if(new_sl < pos.sl && new_sl > pos.entry)
+            if(trade.PositionModify(pos.ticket, new_sl, pos.tp)) pos.sl = new_sl;
       }
    }
 }
 
-void ClosePosition(int idx, string reason)
+void ClosePosition(int idx, int pos_idx, string reason)
 {
    SymbolState &st = g_states[idx];
-   if(st.ticket == 0) return;
+   PositionInfo &pos = st.positions[pos_idx];
+   if(pos.ticket == 0) return;
 
-   double exit_price = (st.dir > 0) ? SymbolInfoDouble(st.symbol, SYMBOL_BID)
+   double exit_price = (pos.dir > 0) ? SymbolInfoDouble(st.symbol, SYMBOL_BID)
                                     : SymbolInfoDouble(st.symbol, SYMBOL_ASK);
 
    double r_mult = 0;
-   if(st.orig_risk > 0)
-      r_mult = (st.dir > 0) ? (exit_price - st.entry) / st.orig_risk
-                            : (st.entry - exit_price) / st.orig_risk;
+   if(pos.orig_risk > 0)
+      r_mult = (pos.dir > 0) ? (exit_price - pos.entry) / pos.orig_risk
+                            : (pos.entry - exit_price) / pos.orig_risk;
 
    if(InpLiveExecution)
-      trade.PositionClose(st.ticket);
+      trade.PositionClose(pos.ticket);
 
    g_trades++;
    g_total_r += r_mult;
@@ -691,11 +725,10 @@ void ClosePosition(int idx, string reason)
    if(g_daily_pnl < -AccountInfoDouble(ACCOUNT_EQUITY) * InpMaxDailyLossPct) g_paused = true;
    if((g_peak_equity - g_equity) > g_peak_equity * 0.12) g_paused = true;
 
-   PrintFormat("[v16.5] CLOSE %s %s R=%+.3f", st.symbol, reason, r_mult);
+   PrintFormat("[v16.6] CLOSE %s %s R=%+.3f Pos=%d/%d", st.symbol, reason, r_mult,
+               st.pos_count - 1, InpMaxPositions);
 
-   st.ticket = 0;
-   st.dir = 0;
-   st.bars_held = 0;
+   RemovePosition(idx, pos_idx);
 }
 
 //+------------------------------------------------------------------+

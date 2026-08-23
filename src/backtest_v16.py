@@ -26,7 +26,7 @@ SYMBOLS = {
 # ─── v16.5 DEFAULT EA PARAMETERS (matching MitemshubAI_v16_5.mq5) ──
 DEFAULTS = {
     'ema_fast': 20, 'ema_mid': 50, 'ema_slow': 100,
-    'pullback_min': 0.25, 'pullback_max': 1.8,
+    'pullback_min': 0.20, 'pullback_max': 2.2,   # v16.6: wider entry
     'rsi_period': 14, 'rsi_buy_max': 58, 'rsi_sell_min': 42,
     'atr_period': 14, 'atr_lookback': 200,
     'atr_low_pct': 12, 'atr_high_pct': 88,
@@ -35,7 +35,7 @@ DEFAULTS = {
     'risk_pct': 0.004,              # v16.5: 0.4% per trade (was 0.5%)
     'atr_stop': 1.8,                # v16.5: default 1.8 (was 2.0)
     'atr_target': 2.8,
-    'hold_bars': 14, 'cooldown': 4, 'max_consec_loss': 3,
+    'hold_bars': 14, 'cooldown': 3, 'max_consec_loss': 3,  # v16.6: faster recovery
     'max_daily_loss_pct': 0.025,
     'use_trailing': True, 'trail_start': 0.8, 'trail_dist': 0.7,  # v16.5: tighter
     'use_be': True, 'be_trigger': 1.0,
@@ -158,14 +158,9 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
 
     # ATR history for percentile (matching EA: atr_hist[300])
     atr_hist = []
-    in_position = False
-    pos_dir = 0
-    pos_entry = 0.0
-    pos_sl = 0.0
-    pos_tp = 0.0
-    pos_orig_risk = 0.0
-    pos_stake = 0.0
-    pos_bars = 0
+    # v16.6: support multiple concurrent positions
+    max_positions = 2
+    positions = []  # list of dicts: {dir, entry, sl, tp, orig_risk, stake, bars, regime, sig}
 
     for i in range(start_idx, len(close5)):
         if np.isnan(atr_5[i]) or np.isnan(ema_fast_5[i]) or np.isnan(rsi_5[i]):
@@ -181,6 +176,8 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
         if (i - day_start_bar) >= bars_per_day:
             daily_pnl = 0.0
             day_start_bar = i
+            paused = False
+            consec_loss = 0
 
         if cooldown > 0:
             cooldown -= 1
@@ -208,9 +205,10 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
             if spread_pts > p['max_spread_pts']:
                 continue
 
-        # ─── MANAGE POSITION ───
-        if in_position:
-            pos_bars += 1
+        # ─── MANAGE POSITIONS (v16.6: multi-position) ───
+        closed_indices = []
+        for pi, pos in enumerate(positions):
+            pos['bars'] += 1
             bid = close5[i]
             ask = close5[i]
 
@@ -219,49 +217,49 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
             exit_price = 0.0
 
             # Time exit
-            if pos_bars >= p['hold_bars']:
+            if pos['bars'] >= p['hold_bars']:
                 closed, exit_reason, exit_price = True, 'TIME', close5[i]
 
-            # SL / TP check (matching EA: proactive check before broker)
+            # SL / TP check
             if not closed:
-                if pos_dir > 0:
-                    if bid <= pos_sl:
-                        closed, exit_reason, exit_price = True, 'STOP', pos_sl
-                    elif bid >= pos_tp:
-                        closed, exit_reason, exit_price = True, 'TARGET', pos_tp
+                if pos['dir'] > 0:
+                    if bid <= pos['sl']:
+                        closed, exit_reason, exit_price = True, 'STOP', pos['sl']
+                    elif bid >= pos['tp']:
+                        closed, exit_reason, exit_price = True, 'TARGET', pos['tp']
                 else:
-                    if ask >= pos_sl:
-                        closed, exit_reason, exit_price = True, 'STOP', pos_sl
-                    elif ask <= pos_tp:
-                        closed, exit_reason, exit_price = True, 'TARGET', pos_tp
+                    if ask >= pos['sl']:
+                        closed, exit_reason, exit_price = True, 'STOP', pos['sl']
+                    elif ask <= pos['tp']:
+                        closed, exit_reason, exit_price = True, 'TARGET', pos['tp']
 
-            # Breakeven (v16.5: no g_entry_from_be, uses sl < entry check)
+            # Breakeven
             if not closed and p['use_be']:
                 be_trigger = p['be_trigger'] * atr_5[i]
-                if pos_dir > 0 and bid >= pos_entry + be_trigger and pos_sl < pos_entry:
-                    pos_sl = pos_entry + 2 * specs['point']
-                elif pos_dir < 0 and ask <= pos_entry - be_trigger and pos_sl > pos_entry:
-                    pos_sl = pos_entry - 2 * specs['point']
+                if pos['dir'] > 0 and bid >= pos['entry'] + be_trigger and pos['sl'] < pos['entry']:
+                    pos['sl'] = pos['entry'] + 2 * specs['point']
+                elif pos['dir'] < 0 and ask <= pos['entry'] - be_trigger and pos['sl'] > pos['entry']:
+                    pos['sl'] = pos['entry'] - 2 * specs['point']
 
-            # Trailing (v16.5: trail_start 0.8, trail_dist 0.7)
+            # Trailing
             if not closed and p['use_trailing']:
                 trail_start = p['trail_start'] * atr_5[i]
                 trail_dist = p['trail_dist'] * atr_5[i]
-                if pos_dir > 0 and bid >= pos_entry + trail_start:
+                if pos['dir'] > 0 and bid >= pos['entry'] + trail_start:
                     new_sl = bid - trail_dist
-                    if new_sl > pos_sl and new_sl > pos_entry:
-                        pos_sl = new_sl
-                elif pos_dir < 0 and ask <= pos_entry - trail_start:
+                    if new_sl > pos['sl'] and new_sl > pos['entry']:
+                        pos['sl'] = new_sl
+                elif pos['dir'] < 0 and ask <= pos['entry'] - trail_start:
                     new_sl = ask + trail_dist
-                    if new_sl < pos_sl and new_sl > pos_entry:  # v16.5: new_sl > entry (was < entry in v15)
-                        pos_sl = new_sl
+                    if new_sl < pos['sl'] and new_sl > pos['entry']:
+                        pos['sl'] = new_sl
 
             if closed:
-                if pos_dir > 0:
-                    r_mult = (exit_price - pos_entry) / pos_orig_risk
+                if pos['dir'] > 0:
+                    r_mult = (exit_price - pos['entry']) / pos['orig_risk']
                 else:
-                    r_mult = (pos_entry - exit_price) / pos_orig_risk
-                pnl = pos_stake * r_mult
+                    r_mult = (pos['entry'] - exit_price) / pos['orig_risk']
+                pnl = pos['stake'] * r_mult
 
                 equity += pnl
                 daily_pnl += pnl
@@ -269,11 +267,11 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
                     peak_equity = equity
 
                 trades.append({
-                    'entry': pos_entry, 'exit': exit_price, 'dir': pos_dir,
+                    'entry': pos['entry'], 'exit': exit_price, 'dir': pos['dir'],
                     'reason': exit_reason, 'r_mult': r_mult, 'pnl': pnl,
-                    'bars': pos_bars, 'equity': equity,
-                    'atr_pct': atr_pct, 'regime': pos_regime,
-                    'signal_type': pos_sig,
+                    'bars': pos['bars'], 'equity': equity,
+                    'atr_pct': atr_pct, 'regime': pos['regime'],
+                    'signal_type': pos['sig'],
                 })
 
                 if r_mult < 0:
@@ -282,7 +280,7 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
                 else:
                     consec_loss = 0
 
-                # v16.5: 3-circuit-breaker pause logic (matching EA exactly)
+                # v16.6: 3-circuit-breaker
                 if consec_loss >= p['max_consec_loss']:
                     paused = True
                 if daily_pnl < -equity * p['max_daily_loss_pct']:
@@ -290,13 +288,17 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
                 if (peak_equity - equity) > peak_equity * 0.12:
                     paused = True
 
-                in_position = False
+                closed_indices.append(pi)
 
-            continue  # Skip entry while managing
+        # Remove closed positions (reverse order)
+        for pi in reversed(closed_indices):
+            positions.pop(pi)
 
-        # ─── ENTRY LOGIC ───
+        # ─── ENTRY LOGIC (v16.6: multi-position) ───
         if paused or cooldown > 0:
             continue
+        if len(positions) >= max_positions:
+            continue  # Max concurrent positions reached
 
         # ATR percentile filters (matching EA: pct < 12 → NO_TRADE, pct > 88 → HIGH_VOL)
         if atr_pct < p['atr_low_pct']:
@@ -421,16 +423,18 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
         # Apply spread to entry
         entry_adj = entry + (spread_cost / 2) * direction
 
-        in_position = True
-        pos_dir = direction
-        pos_entry = entry_adj
-        pos_sl = sl
-        pos_tp = tp
-        pos_orig_risk = stop_dist
-        pos_stake = risk_money
-        pos_bars = 0
-        pos_regime = regime
-        pos_sig = sig_type
+        # v16.6: Add to positions list
+        positions.append({
+            'dir': direction,
+            'entry': entry_adj,
+            'sl': sl,
+            'tp': tp,
+            'orig_risk': stop_dist,
+            'stake': risk_money,
+            'bars': 0,
+            'regime': regime,
+            'sig': sig_type,
+        })
 
     return trades
 
