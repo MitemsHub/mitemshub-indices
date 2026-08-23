@@ -4,7 +4,7 @@
 //|   Auto-TF • Wide Pullback • Momentum • Regime + Trailing         |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "16.70"
+#property version   "16.71"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -169,7 +169,7 @@ int OnInit()
    if(hEMA_Fast_Regime==INVALID_HANDLE || hEMA_Mid_Regime==INVALID_HANDLE || hEMA_Slow_Regime==INVALID_HANDLE ||
       hEMA_Fast_Entry==INVALID_HANDLE || hRSI_Entry==INVALID_HANDLE || hATR_Entry==INVALID_HANDLE)
    {
-      Print("[MITEM v16.7] ERROR: Indicator handle creation failed");
+      Print("[MITEM v16.71] ERROR: Indicator handle creation failed");
       return INIT_FAILED;
    }
 
@@ -180,9 +180,9 @@ int OnInit()
 
    if(InpDrawDashboard) CreateDashboard();
 
-   PrintFormat("[MITEM v16.7] Started | Entry=%s Regime=%s | Risk=%.2f%% | Magic=%d | Mode=%s",
+   PrintFormat("[MITEM v16.71] Started | Entry=%s Regime=%s | Risk=%.2f%% | Magic=%d | Mode=%s",
                TFStr(g_tf_entry), TFStr(g_tf_regime), InpRiskPerTrade*100, InpMagic, InpLiveExecution?"LIVE":"PAPER");
-   PrintFormat("[MITEM v16.7] Pullback=%.1f-%.1f ATR | Momentum=%s | SL=%.1f TP=%.1f Trail=%.1f/%.1f",
+   PrintFormat("[MITEM v16.71] Pullback=%.1f-%.1f ATR | Momentum=%s | SL=%.1f TP=%.1f Trail=%.1f/%.1f",
                InpPullbackMin, InpPullbackMax, InpUseMomentum?"ON":"OFF",
                InpAtrStopMult, InpAtrTargetMult, InpTrailStartATR, InpTrailDistATR);
    return INIT_SUCCEEDED;
@@ -201,7 +201,7 @@ void OnDeinit(const int reason)
    IndicatorRelease(hATR_Entry);
 
    for(int i=0; i<24; i++) ObjectDelete(0, dash_names[i]);
-   Print("[MITEM v16.7] stopped. Reason=", reason);
+   Print("[MITEM v16.71] stopped. Reason=", reason);
 }
 
 //+------------------------------------------------------------------+
@@ -226,7 +226,7 @@ void RecoverPositions()
       g_orig_risk = MathAbs(g_entry - g_sl);
       g_stake = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPerTrade;
 
-      PrintFormat("[MITEM v16.7] RECOVERED %s ticket=%d", _Symbol, ticket);
+      PrintFormat("[MITEM v16.71] RECOVERED %s ticket=%d", _Symbol, ticket);
    }
 }
 
@@ -522,7 +522,7 @@ void OpenTrade(int direction, string sig_type)
 
    if(!ok)
    {
-      PrintFormat("[MITEM v16.7] Order FAILED: %d %s", trade.ResultRetcode(), trade.ResultComment());
+      PrintFormat("[MITEM v16.71] Order FAILED: %d %s", trade.ResultRetcode(), trade.ResultComment());
       g_cooldown = InpCoolDownBars;
       return;
    }
@@ -561,7 +561,7 @@ void OpenTrade(int direction, string sig_type)
 
    if(InpDrawSignals) DrawArrow(direction, TimeCurrent(), entry, sig_type);
 
-   PrintFormat("[MITEM v16.7] %s %s @%.5f SL=%.5f TP=%.5f Vol=%.2f Regime=%s ATR=%.5f",
+   PrintFormat("[MITEM v16.71] %s %s @%.5f SL=%.5f TP=%.5f Vol=%.2f Regime=%s ATR=%.5f",
                sig_type, direction>0?"BUY":"SELL", entry, sl, tp, vol, RegimeToStr(g_regime), atr[0]);
 }
 
@@ -658,7 +658,7 @@ void ClosePosition(string reason)
    bool ok = trade.PositionClose(g_ticket);
    if(!ok)
    {
-      PrintFormat("[MITEM v16.7] Close FAILED: %d %s", trade.ResultRetcode(), trade.ResultComment());
+      PrintFormat("[MITEM v16.71] Close FAILED: %d %s", trade.ResultRetcode(), trade.ResultComment());
       return;
    }
 
@@ -702,7 +702,7 @@ void ClosePosition(string reason)
    if(g_daily_pnl < -equity_now * InpMaxDailyLossPct) g_paused = true;
    if((g_peak_equity - equity_now) > g_peak_equity * 0.12) g_paused = true;
 
-   PrintFormat("[MITEM v16.7] CLOSE %s R=%.3f PnL=$%.2f Equity=$%.2f",
+   PrintFormat("[MITEM v16.71] CLOSE %s R=%.3f PnL=$%.2f Equity=$%.2f",
                reason, r_mult, realized_pnl, equity_now);
 
    g_ticket = 0;
