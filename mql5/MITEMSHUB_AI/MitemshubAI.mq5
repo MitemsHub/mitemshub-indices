@@ -404,12 +404,15 @@ void OpenTrade(int direction, string sig_type)
    double sl = direction>0 ? entry-stop_dist : entry+stop_dist;
    double tp = direction>0 ? entry+tp_dist   : entry-tp_dist;
 
-   double risk_money = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPerTrade;
+   double equity_now = AccountInfoDouble(ACCOUNT_EQUITY);
    double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
    double tick_value = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   double margin_req = SymbolInfoDouble(_Symbol,SYMBOL_MARGIN_INITIAL);
    if(tick_size<=0 || tick_value<=0) return;
 
-   double vol = risk_money / ((stop_dist/tick_size)*tick_value);
+   // Margin-based volume: use 70% of equity as margin per trade
+   double margin_budget = equity_now * 0.70;
+   double vol = (margin_req > 0) ? margin_budget / margin_req : 1.0;
    vol = NormalizeVolume(vol);
    if(vol<=0) return;
 
