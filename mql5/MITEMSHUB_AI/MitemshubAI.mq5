@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
-//|                                         MitemshubAI_v17_0.mq5    |
-//|                     MITEMSHUB AI MARKET ENGINE v17.0              |
+//|                                         MitemshubAI_v17_1.mq5    |
+//|                     MITEMSHUB AI MARKET ENGINE v17.1              |
 //|   H1 Entry + H4 Regime • Trend-Only • V10 Optimized              |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "17.00"
+#property version   "17.10"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -32,7 +32,7 @@ input int    InpMomLookback      = 12;        // bars to check for session high/
 input double InpMomMinMove       = 0.8;       // min move in ATR to trigger
 input double InpMomRsiThresh     = 38.0;      // RSI threshold for momentum buy
 input double InpMomRsiThreshSell = 62.0;      // RSI threshold for momentum sell
-input double InpSlopeThresh      = 0.2;       // v17.0: EMA slope for ranging direction
+input double InpSlopeThresh      = 0.3;       // v17.1: EMA slope for ranging direction (validated)
 
 input group "=== ATR Volatility Filter ==="
 input int    InpAtrPeriod        = 14;
