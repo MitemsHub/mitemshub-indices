@@ -1,64 +1,65 @@
 {
   "symbol": "Volatility 100 Index",
-  "version": "v16.5",
+  "version": "v16.7",
   "params": {
-    "atr_stop": 1.6,
-    "atr_target": 2.8,
-    "trail_start": 0.6,
-    "trail_dist": 0.7
+    "atr_stop": 1.2,
+    "atr_target": 3.0,
+    "trail_start": 0.5,
+    "trail_dist": 0.5,
+    "pullback_max": 3.0
   },
   "full_result": {
     "name": "opt",
-    "trades": 49,
-    "wins": 35,
-    "losses": 14,
-    "win_rate": 71.42857142857143,
-    "pnl": 1141.6724079865944,
-    "pnl_pct": 11.416724079865945,
-    "profit_factor": 3.6713315823132207,
-    "avg_win_r": 1.064463779749843,
-    "avg_loss_r": -0.7212780953971993,
-    "expectancy_r": 0.5542518154221169,
-    "total_r": 27.15833895568374,
-    "max_drawdown": 0.725965719407844,
-    "avg_bars_held": 8.857142857142858,
+    "trades": 1548,
+    "wins": 1087,
+    "losses": 461,
+    "win_rate": 70.21963824289405,
+    "pnl": 174357.29720456,
+    "pnl_pct": 1743.5729720456,
+    "profit_factor": 2.8207008044968678,
+    "avg_win_r": 1.112359579781497,
+    "avg_loss_r": -1.0306606097127435,
+    "expectancy_r": 0.4741604148222949,
+    "total_r": 734.0003221449125,
+    "max_drawdown": 2.479266901884463,
+    "avg_bars_held": 6.8133074935400515,
     "regimes": {
       "BEARISH": {
-        "wins": 22,
-        "losses": 10,
-        "pnl": 703.5937798176711
+        "wins": 335,
+        "losses": 215,
+        "pnl": 45924.25791854332
       },
       "BULLISH": {
-        "wins": 13,
-        "losses": 4,
-        "pnl": 438.0786281689229
+        "wins": 752,
+        "losses": 246,
+        "pnl": 128433.03928601665
       }
     }
   },
   "walk_forward": [
     {
       "name": "W1",
-      "trades": 43,
-      "win_rate": 67.44186046511628,
-      "pnl": 739.4461354019585,
-      "profit_factor": 2.638476600772199,
-      "max_drawdown": 0.7259657194078359
+      "trades": 441,
+      "win_rate": 61.67800453514739,
+      "pnl": 5738.920816742014,
+      "profit_factor": 1.6359242139019141,
+      "max_drawdown": 3.2713690352319427
     },
     {
       "name": "W2",
-      "trades": 45,
-      "win_rate": 71.11111111111111,
-      "pnl": 950.6915544931861,
-      "profit_factor": 3.140545684150633,
-      "max_drawdown": 0.9033635721728763
+      "trades": 486,
+      "win_rate": 72.0164609053498,
+      "pnl": 12018.710191118675,
+      "profit_factor": 2.3981033397083,
+      "max_drawdown": 1.709911342865271
     },
     {
       "name": "W3",
-      "trades": 7,
-      "win_rate": 42.857142857142854,
-      "pnl": 95.45261339990697,
-      "profit_factor": 1.9172013830094545,
-      "max_drawdown": 0.8392866693391156
+      "trades": 494,
+      "win_rate": 68.42105263157895,
+      "pnl": 11642.786471809955,
+      "profit_factor": 2.321478493270158,
+      "max_drawdown": 2.3513649451810728
     }
   ]
 }
