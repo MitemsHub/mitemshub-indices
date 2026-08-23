@@ -36,7 +36,7 @@ InpBreakoutMin=0.10
 ; === Risk & Exits — OPTIMIZED ===
 InpRiskPerTrade=0.004
 InpAtrStopMult=1.4
-InpAtrTargetMult=2.8
+InpAtrTargetMult=1.4
 InpHoldBars=14
 InpMaxDailyLossPct=0.025
 InpMaxConsecLoss=3
