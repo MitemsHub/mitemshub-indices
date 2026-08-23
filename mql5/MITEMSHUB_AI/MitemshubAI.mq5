@@ -17,21 +17,22 @@ input group "=== Regime (H4 timeframes) ==="
 input int    InpEmaFast          = 20;
 input int    InpEmaMid           = 50;
 input int    InpEmaSlow          = 100;
-input bool   InpTrendOnly        = true;      // v17.0: only trade in confirmed H4 trends
+input bool   InpTrendOnly        = false;     // v17.0: trade in all regimes (pullback + momentum)
 
 input group "=== Pullback Entry (H1) ==="
-input double InpPullbackMin      = 0.15;      // min pullback distance (ATR)
+input double InpPullbackMin      = 0.10;      // min pullback distance (ATR)
 input double InpPullbackMax      = 2.5;       // max pullback (ATR)
 input int    InpRsiPeriod        = 14;
-input double InpRsiBuyMax        = 70.0;      // v17.0: wider RSI for H1 trends
-input double InpRsiSellMin       = 30.0;
+input double InpRsiBuyMax        = 68.0;      // v17.0: H1 RSI band
+input double InpRsiSellMin       = 32.0;
 
 input group "=== Momentum Entry ==="
-input bool   InpUseMomentum      = false;     // v17.0: disabled — pullback only in trends
+input bool   InpUseMomentum      = true;      // v17.0: momentum in all regimes
 input int    InpMomLookback      = 12;        // bars to check for session high/low
 input double InpMomMinMove       = 0.8;       // min move in ATR to trigger
-input double InpMomRsiThresh     = 35.0;      // RSI threshold for momentum buy
-input double InpMomRsiThreshSell = 65.0;      // RSI threshold for momentum sell
+input double InpMomRsiThresh     = 38.0;      // RSI threshold for momentum buy
+input double InpMomRsiThreshSell = 62.0;      // RSI threshold for momentum sell
+input double InpSlopeThresh      = 0.2;       // v17.0: EMA slope for ranging direction
 
 input group "=== ATR Volatility Filter ==="
 input int    InpAtrPeriod        = 14;
@@ -43,13 +44,13 @@ input group "=== Risk & Exits ==="
 input double InpRiskPerTrade     = 0.004;     // 0.4% per trade
 input double InpAtrStopMult      = 1.5;       // v17.0: SL = 1.5 x ATR
 input double InpAtrTargetMult    = 2.0;       // v17.0: TP = 2.0 x SL (2.0R target)
-input int    InpHoldBars         = 36;        // v17.0: hold up to 36 hours (1.5 days)
+input int    InpHoldBars         = 24;        // v17.0: hold up to 24 hours (1 day)
 input double InpMaxDailyLossPct  = 0.025;
 input int    InpMaxConsecLoss    = 3;
 input int    InpCoolDownBars     = 2;         // v17.0: 2 hours cooldown
 input bool   InpUseTrailing      = true;
 input double InpTrailStartATR    = 1.0;       // v17.0: trail starts after 1.0 x ATR profit
-input double InpTrailDistATR     = 1.5;       // v17.0: trail distance 1.5 x ATR
+input double InpTrailDistATR     = 1.2;       // v17.0: trail distance 1.2 x ATR
 input bool   InpUseBreakeven     = true;
 input double InpBETriggerATR     = 2.0;       // v17.0: BE after 2.0 x ATR profit
 
@@ -212,6 +213,8 @@ void OnTick()
    {
       g_day_start = ds;
       g_daily_pnl = 0;
+      g_paused = false;
+      g_consec_loss = 0;
    }
 
    if(g_cooldown > 0) g_cooldown--;
@@ -292,7 +295,7 @@ int GenerateSignal(string &sig_type)
    // v17.0: Skip RANGING if trend-only mode
    if(InpTrendOnly && g_regime == REGIME_RANGING)
    {
-      if(InpDebugLog) PrintFormat("[v17.0 SKIP] %s RANGING regime — trend only mode", _Symbol);
+      if(InpDebugLog) PrintFormat("[v17.0 SKIP] %s RANGING regime", _Symbol);
       return 0;
    }
 
@@ -350,17 +353,22 @@ int GenerateSignal(string &sig_type)
       return dir;
    }
 
-   // ─── MODE 2: MOMENTUM (optional, for RANGING if trend-only is off) ───
-   if(InpUseMomentum && g_regime == REGIME_RANGING)
+   // ─── MODE 2: MOMENTUM (all regimes) ───
+   if(InpUseMomentum)
    {
-      // EMA slope determines direction
-      double emaF_now[1], emaF_prev[1];
-      if(CopyBuffer(hEMA_Fast_Entry, 0, 1, 1, emaF_now) < 1) return 0;
-      if(CopyBuffer(hEMA_Fast_Entry, 0, 5, 1, emaF_prev) < 1) return 0;
-
       int dir = 0;
-      if(emaF_now[0] > emaF_prev[0] + 0.2 * atr[0]) dir = 1;
-      else if(emaF_now[0] < emaF_prev[0] - 0.2 * atr[0]) dir = -1;
+      if(g_regime == REGIME_BULLISH) dir = 1;
+      else if(g_regime == REGIME_BEARISH) dir = -1;
+      else if(g_regime == REGIME_RANGING)
+      {
+         // EMA slope determines direction in ranging
+         double emaF_now[1], emaF_prev[1];
+         if(CopyBuffer(hEMA_Fast_Entry, 0, 1, 1, emaF_now) < 1) return 0;
+         if(CopyBuffer(hEMA_Fast_Entry, 0, 5, 1, emaF_prev) < 1) return 0;
+
+         if(emaF_now[0] > emaF_prev[0] + InpSlopeThresh * atr[0]) dir = 1;
+         else if(emaF_now[0] < emaF_prev[0] - InpSlopeThresh * atr[0]) dir = -1;
+      }
       if(dir == 0) return 0;
 
       double session_high = iHigh(_Symbol, g_tf_entry, 1);
