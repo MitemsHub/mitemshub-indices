@@ -1,11 +1,12 @@
 //+------------------------------------------------------------------+
-//|                                            MitemshubAI_v15.mq5   |
-//|                        MITEMSHUB AI MARKET ENGINE v15             |
+//|                                          MitemshubAI_v15.1.mq5   |
+//|                        MITEMSHUB AI MARKET ENGINE v15.1           |
 //|   Regime (M15) + Pullback / Compression Breakout (M5) + ATR       |
 //|   Native indicators • Proper risk lots • Trailing option          |
+//|   v15.1: Robust ticket, real equity, multi-instance, paper mode   |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "15.00"
+#property version   "15.01"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -58,6 +59,7 @@ input int    InpWarmupBars       = 250;
 input bool   InpDrawDashboard    = true;
 input bool   InpDrawSignals      = true;
 input bool   InpLiveExecution    = true;      // false = paper simulation only
+input bool   InpAdoptOrphans     = true;      // adopt leftover positions on restart
 
 //+------------------------------------------------------------------+
 //| GLOBALS                                                            |
@@ -66,7 +68,7 @@ enum ENUM_REGIME { REGIME_BULLISH, REGIME_BEARISH, REGIME_RANGING, REGIME_HIGH_V
 
 int      hEMA_Fast_M15, hEMA_Mid_M15, hEMA_Slow_M15;
 int      hEMA_Fast_M5, hRSI_M5, hATR_M5;
-double   g_equity, g_peak_equity, g_daily_pnl;
+double   g_peak_equity, g_daily_pnl;
 datetime g_day_start = 0;
 int      g_cooldown = 0, g_consec_loss = 0;
 bool     g_paused = false;
@@ -77,9 +79,18 @@ int      g_dir = 0;
 double   g_entry = 0, g_sl = 0, g_tp = 0, g_orig_risk = 0, g_stake = 0;
 datetime g_entry_time = 0;
 int      g_bars_held = 0;
+bool     g_entry_from_be = false;   // whether SL was moved to breakeven
 
 double   atr_hist[];
 int      atr_hist_count = 0;
+
+// Paper mode state
+int      g_paper_dir = 0;
+double   g_paper_entry = 0, g_paper_sl = 0, g_paper_tp = 0;
+double   g_paper_orig_risk = 0, g_paper_stake = 0;
+int      g_paper_bars = 0;
+ulong    g_paper_ticket = 0;
+bool     g_paper_in_pos = false;
 
 // Dashboard labels
 string   dash_names[22];
@@ -89,8 +100,8 @@ string   dash_names[22];
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   g_equity = AccountInfoDouble(ACCOUNT_BALANCE);
-   g_peak_equity = g_equity;
+   g_peak_equity = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_daily_pnl = 0;
 
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(InpMaxSlippagePts);
@@ -109,16 +120,20 @@ int OnInit()
    if(hEMA_Fast_M15==INVALID_HANDLE || hEMA_Mid_M15==INVALID_HANDLE || hEMA_Slow_M15==INVALID_HANDLE ||
       hEMA_Fast_M5==INVALID_HANDLE || hRSI_M5==INVALID_HANDLE || hATR_M5==INVALID_HANDLE)
    {
-      Print("Indicator handle creation failed");
+      Print("[MITEM] Indicator handle creation failed");
       return INIT_FAILED;
    }
 
    ArrayResize(atr_hist, InpAtrLookback + 50);
    ArrayInitialize(atr_hist, 0);
 
+   // ── MULTI-INSTANCE PROTECTION: adopt or close orphan positions ──
+   AdoptOrphanPositions();
+
    if(InpDrawDashboard) CreateDashboard();
 
-   Print("MITEMSHUB AI v15 started | Risk=", InpRiskPerTrade*100, "% | Symbol=", _Symbol);
+   PrintFormat("[MITEM v15.1] Started | Risk=%.2f%% | Symbol=%s | Magic=%d | Mode=%s",
+               InpRiskPerTrade*100, _Symbol, InpMagic, InpLiveExecution?"LIVE":"PAPER");
    return INIT_SUCCEEDED;
 }
 
@@ -135,7 +150,55 @@ void OnDeinit(const int reason)
    IndicatorRelease(hATR_M5);
 
    for(int i=0; i<22; i++) ObjectDelete(0, dash_names[i]);
-   Print("MITEMSHUB AI v15 stopped. Final equity: ", g_equity);
+   Print("[MITEM] v15.1 stopped. Reason=", reason);
+}
+
+//+------------------------------------------------------------------+
+//| Adopt or close orphan positions from previous session              |
+//+------------------------------------------------------------------+
+void AdoptOrphanPositions()
+{
+   int found = 0;
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      if(PositionGetTicket(i) == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+
+      // Found an orphan position from our EA
+      if(InpAdoptOrphans)
+      {
+         g_ticket = PositionGetInteger(POSITION_TICKET);
+         g_dir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+         g_entry = PositionGetDouble(POSITION_PRICE_OPEN);
+         g_sl = PositionGetDouble(POSITION_SL);
+         g_tp = PositionGetDouble(POSITION_TP);
+         g_entry_time = (datetime)PositionGetInteger(POSITION_TIME);
+         g_bars_held = 0;
+         g_entry_from_be = (g_dir > 0 && g_sl >= g_entry) || (g_dir < 0 && g_sl <= g_entry);
+
+         // Reconstruct risk from current SL distance
+         double current_sl_dist = MathAbs(g_entry - g_sl);
+         g_orig_risk = current_sl_dist;
+         g_stake = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPerTrade;
+
+         PrintFormat("[MITEM] ADOPTED orphan position: ticket=%d dir=%s entry=%.5f SL=%.5f TP=%.5f",
+                     g_ticket, g_dir>0?"BUY":"SELL", g_entry, g_sl, g_tp);
+         found++;
+      }
+      else
+      {
+         // Close orphan positions
+         if(trade.PositionClose(PositionGetInteger(POSITION_TICKET)))
+         {
+            PrintFormat("[MITEM] CLOSED orphan position: ticket=%d",
+                        PositionGetInteger(POSITION_TICKET));
+            found++;
+         }
+      }
+   }
+   if(found > 0)
+      PrintFormat("[MITEM] Adopted/closed %d orphan position(s)", found);
 }
 
 //+------------------------------------------------------------------+
@@ -152,35 +215,128 @@ void OnTick()
    }
    last_bar = cur_bar;
 
-   // Update equity
-   g_equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   if(g_equity > g_peak_equity) g_peak_equity = g_equity;
-
    // Daily reset
    datetime ds = TimeCurrent() - (TimeCurrent() % 86400);
-   if(ds != g_day_start) { g_day_start = ds; g_daily_pnl = 0; }
+   if(ds != g_day_start) { g_day_start = ds; g_daily_pnl = 0; g_paused = false; g_consec_loss = 0; }
 
    if(g_cooldown > 0) g_cooldown--;
 
-   // Manage open position
-   if(g_ticket > 0 && PositionSelectByTicket(g_ticket))
+   // ── LIVE MODE ──
+   if(InpLiveExecution)
    {
-      ManagePosition();
+      // Verify our tracked ticket still exists
+      if(g_ticket > 0)
+      {
+         if(!PositionSelectByTicket(g_ticket))
+         {
+            // Position was closed (SL/TP hit by broker, or manual close)
+            // Detect what happened by checking recent deals
+            RecoverClosedPosition();
+         }
+         else
+         {
+            // Position exists — manage it
+            ManagePosition();
+         }
+      }
+
+      // Entry logic only if flat
+      if(g_ticket == 0 && !g_paused && Bars(_Symbol, PERIOD_M5) >= InpWarmupBars && g_cooldown == 0)
+      {
+         string sig_type = "";
+         int direction = GenerateSignal(sig_type);
+         if(direction != 0) OpenTrade(direction, sig_type);
+      }
    }
+   // ── PAPER MODE ──
    else
    {
-      g_ticket = 0; // cleaned
-   }
+      if(g_paper_in_pos)
+      {
+         ManagePaperPosition();
+      }
 
-   // Entry logic only if flat
-   if(g_ticket == 0 && !g_paused && Bars(_Symbol, PERIOD_M5) >= InpWarmupBars && g_cooldown == 0)
-   {
-      string sig_type = "";
-      int direction = GenerateSignal(sig_type);
-      if(direction != 0) OpenTrade(direction, sig_type);
+      if(!g_paper_in_pos && !g_paused && Bars(_Symbol, PERIOD_M5) >= InpWarmupBars && g_cooldown == 0)
+      {
+         string sig_type = "";
+         int direction = GenerateSignal(sig_type);
+         if(direction != 0) OpenPaperTrade(direction, sig_type);
+      }
    }
 
    if(InpDrawDashboard) UpdateDashboard();
+}
+
+//+------------------------------------------------------------------+
+//| RECOVER CLOSED POSITION (robust ticket tracking)                  |
+//+------------------------------------------------------------------+
+void RecoverClosedPosition()
+{
+   // Check recent deal history for our magic number
+   datetime from = g_entry_time - 10;
+   datetime to = TimeCurrent() + 10;
+   if(!HistorySelect(from, to))
+   {
+      g_ticket = 0;
+      return;
+   }
+
+   double realized_pnl = 0;
+   double exit_price = 0;
+   string exit_reason = "CLOSED";
+
+   for(int i = HistoryDealsTotal()-1; i >= 0; i--)
+   {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0) continue;
+      if(HistoryDealGetInteger(deal, DEAL_MAGIC) != InpMagic) continue;
+      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol) continue;
+      if(HistoryDealGetInteger(deal, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+
+      realized_pnl = HistoryDealGetDouble(deal, DEAL_PROFIT)
+                   + HistoryDealGetDouble(deal, DEAL_COMMISSION)
+                   + HistoryDealGetDouble(deal, DEAL_SWAP);
+      exit_price = HistoryDealGetDouble(deal, DEAL_PRICE);
+
+      // Determine exit reason from deal comment or price
+      string comment = HistoryDealGetString(deal, DEAL_COMMENT);
+      if(StringFind(comment, "sl") >= 0 || StringFind(comment, "stop") >= 0)
+         exit_reason = "STOP";
+      else if(StringFind(comment, "tp") >= 0 || StringFind(comment, "target") >= 0)
+         exit_reason = "TARGET";
+      else
+         exit_reason = "BROKER";
+      break;
+   }
+
+   // Calculate R-multiple from actual SL/TP and exit price
+   double r_mult = 0;
+   if(g_orig_risk > 0)
+      r_mult = (g_dir > 0) ? (exit_price - g_entry) / g_orig_risk
+                           : (g_entry - exit_price) / g_orig_risk;
+
+   // Use broker-reported P&L (no drift)
+   double equity_now = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity_now > g_peak_equity) g_peak_equity = equity_now;
+   g_daily_pnl += realized_pnl;
+
+   if(r_mult < 0)
+   {
+      g_consec_loss++;
+      g_cooldown = InpCoolDownBars;
+   }
+   else g_consec_loss = 0;
+
+   if(g_consec_loss >= InpMaxConsecLoss) g_paused = true;
+   if(g_daily_pnl < -equity_now * InpMaxDailyLossPct) g_paused = true;
+   if((g_peak_equity - equity_now) > g_peak_equity * 0.12) g_paused = true;
+
+   PrintFormat("[MITEM v15.1] CLOSE %s R=%.3f PnL=$%.2f Equity=$%.2f (broker-reported)",
+               exit_reason, r_mult, realized_pnl, equity_now);
+
+   g_ticket = 0;
+   g_dir = 0;
+   g_entry_from_be = false;
 }
 
 //+------------------------------------------------------------------+
@@ -253,20 +409,12 @@ int GenerateSignal(string &sig_type)
       double pb = MathAbs(price - ema20[0]);
 
       if(pb < InpPullbackMin * atr[0] || pb > InpPullbackMax * atr[0]) return 0;
-
-      // Correct side of EMA
       if(dir > 0 && price > ema20[0] + 0.6*atr[0]) return 0;
       if(dir < 0 && price < ema20[0] - 0.6*atr[0]) return 0;
-
-      // RSI
       if(dir > 0 && rsi[0] > InpRsiBuyMax) return 0;
       if(dir < 0 && rsi[0] < InpRsiSellMin) return 0;
-
-      // Confirmation candle
       if(dir > 0 && body <= 0) return 0;
       if(dir < 0 && body >= 0) return 0;
-
-      // Gap filter
       if(MathAbs(body) > atr[0] * 0.7) return 0;
 
       sig_type = (dir > 0) ? "PULLBACK_LONG" : "PULLBACK_SHORT";
@@ -286,7 +434,7 @@ int GenerateSignal(string &sig_type)
       }
       if(cnt < 20) return 0;
       double avg_atr = sum / cnt;
-      if(atr_now > avg_atr * InpCompressATRMult) return 0; // not compressed
+      if(atr_now > avg_atr * InpCompressATRMult) return 0;
 
       double rh = iHigh(_Symbol, PERIOD_M5, 1);
       double rl = iLow(_Symbol, PERIOD_M5, 1);
@@ -304,11 +452,8 @@ int GenerateSignal(string &sig_type)
       else if(close < rl - InpBreakoutMin * atr_now) dir = -1;
       if(dir == 0) return 0;
 
-      // Exhaustion filter
       double candle = iHigh(_Symbol, PERIOD_M5, 1) - iLow(_Symbol, PERIOD_M5, 1);
       if(candle > atr_now * 2.2) return 0;
-
-      // RSI
       if(dir > 0 && rsi[0] < 52) return 0;
       if(dir < 0 && rsi[0] > 48) return 0;
 
@@ -319,7 +464,7 @@ int GenerateSignal(string &sig_type)
 }
 
 //+------------------------------------------------------------------+
-//| OPEN TRADE                                                         |
+//| OPEN TRADE (LIVE) — robust ticket recovery                        |
 //+------------------------------------------------------------------+
 void OpenTrade(int direction, string sig_type)
 {
@@ -331,7 +476,6 @@ void OpenTrade(int direction, string sig_type)
    double stop_dist = InpAtrStopMult * atr[0];
    double tp_dist   = InpAtrTargetMult * atr[0];
 
-   // Sanity clamps
    double max_stop = entry * 0.025;
    if(stop_dist > max_stop) stop_dist = max_stop;
    if(stop_dist < atr[0] * 0.5) stop_dist = atr[0] * 0.5;
@@ -339,8 +483,9 @@ void OpenTrade(int direction, string sig_type)
    double sl = (direction > 0) ? entry - stop_dist : entry + stop_dist;
    double tp = (direction > 0) ? entry + tp_dist   : entry - tp_dist;
 
-   // Risk-based volume
-   double risk_money = g_equity * InpRiskPerTrade;
+   // Risk-based volume using REAL account equity (no drift)
+   double equity_now = AccountInfoDouble(ACCOUNT_EQUITY);
+   double risk_money = equity_now * InpRiskPerTrade;
    double tick_val   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tick_size  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double point      = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -349,63 +494,89 @@ void OpenTrade(int direction, string sig_type)
    double risk_points = stop_dist / point;
    double vol = risk_money / (risk_points * (tick_val / (tick_size / point)));
    vol = NormalizeVolume(vol);
-
    if(vol <= 0) return;
 
-   bool ok = false;
-   if(InpLiveExecution)
-   {
-      if(direction > 0)
-         ok = trade.Buy(vol, _Symbol, entry, NormalizeDouble(sl, _Digits), NormalizeDouble(tp, _Digits), "MITEM_v15");
-      else
-         ok = trade.Sell(vol, _Symbol, entry, NormalizeDouble(sl, _Digits), NormalizeDouble(tp, _Digits), "MITEM_v15");
+   bool ok = trade.Buy(vol, _Symbol, entry, NormalizeDouble(sl, _Digits), NormalizeDouble(tp, _Digits), "MITEM_v15.1");
+   if(direction < 0)
+      ok = trade.Sell(vol, _Symbol, entry, NormalizeDouble(sl, _Digits), NormalizeDouble(tp, _Digits), "MITEM_v15.1");
 
-      if(ok)
+   if(!ok)
+   {
+      PrintFormat("[MITEM] Order FAILED: %d %s", trade.ResultRetcode(), trade.ResultComment());
+      g_cooldown = InpCoolDownBars;
+      return;
+   }
+
+   // ── ROBUST TICKET RECOVERY ──
+   // trade.ResultOrder() returns the order ticket; we need the position ticket.
+   // Strategy: try up to 3 times with increasing wait, using HistorySelect for precision.
+   ulong order_ticket = trade.ResultOrder();
+   g_ticket = 0;
+
+   for(int attempt = 0; attempt < 5; attempt++)
+   {
+      Sleep(50 + attempt * 100);  // 50ms, 150ms, 250ms, 350ms, 450ms
+
+      // Method 1: Scan open positions (fastest)
+      for(int i = PositionsTotal()-1; i >= 0; i--)
       {
-         g_ticket = trade.ResultOrder();
-         // Wait a moment and get real ticket from position
-         Sleep(100);
-         for(int i=PositionsTotal()-1; i>=0; i--)
-         {
-            if(PositionGetTicket(i) > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagic &&
-               PositionGetString(POSITION_SYMBOL) == _Symbol)
-            {
-               g_ticket = PositionGetInteger(POSITION_TICKET);
-               break;
-            }
-         }
+         ulong pos = PositionGetTicket(i);
+         if(pos == 0) continue;
+         if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+         if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY && direction < 0) continue;
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL && direction > 0) continue;
+
+         // Verify it's recent (within last 5 seconds)
+         datetime pos_time = (datetime)PositionGetInteger(POSITION_TIME);
+         if((int)(TimeCurrent() - pos_time) > 5) continue;
+
+         g_ticket = pos;
+         break;
       }
-      else
+      if(g_ticket > 0) break;
+
+      // Method 2: Check deal history (more reliable for fill confirmation)
+      if(!HistorySelect(TimeCurrent() - 10, TimeCurrent() + 10)) continue;
+      for(int i = HistoryDealsTotal()-1; i >= 0; i--)
       {
-         Print("Order failed: ", trade.ResultRetcode(), " ", trade.ResultComment());
-         g_cooldown = InpCoolDownBars;
-         return;
+         ulong deal = HistoryDealGetTicket(i);
+         if(deal == 0) continue;
+         if(HistoryDealGetInteger(deal, DEAL_MAGIC) != InpMagic) continue;
+         if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol) continue;
+         if(HistoryDealGetInteger(deal, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
+
+         datetime deal_time = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+         if((int)(TimeCurrent() - deal_time) > 5) continue;
+
+         g_ticket = HistoryDealGetInteger(deal, DEAL_ORDER);
+         break;
       }
+      if(g_ticket > 0) break;
    }
-   else
+
+   if(g_ticket == 0)
    {
-      // Paper mode
-      g_ticket = (ulong)TimeCurrent(); // fake
-      ok = true;
+      Print("[MITEM] WARNING: Could not recover position ticket after 5 attempts. Will detect on next tick.");
+      // Set a fallback — the next OnTick will either find the position or report it closed
+      g_ticket = order_ticket;
    }
 
-   if(ok)
-   {
-      g_dir = direction;
-      g_entry = entry;
-      g_sl = sl;
-      g_tp = tp;
-      g_orig_risk = stop_dist;
-      g_stake = risk_money;
-      g_entry_time = TimeCurrent();
-      g_bars_held = 0;
+   g_dir = direction;
+   g_entry = entry;
+   g_sl = sl;
+   g_tp = tp;
+   g_orig_risk = stop_dist;
+   g_stake = risk_money;
+   g_entry_time = TimeCurrent();
+   g_bars_held = 0;
+   g_entry_from_be = false;
 
-      if(InpDrawSignals)
-         DrawArrow(direction, TimeCurrent(), entry, sig_type);
+   if(InpDrawSignals)
+      DrawArrow(direction, TimeCurrent(), entry, sig_type);
 
-      PrintFormat("[MITEM v15] %s %s @%.5f SL=%.5f TP=%.5f Vol=%.2f ATR=%.5f Regime=%s",
-                  sig_type, direction>0?"BUY":"SELL", entry, sl, tp, vol, atr[0], RegimeToStr(g_regime));
-   }
+   PrintFormat("[MITEM v15.1] %s %s @%.5f SL=%.5f TP=%.5f Vol=%.2f ATR=%.5f Regime=%s ticket=%d",
+               sig_type, direction>0?"BUY":"SELL", entry, sl, tp, vol, atr[0], RegimeToStr(g_regime), g_ticket);
 }
 
 double NormalizeVolume(double vol)
@@ -420,7 +591,7 @@ double NormalizeVolume(double vol)
 }
 
 //+------------------------------------------------------------------+
-//| MANAGE POSITION                                                    |
+//| MANAGE LIVE POSITION                                               |
 //+------------------------------------------------------------------+
 void ManagePosition()
 {
@@ -430,7 +601,6 @@ void ManagePosition()
    CopyBuffer(hATR_M5, 0, 0, 1, atr);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double price = (g_dir > 0) ? bid : ask;
 
    // Time exit
    if(g_bars_held >= InpHoldBars)
@@ -439,7 +609,7 @@ void ManagePosition()
       return;
    }
 
-   // SL / TP check (broker may already close, but we track)
+   // SL / TP check (broker may already close, but we track proactively)
    if(g_dir > 0)
    {
       if(bid <= g_sl) { ClosePosition("STOP"); return; }
@@ -452,32 +622,40 @@ void ManagePosition()
    }
 
    // Breakeven
-   if(InpUseBreakeven)
+   if(InpUseBreakeven && !g_entry_from_be)
    {
-      double be_trigger = InpBETriggerATR * atr[0];
+      double be_trigger = InpBETriggerATR * (atr[0] > 0 ? atr[0] : 1);
       if(g_dir > 0 && bid >= g_entry + be_trigger && g_sl < g_entry)
       {
-         double new_sl = g_entry + 2 * _Point;
+         double new_sl = NormalizeDouble(g_entry + 2 * _Point, _Digits);
          if(trade.PositionModify(g_ticket, new_sl, g_tp))
+         {
             g_sl = new_sl;
+            g_entry_from_be = true;
+            PrintFormat("[MITEM] BREAKEVEN moved SL to %.5f", new_sl);
+         }
       }
       if(g_dir < 0 && ask <= g_entry - be_trigger && g_sl > g_entry)
       {
-         double new_sl = g_entry - 2 * _Point;
+         double new_sl = NormalizeDouble(g_entry - 2 * _Point, _Digits);
          if(trade.PositionModify(g_ticket, new_sl, g_tp))
+         {
             g_sl = new_sl;
+            g_entry_from_be = true;
+            PrintFormat("[MITEM] BREAKEVEN moved SL to %.5f", new_sl);
+         }
       }
    }
 
    // Trailing
-   if(InpUseTrailing)
+   if(InpUseTrailing && atr[0] > 0)
    {
       double trail_start = InpTrailStartATR * atr[0];
       double trail_dist  = InpTrailDistATR * atr[0];
 
       if(g_dir > 0 && bid >= g_entry + trail_start)
       {
-         double new_sl = bid - trail_dist;
+         double new_sl = NormalizeDouble(bid - trail_dist, _Digits);
          if(new_sl > g_sl && new_sl > g_entry)
          {
             if(trade.PositionModify(g_ticket, new_sl, g_tp))
@@ -486,7 +664,7 @@ void ManagePosition()
       }
       if(g_dir < 0 && ask <= g_entry - trail_start)
       {
-         double new_sl = ask + trail_dist;
+         double new_sl = NormalizeDouble(ask + trail_dist, _Digits);
          if(new_sl < g_sl && new_sl < g_entry)
          {
             if(trade.PositionModify(g_ticket, new_sl, g_tp))
@@ -496,20 +674,62 @@ void ManagePosition()
    }
 }
 
+//+------------------------------------------------------------------+
+//| CLOSE LIVE POSITION — use broker P&L, not manual tracking         |
+//+------------------------------------------------------------------+
 void ClosePosition(string reason)
 {
+   if(g_ticket == 0) return;
+
+   bool ok = trade.PositionClose(g_ticket);
+   if(!ok)
+   {
+      PrintFormat("[MITEM] Close FAILED: %d %s", trade.ResultRetcode(), trade.ResultComment());
+      return;
+   }
+
+   // Use REAL account equity for tracking (zero drift)
+   Sleep(50);
+   double equity_now = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   // Read actual P&L from deal history
+   double realized_pnl = 0;
+   if(HistorySelect(g_entry_time - 10, TimeCurrent() + 10))
+   {
+      for(int i = HistoryDealsTotal()-1; i >= 0; i--)
+      {
+         ulong deal = HistoryDealGetTicket(i);
+         if(deal == 0) continue;
+         if(HistoryDealGetInteger(deal, DEAL_MAGIC) != InpMagic) continue;
+         if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol) continue;
+         if(HistoryDealGetInteger(deal, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+
+         realized_pnl = HistoryDealGetDouble(deal, DEAL_PROFIT)
+                      + HistoryDealGetDouble(deal, DEAL_COMMISSION)
+                      + HistoryDealGetDouble(deal, DEAL_SWAP);
+         break;
+      }
+   }
+
+   // Fallback: calculate from price if deal history unavailable
+   if(realized_pnl == 0)
+   {
+      double exit_price = (g_dir > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                      : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double r_mult = (g_dir > 0) ? (exit_price - g_entry) / g_orig_risk
+                                  : (g_entry - exit_price) / g_orig_risk;
+      realized_pnl = g_stake * r_mult;
+   }
+
+   // Calculate R-multiple from entry and exit
    double exit_price = (g_dir > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
                                    : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double r_mult = (g_dir > 0) ? (exit_price - g_entry) / g_orig_risk
-                               : (g_entry - exit_price) / g_orig_risk;
-   double pnl = g_stake * r_mult;
+   double r_mult = (g_orig_risk > 0) ?
+      ((g_dir > 0) ? (exit_price - g_entry) / g_orig_risk
+                   : (g_entry - exit_price) / g_orig_risk) : 0;
 
-   if(InpLiveExecution && g_ticket > 0)
-      trade.PositionClose(g_ticket);
-
-   g_equity += pnl;
-   g_daily_pnl += pnl;
-   if(g_equity > g_peak_equity) g_peak_equity = g_equity;
+   if(equity_now > g_peak_equity) g_peak_equity = equity_now;
+   g_daily_pnl += realized_pnl;
 
    if(r_mult < 0)
    {
@@ -519,13 +739,160 @@ void ClosePosition(string reason)
    else g_consec_loss = 0;
 
    if(g_consec_loss >= InpMaxConsecLoss) g_paused = true;
-   if(g_daily_pnl < -g_equity * InpMaxDailyLossPct) g_paused = true;
-   if((g_peak_equity - g_equity) > g_peak_equity * 0.12) g_paused = true;
+   if(g_daily_pnl < -equity_now * InpMaxDailyLossPct) g_paused = true;
+   if((g_peak_equity - equity_now) > g_peak_equity * 0.12) g_paused = true;
 
-   PrintFormat("[MITEM v15] CLOSE %s R=%.3f PnL=$%.2f Equity=$%.2f", reason, r_mult, pnl, g_equity);
+   PrintFormat("[MITEM v15.1] CLOSE %s R=%.3f PnL=$%.2f Equity=$%.2f (broker)",
+               reason, r_mult, realized_pnl, equity_now);
 
    g_ticket = 0;
    g_dir = 0;
+   g_entry_from_be = false;
+}
+
+//+------------------------------------------------------------------+
+//| PAPER MODE — realistic simulation with spread/slippage            |
+//+------------------------------------------------------------------+
+void OpenPaperTrade(int direction, string sig_type)
+{
+   double atr[1];
+   if(CopyBuffer(hATR_M5, 0, 1, 1, atr) < 1) return;
+
+   double raw_entry = (direction > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                                     : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // Simulate spread cost
+   double spread_pts = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double spread_cost = spread_pts * point;
+
+   // Simulate slippage (0 to max_slippage, random)
+   double slippage = MathRand() % InpMaxSlippagePts * point;
+
+   // Apply spread and slippage to entry
+   double entry = raw_entry + (spread_cost / 2 + slippage) * direction;
+
+   double stop_dist = InpAtrStopMult * atr[0];
+   double tp_dist   = InpAtrTargetMult * atr[0];
+
+   double max_stop = entry * 0.025;
+   if(stop_dist > max_stop) stop_dist = max_stop;
+   if(stop_dist < atr[0] * 0.5) stop_dist = atr[0] * 0.5;
+
+   double sl = (direction > 0) ? entry - stop_dist : entry + stop_dist;
+   double tp = (direction > 0) ? entry + tp_dist   : entry - tp_dist;
+
+   double equity_now = AccountInfoDouble(ACCOUNT_EQUITY);
+   double risk_money = equity_now * InpRiskPerTrade;
+   double tick_val   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tick_size  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tick_size <= 0 || tick_val <= 0) return;
+
+   double risk_points = stop_dist / point;
+   double vol = risk_money / (risk_points * (tick_val / (tick_size / point)));
+   vol = NormalizeVolume(vol);
+   if(vol <= 0) return;
+
+   g_paper_in_pos = true;
+   g_paper_dir = direction;
+   g_paper_entry = entry;
+   g_paper_sl = sl;
+   g_paper_tp = tp;
+   g_paper_orig_risk = stop_dist;
+   g_paper_stake = risk_money;
+   g_paper_bars = 0;
+   g_paper_ticket++;
+
+   if(InpDrawSignals)
+      DrawArrow(direction, TimeCurrent(), entry, sig_type);
+
+   PrintFormat("[MITEM v15.1 PAPER] %s %s @%.5f SL=%.5f TP=%.5f Vol=%.2f ATR=%.5f Regime=%s",
+               sig_type, direction>0?"BUY":"SELL", entry, sl, tp, vol, atr[0], RegimeToStr(g_regime));
+}
+
+void ManagePaperPosition()
+{
+   g_paper_bars++;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double atr_val[1];
+   CopyBuffer(hATR_M5, 0, 0, 1, atr_val);
+   double atr_now = (atr_val[0] > 0) ? atr_val[0] : 1;
+
+   // Check exits
+   bool closed = false;
+   double exit_price = 0;
+   string reason = "";
+
+   if(g_paper_bars >= InpHoldBars)
+   {
+      exit_price = bid;
+      reason = "TIME";
+      closed = true;
+   }
+   else if(g_paper_dir > 0 && bid <= g_paper_sl)
+   {
+      exit_price = g_paper_sl;
+      reason = "STOP";
+      closed = true;
+   }
+   else if(g_paper_dir > 0 && bid >= g_paper_tp)
+   {
+      exit_price = g_paper_tp;
+      reason = "TARGET";
+      closed = true;
+   }
+   else if(g_paper_dir < 0 && bid >= g_paper_sl)
+   {
+      exit_price = g_paper_sl;
+      reason = "STOP";
+      closed = true;
+   }
+   else if(g_paper_dir < 0 && bid <= g_paper_tp)
+   {
+      exit_price = g_paper_tp;
+      reason = "TARGET";
+      closed = true;
+   }
+
+   // Trailing
+   if(!closed && InpUseTrailing && atr_now > 0)
+   {
+      double trail_start = InpTrailStartATR * atr_now;
+      double trail_dist  = InpTrailDistATR * atr_now;
+
+      if(g_paper_dir > 0 && bid >= g_paper_entry + trail_start)
+      {
+         double new_sl = bid - trail_dist;
+         if(new_sl > g_paper_sl && new_sl > g_paper_entry)
+            g_paper_sl = new_sl;
+      }
+      else if(g_paper_dir < 0 && bid <= g_paper_entry - trail_start)
+      {
+         double new_sl = bid + trail_dist;
+         if(new_sl < g_paper_sl && new_sl < g_paper_entry)
+            g_paper_sl = new_sl;
+      }
+   }
+
+   if(closed)
+   {
+      double r_mult = (g_paper_dir > 0) ? (exit_price - g_paper_entry) / g_paper_orig_risk
+                                         : (g_paper_entry - exit_price) / g_paper_orig_risk;
+      double pnl = g_paper_stake * r_mult;
+
+      if(r_mult < 0)
+      {
+         g_consec_loss++;
+         g_cooldown = InpCoolDownBars;
+      }
+      else g_consec_loss = 0;
+
+      if(g_consec_loss >= InpMaxConsecLoss) g_paused = true;
+
+      PrintFormat("[MITEM v15.1 PAPER] CLOSE %s R=%.3f PnL=$%.2f", reason, r_mult, pnl);
+
+      g_paper_in_pos = false;
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -552,10 +919,11 @@ void UpdateDashboard()
    CopyBuffer(hATR_M5, 0, 0, 1, atr);
    CopyBuffer(hRSI_M5, 0, 0, 1, rsi);
    double pct = CalcATRPercentile(atr[0]);
+   double equity_now = AccountInfoDouble(ACCOUNT_EQUITY);
 
    string lines[22];
-   lines[0]  = "=== MITEMSHUB AI v15 ===";
-   lines[1]  = "Equity: $" + DoubleToString(g_equity, 2);
+   lines[0]  = "=== MITEMSHUB AI v15.1 ===";
+   lines[1]  = "Equity: $" + DoubleToString(equity_now, 2);
    lines[2]  = "Regime: " + RegimeToStr(g_regime);
    lines[3]  = "ATR %ile: " + DoubleToString(pct, 0) + "%";
    lines[4]  = "RSI: " + DoubleToString(rsi[0], 1);
@@ -568,13 +936,15 @@ void UpdateDashboard()
    lines[11] = "SL: " + DoubleToString(InpAtrStopMult, 1) + "x ATR";
    lines[12] = "TP: " + DoubleToString(InpAtrTargetMult, 1) + "x ATR";
    lines[13] = "Trail: " + (InpUseTrailing ? "ON" : "OFF");
-   lines[14] = "Open: " + (g_ticket > 0 ? "YES" : "NO");
-   lines[15] = "Bars Held: " + IntegerToString(g_bars_held);
+   bool has_pos = InpLiveExecution ? (g_ticket > 0) : g_paper_in_pos;
+   lines[14] = "Open: " + (has_pos ? "YES" : "NO");
+   int bars = InpLiveExecution ? g_bars_held : g_paper_bars;
+   lines[15] = "Bars Held: " + IntegerToString(bars);
    lines[16] = "Peak: $" + DoubleToString(g_peak_equity, 2);
-   lines[17] = "DD: " + DoubleToString((g_peak_equity-g_equity)/g_peak_equity*100, 2) + "%";
+   lines[17] = "DD: " + DoubleToString((g_peak_equity>0) ? (g_peak_equity-equity_now)/g_peak_equity*100 : 0, 2) + "%";
    lines[18] = "Symbol: " + _Symbol;
    lines[19] = "Magic: " + IntegerToString(InpMagic);
-   lines[20] = "v15: Native + Risk Lots";
+   lines[20] = "v15.1: Robust Ticket + Real Equity";
    lines[21] = "Best on: Volatility 75";
 
    for(int i=0; i<22; i++)
@@ -616,5 +986,3 @@ void DrawArrow(int dir, datetime t, double price, string tag)
    ObjectSetInteger(0, name, OBJPROP_COLOR, dir>0 ? clrLime : clrRed);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
 }
-
-//+------------------------------------------------------------------+
