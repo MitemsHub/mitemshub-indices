@@ -1,8 +1,8 @@
 """
-MITEMSHUB AI v16 — Walk-Forward Backtest & Optimization
-Matches MitemshubAI_v16_5.mq5 EA logic:
-  Multi-symbol • Session Filter • Regime + Pullback + Trailing
-  Updated: risk 0.4%, ATR stop 1.8, trailing 0.8/0.7, spread filter.
+MITEMSHUB AI v16.7 — Walk-Forward Backtest & Optimization
+Matches MitemshubAI.mq5 EA logic (v16.7):
+  Auto-TF • Wide Pullback • Momentum • Regime + Trailing
+  v16.7: wider entry (0.10-3.5 ATR), momentum mode, removed body filter.
 """
 import MetaTrader5 as mt5
 import numpy as np
@@ -23,43 +23,31 @@ SYMBOLS = {
     },
 }
 
-# ─── v16.5 DEFAULT EA PARAMETERS (matching MitemshubAI_v16_5.mq5) ──
+# ─── v16.7 DEFAULT EA PARAMETERS (matching MitemshubAI.mq5) ────────
 DEFAULTS = {
     'ema_fast': 20, 'ema_mid': 50, 'ema_slow': 100,
-    'pullback_min': 0.20, 'pullback_max': 2.2,   # v16.6: wider entry
-    'rsi_period': 14, 'rsi_buy_max': 58, 'rsi_sell_min': 42,
+    'pullback_min': 0.10, 'pullback_max': 3.5,     # v16.7: wider range
+    'rsi_period': 14, 'rsi_buy_max': 62, 'rsi_sell_min': 38,  # v16.7: wider RSI
     'atr_period': 14, 'atr_lookback': 200,
-    'atr_low_pct': 12, 'atr_high_pct': 88,
-    'min_atr_points': 0.0,          # v16.5: min ATR in points (0 = disabled)
-    'compress_bars': 18, 'compress_atr_mult': 0.65, 'breakout_min': 0.12,
-    'risk_pct': 0.004,              # v16.5: 0.4% per trade (was 0.5%)
-    'atr_stop': 1.8,                # v16.5: default 1.8 (was 2.0)
+    'atr_low_pct': 8, 'atr_high_pct': 92,           # v16.7: wider ATR band
+    'compress_bars': 18, 'compress_atr_mult': 0.70, 'breakout_min': 0.10,  # v16.7: easier
+    'risk_pct': 0.004,              # 0.4% per trade
+    'atr_stop': 1.6,                # optimized for V100
     'atr_target': 2.8,
-    'hold_bars': 14, 'cooldown': 3, 'max_consec_loss': 3,  # v16.6: faster recovery
+    'hold_bars': 14, 'cooldown': 3, 'max_consec_loss': 3,
     'max_daily_loss_pct': 0.025,
-    'use_trailing': True, 'trail_start': 0.8, 'trail_dist': 0.7,  # v16.5: tighter
+    'use_trailing': True, 'trail_start': 0.6, 'trail_dist': 0.7,
     'use_be': True, 'be_trigger': 1.0,
-    'max_spread_pts': 0,            # v16.5: live-only filter; backtest uses entry spread cost instead
-    'use_session_filter': False,     # v16.5: session filter (off by default)
-    'session_start_hour': 0,
-    'session_end_hour': 24,
-}
-
-# ─── PARAMETER GRID FOR OPTIMIZATION (v16.5 range) ──────────────────
-GRID = {
-    'atr_stop':        [1.2, 1.4, 1.6, 1.8, 2.0],
-    'atr_target':      [1.8, 2.0, 2.4, 2.8, 3.0],
-    'pullback_min':    [0.15, 0.25, 0.35],
-    'pullback_max':    [1.4, 1.8, 2.2],
-    'rsi_buy_max':     [55, 58, 62],
-    'rsi_sell_min':    [38, 42, 45],
-    'trail_start':     [0.6, 0.8, 1.0, 1.2],
-    'trail_dist':      [0.5, 0.7, 0.9, 1.1],
+    # v16.7: momentum params
+    'use_momentum': True,
+    'mom_lookback': 20,
+    'mom_min_move': 1.5,
+    'mom_rsi_thresh': 40,
+    'mom_rsi_thresh_sell': 60,
 }
 
 
 def ema(data, period):
-    """Exponential moving average."""
     result = np.full(len(data), np.nan)
     if len(data) < period:
         return result
@@ -71,7 +59,6 @@ def ema(data, period):
 
 
 def rsi(close, period):
-    """Relative strength index."""
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
@@ -90,7 +77,6 @@ def rsi(close, period):
 
 
 def atr(high, low, close, period):
-    """Average true range."""
     tr = np.maximum(high - low,
                     np.maximum(np.abs(high - np.roll(close, 1)),
                                np.abs(low - np.roll(close, 1))))
@@ -106,7 +92,6 @@ def atr(high, low, close, period):
 
 
 def calc_atr_percentile(current, atr_history, lookback=200):
-    """ATR percentile over lookback window."""
     valid = atr_history[~np.isnan(atr_history)]
     if len(valid) < 50:
         return 50.0
@@ -114,22 +99,11 @@ def calc_atr_percentile(current, atr_history, lookback=200):
     return float(np.sum(current > recent) / len(recent) * 100.0)
 
 
-def is_in_session(bar_time, start_hour, end_hour):
-    """Check if a bar's hour falls within the trading session (UTC)."""
-    hour = bar_time.hour
-    if start_hour < end_hour:
-        return start_hour <= hour < end_hour
-    else:  # overnight session
-        return hour >= start_hour or hour < end_hour
-
-
 def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
-    """Run v16 backtest on given data with given parameters.
-    Matches MitemshubAI_v16_5.mq5 logic exactly."""
+    """Run v16.7 backtest. Matches MitemshubAI.mq5 v16.7 exactly."""
     close5 = m5_data['close']
     high5 = m5_data['high']
     low5 = m5_data['low']
-    time5 = m5_data['time']  # numpy datetime64 array
 
     close15 = m15_data['close']
 
@@ -144,7 +118,7 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
     rsi_5 = rsi(close5, p['rsi_period'])
     atr_5 = atr(high5, low5, close5, p['atr_period'])
 
-    # Map M5 bars to M15 bars (3 M5 bars per M15 bar)
+    # Map M5 bars to M15 bars
     m5_to_m15 = np.arange(len(close5)) // 3
 
     trades = []
@@ -155,12 +129,7 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
     paused = False
     daily_pnl = 0.0
     day_start_bar = 0
-
-    # ATR history for percentile (matching EA: atr_hist[300])
     atr_hist = []
-    # v16.6: support multiple concurrent positions
-    max_positions = 2
-    positions = []  # list of dicts: {dir, entry, sl, tp, orig_risk, stake, bars, regime, sig}
 
     for i in range(start_idx, len(close5)):
         if np.isnan(atr_5[i]) or np.isnan(ema_fast_5[i]) or np.isnan(rsi_5[i]):
@@ -169,10 +138,8 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
         if m15_idx < 1 or np.isnan(ema_fast_15[m15_idx]):
             continue
 
-        # ─── DAILY RESET (matching EA: per-day, not per-bar) ───
-        # EA uses TimeCurrent() - (TimeCurrent() % 86400) for day boundaries
-        # In backtest we approximate by counting bars_per_day
-        bars_per_day = 288  # 24h * 60 / 5
+        # ─── DAILY RESET ───
+        bars_per_day = 288
         if (i - day_start_bar) >= bars_per_day:
             daily_pnl = 0.0
             day_start_bar = i
@@ -182,45 +149,26 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
         if cooldown > 0:
             cooldown -= 1
 
-        # ─── SESSION FILTER (v16.5 new) ───
-        if p['use_session_filter'] and len(time5) > i:
-            bar_dt = np.datetime64(time5[i], 's').astype(datetime)
-            if not is_in_session(bar_dt, p['session_start_hour'], p['session_end_hour']):
-                continue
-
         # ─── ATR PERCENTILE ───
-        # EA stores in fixed 300-element array; backtest uses dynamic list
         atr_hist.append(atr_5[i])
         if len(atr_hist) > p['atr_lookback'] + 50:
             atr_hist = atr_hist[-(p['atr_lookback'] + 50):]
         atr_pct = calc_atr_percentile(atr_5[i], np.array(atr_hist), p['atr_lookback'])
 
-        # ─── SPREAD FILTER (v16.5 new, live-only) ───
-        # The EA checks live spread via SymbolInfoInteger(SYMBOL_SPREAD).
-        # Backtest can't simulate variable per-bar spread, so we skip this
-        # filter and model spread cost via entry adjustment instead.
-        # Set max_spread_pts > 0 to enable a rough backtest approximation.
-        if p['max_spread_pts'] > 0:
-            spread_pts = specs['spread_pts']
-            if spread_pts > p['max_spread_pts']:
-                continue
-
-        # ─── MANAGE POSITIONS (v16.6: multi-position) ───
-        closed_indices = []
-        for pi, pos in enumerate(positions):
+        # ─── MANAGE POSITIONS ───
+        # (Single position matching EA v16.7)
+        # Check for open position exit
+        if trades and trades[-1].get('exit') is None:
+            pos = trades[-1]
             pos['bars'] += 1
             bid = close5[i]
-            ask = close5[i]
-
             closed = False
             exit_reason = ''
             exit_price = 0.0
 
-            # Time exit
             if pos['bars'] >= p['hold_bars']:
                 closed, exit_reason, exit_price = True, 'TIME', close5[i]
 
-            # SL / TP check
             if not closed:
                 if pos['dir'] > 0:
                     if bid <= pos['sl']:
@@ -228,20 +176,18 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
                     elif bid >= pos['tp']:
                         closed, exit_reason, exit_price = True, 'TARGET', pos['tp']
                 else:
-                    if ask >= pos['sl']:
+                    if bid >= pos['sl']:
                         closed, exit_reason, exit_price = True, 'STOP', pos['sl']
-                    elif ask <= pos['tp']:
+                    elif bid <= pos['tp']:
                         closed, exit_reason, exit_price = True, 'TARGET', pos['tp']
 
-            # Breakeven
             if not closed and p['use_be']:
                 be_trigger = p['be_trigger'] * atr_5[i]
                 if pos['dir'] > 0 and bid >= pos['entry'] + be_trigger and pos['sl'] < pos['entry']:
                     pos['sl'] = pos['entry'] + 2 * specs['point']
-                elif pos['dir'] < 0 and ask <= pos['entry'] - be_trigger and pos['sl'] > pos['entry']:
+                elif pos['dir'] < 0 and bid <= pos['entry'] - be_trigger and pos['sl'] > pos['entry']:
                     pos['sl'] = pos['entry'] - 2 * specs['point']
 
-            # Trailing
             if not closed and p['use_trailing']:
                 trail_start = p['trail_start'] * atr_5[i]
                 trail_dist = p['trail_dist'] * atr_5[i]
@@ -249,8 +195,8 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
                     new_sl = bid - trail_dist
                     if new_sl > pos['sl'] and new_sl > pos['entry']:
                         pos['sl'] = new_sl
-                elif pos['dir'] < 0 and ask <= pos['entry'] - trail_start:
-                    new_sl = ask + trail_dist
+                elif pos['dir'] < 0 and bid <= pos['entry'] - trail_start:
+                    new_sl = bid + trail_dist
                     if new_sl < pos['sl'] and new_sl > pos['entry']:
                         pos['sl'] = new_sl
 
@@ -266,13 +212,11 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
                 if equity > peak_equity:
                     peak_equity = equity
 
-                trades.append({
-                    'entry': pos['entry'], 'exit': exit_price, 'dir': pos['dir'],
-                    'reason': exit_reason, 'r_mult': r_mult, 'pnl': pnl,
-                    'bars': pos['bars'], 'equity': equity,
-                    'atr_pct': atr_pct, 'regime': pos['regime'],
-                    'signal_type': pos['sig'],
-                })
+                pos['exit'] = exit_price
+                pos['reason'] = exit_reason
+                pos['r_mult'] = r_mult
+                pos['pnl'] = pnl
+                pos['equity'] = equity
 
                 if r_mult < 0:
                     consec_loss += 1
@@ -280,7 +224,6 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
                 else:
                     consec_loss = 0
 
-                # v16.6: 3-circuit-breaker
                 if consec_loss >= p['max_consec_loss']:
                     paused = True
                 if daily_pnl < -equity * p['max_daily_loss_pct']:
@@ -288,25 +231,18 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
                 if (peak_equity - equity) > peak_equity * 0.12:
                     paused = True
 
-                closed_indices.append(pi)
-
-        # Remove closed positions (reverse order)
-        for pi in reversed(closed_indices):
-            positions.pop(pi)
-
-        # ─── ENTRY LOGIC (v16.6: multi-position) ───
-        if paused or cooldown > 0:
+        # ─── ENTRY LOGIC (v16.7) ───
+        has_open = trades and trades[-1].get('exit') is None
+        if has_open or paused or cooldown > 0:
             continue
-        if len(positions) >= max_positions:
-            continue  # Max concurrent positions reached
 
-        # ATR percentile filters (matching EA: pct < 12 → NO_TRADE, pct > 88 → HIGH_VOL)
+        # ATR percentile filters (v16.7: 8-92%)
         if atr_pct < p['atr_low_pct']:
             continue
         if atr_pct > p['atr_high_pct']:
-            continue  # HIGH_VOL regime → no trade
+            continue
 
-        # Regime classification (M15) — matching EA exactly
+        # Regime classification (M15)
         if np.isnan(ema_mid_15[m15_idx]) or np.isnan(ema_slow_15[m15_idx]):
             continue
 
@@ -321,56 +257,71 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
         elif ef < em < es and m15_close < ef:
             regime = 'BEARISH'
 
-        # ─── MODE 1: TREND PULLBACK (matching EA exactly) ───
+        direction = 0
+        sig_type = ''
+
+        # ─── MODE 1: TREND PULLBACK (v16.7: wider, no body filter) ───
         if regime in ('BULLISH', 'BEARISH'):
             direction = 1 if regime == 'BULLISH' else -1
             pb = abs(close5[i] - ema_fast_5[i])
 
-            # Pullback range filter
+            # v16.7: wider pullback range (0.10-3.5 ATR)
             if pb < p['pullback_min'] * atr_5[i] or pb > p['pullback_max'] * atr_5[i]:
-                continue
+                direction = 0  # reject
 
-            # Correct side of EMA (0.6 ATR from fast EMA)
-            if direction > 0 and close5[i] > ema_fast_5[i] + 0.6 * atr_5[i]:
-                continue
-            if direction < 0 and close5[i] < ema_fast_5[i] - 0.6 * atr_5[i]:
-                continue
+            # v16.7: RSI filter only (removed 0.6 ATR cap)
+            if direction != 0 and direction > 0 and rsi_5[i] > p['rsi_buy_max']:
+                direction = 0
+            if direction != 0 and direction < 0 and rsi_5[i] < p['rsi_sell_min']:
+                direction = 0
 
-            # RSI filter
-            if direction > 0 and rsi_5[i] > p['rsi_buy_max']:
-                continue
-            if direction < 0 and rsi_5[i] < p['rsi_sell_min']:
-                continue
+            # v16.7: REMOVED body direction filter
+            # v16.7: REMOVED body size filter
 
-            # Confirmation candle (body must be in direction)
+            if direction != 0:
+                sig_type = 'PULLBACK_LONG' if direction > 0 else 'PULLBACK_SHORT'
+
+        # ─── MODE 2: MOMENTUM (v16.7 NEW) ───
+        if direction == 0 and p['use_momentum'] and regime in ('BULLISH', 'BEARISH'):
+            mom_dir = 1 if regime == 'BULLISH' else -1
+
+            # Session high/low over lookback
+            lb = min(p['mom_lookback'], i)
+            session_high = np.max(high5[i - lb:i + 1])
+            session_low = np.min(low5[i - lb:i + 1])
+
+            move_up = close5[i] - session_low
+            move_down = session_high - close5[i]
+
             body = close5[i] - close5[i - 1]
-            if direction > 0 and body <= 0:
-                continue
-            if direction < 0 and body >= 0:
-                continue
 
-            # Gap filter (no large candles)
-            if abs(body) > atr_5[i] * 0.7:
-                continue
+            if mom_dir > 0 and move_up > p['mom_min_move'] * atr_5[i]:
+                if rsi_5[i] > p['mom_rsi_thresh'] and rsi_5[i] < 68 and body > 0:
+                    direction = 1
+                    sig_type = 'MOMENTUM_LONG'
 
-            sig_type = 'PULLBACK_LONG' if direction > 0 else 'PULLBACK_SHORT'
+            if mom_dir < 0 and move_down > p['mom_min_move'] * atr_5[i]:
+                if rsi_5[i] < p['mom_rsi_thresh_sell'] and rsi_5[i] > 32 and body < 0:
+                    direction = -1
+                    sig_type = 'MOMENTUM_SHORT'
 
-        # ─── MODE 2: COMPRESSION BREAKOUT (matching EA exactly) ───
-        elif regime == 'RANGING':
+        # ─── MODE 3: COMPRESSION BREAKOUT (v16.7: easier) ───
+        if direction == 0 and regime == 'RANGING':
             atr_now = atr_5[i]
-            # Average ATR over last 100 bars (matching EA: for i=1 to 100)
             start_a = max(1, i - 100)
-            # EA reads from CopyBuffer which is 1-indexed; backtest uses 0-indexed
             avg_atr = np.mean(atr_5[start_a:i]) if i > start_a else atr_now
-            if atr_now > avg_atr * p['compress_atr_mult']:
-                continue  # Not compressed
 
-            # Range over compress_bars
+            # v16.7: easier compression (0.70x)
+            if atr_now > avg_atr * p['compress_atr_mult']:
+                continue
+
             compress_start = max(0, i - p['compress_bars'])
             rh = np.max(high5[compress_start:i + 1])
             rl = np.min(low5[compress_start:i + 1])
             rng = rh - rl
-            if rng < atr_now * 0.4:
+
+            # v16.7: easier range filter (0.3x)
+            if rng < atr_now * 0.3:
                 continue
 
             cl = close5[i]
@@ -378,30 +329,26 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
                 direction = 1
             elif cl < rl - p['breakout_min'] * atr_now:
                 direction = -1
-            else:
+
+            if direction == 0:
                 continue
 
-            # Exhaustion filter
-            candle_range = high5[i] - low5[i]
-            if candle_range > atr_now * 2.2:
+            # v16.7: easier RSI filter (48/52)
+            if direction > 0 and rsi_5[i] < 48:
                 continue
-
-            # RSI confirmation
-            if direction > 0 and rsi_5[i] < 52:
-                continue
-            if direction < 0 and rsi_5[i] > 48:
+            if direction < 0 and rsi_5[i] > 52:
                 continue
 
             sig_type = 'BREAKOUT_UP' if direction > 0 else 'BREAKOUT_DOWN'
-        else:
+
+        if direction == 0:
             continue
 
-        # ─── OPEN TRADE (matching EA v16.5 exactly) ───
+        # ─── OPEN TRADE ───
         entry = close5[i]
         stop_dist = p['atr_stop'] * atr_5[i]
         tp_dist = p['atr_target'] * atr_5[i]
 
-        # Max stop distance cap (matching EA: entry * 0.025)
         max_stop = entry * 0.025
         if stop_dist > max_stop:
             stop_dist = max_stop
@@ -411,20 +358,15 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
         sl = entry - stop_dist if direction > 0 else entry + stop_dist
         tp = entry + tp_dist if direction > 0 else entry - tp_dist
 
-        # Spread cost (v16.5: spread filter already applied above)
         spread_cost = specs['spread_pts'] * specs['point']
-
-        # Risk sizing (v16.5: 0.4% equity risk)
         risk_money = equity * p['risk_pct']
         risk_points = stop_dist / specs['point']
         vol = risk_money / (risk_points * (specs['tick_val'] / (specs['tick_size'] / specs['point'])))
         vol = max(specs['min_lot'], round(vol / specs['step']) * specs['step'])
 
-        # Apply spread to entry
         entry_adj = entry + (spread_cost / 2) * direction
 
-        # v16.6: Add to positions list
-        positions.append({
+        trades.append({
             'dir': direction,
             'entry': entry_adj,
             'sl': sl,
@@ -434,34 +376,59 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
             'bars': 0,
             'regime': regime,
             'sig': sig_type,
+            'exit': None,
+            'reason': None,
+            'r_mult': None,
+            'pnl': None,
+            'equity': None,
+            'atr_pct': atr_pct,
         })
 
-    return trades
+    # Finalize any open trades
+    for t in trades:
+        if t.get('exit') is None:
+            t['exit'] = close5[-1]
+            t['reason'] = 'EOD'
+            t['bars'] = t.get('bars', 0)
+            if t['dir'] > 0:
+                t['r_mult'] = (t['exit'] - t['entry']) / t['orig_risk']
+            else:
+                t['r_mult'] = (t['entry'] - t['exit']) / t['orig_risk']
+            t['pnl'] = t['stake'] * t['r_mult']
+            t['equity'] = equity + t['pnl']
+
+    # Convert to flat list of completed trades
+    completed = []
+    for t in trades:
+        if t.get('r_mult') is not None:
+            completed.append({
+                'entry': t['entry'], 'exit': t['exit'], 'dir': t['dir'],
+                'reason': t['reason'], 'r_mult': t['r_mult'], 'pnl': t['pnl'],
+                'bars': t['bars'], 'equity': t['equity'],
+                'atr_pct': t['atr_pct'], 'regime': t['regime'],
+                'signal_type': t['sig'],
+            })
+
+    return completed
 
 
 def analyze(trades, name):
-    """Analyze backtest results."""
     if not trades:
         return {'name': name, 'trades': 0, 'error': 'No trades'}
 
     wins = [t for t in trades if t['r_mult'] > 0]
     losses = [t for t in trades if t['r_mult'] <= 0]
     pnl = sum(t['pnl'] for t in trades)
-    avg_win = np.mean([t['r_mult'] for t in wins]) if wins else 0
-    avg_loss = np.mean([t['r_mult'] for t in losses]) if losses else 0
 
-    # Drawdown
+    gross_win = sum(t['pnl'] for t in wins)
+    gross_loss = abs(sum(t['pnl'] for t in losses))
+    pf = gross_win / gross_loss if gross_loss > 0 else 99.0
+
     equities = [10000] + [t['equity'] for t in trades]
     peaks = np.maximum.accumulate(equities)
     dd = (peaks - equities) / peaks * 100
     max_dd = float(np.max(dd))
 
-    # Profit factor
-    gross_win = sum(t['pnl'] for t in wins)
-    gross_loss = abs(sum(t['pnl'] for t in losses))
-    pf = gross_win / gross_loss if gross_loss > 0 else 99.0
-
-    # Per-regime
     regimes = {}
     for t in trades:
         r = t.get('regime', 'UNKNOWN')
@@ -473,7 +440,6 @@ def analyze(trades, name):
             regimes[r]['losses'] += 1
         regimes[r]['pnl'] += t['pnl']
 
-    # Per-signal
     signals = {}
     for t in trades:
         s = t.get('signal_type', 'UNKNOWN')
@@ -486,7 +452,6 @@ def analyze(trades, name):
         signals[s]['pnl'] += t['pnl']
         signals[s]['r_mults'].append(t['r_mult'])
 
-    # Total R
     total_r = sum(t['r_mult'] for t in trades)
 
     return {
@@ -498,8 +463,8 @@ def analyze(trades, name):
         'pnl': pnl,
         'pnl_pct': pnl / 10000 * 100,
         'profit_factor': pf,
-        'avg_win_r': float(avg_win),
-        'avg_loss_r': float(avg_loss),
+        'avg_win_r': float(np.mean([t['r_mult'] for t in wins])) if wins else 0,
+        'avg_loss_r': float(np.mean([t['r_mult'] for t in losses])) if losses else 0,
         'expectancy_r': float(np.mean([t['r_mult'] for t in trades])),
         'total_r': total_r,
         'max_drawdown': max_dd,
@@ -510,7 +475,6 @@ def analyze(trades, name):
 
 
 def walk_forward(m5_data, m15_data, specs, params, n_windows=3):
-    """3-window walk-forward validation."""
     total = len(m5_data)
     warmup = 250
     window_size = (total - warmup) // n_windows
@@ -519,11 +483,10 @@ def walk_forward(m5_data, m15_data, specs, params, n_windows=3):
     for w in range(n_windows):
         start = warmup + w * window_size
         end = min(start + window_size, total)
-        # Chunk both M5 and M15 proportionally
         m5_start = start
         m5_end = end
         m15_start = start // 3
-        m15_end = end // 3 + 10  # extra buffer
+        m15_end = end // 3 + 10
         chunk_m5 = m5_data[m5_start:m5_end]
         chunk_m15 = m15_data[m15_start:min(m15_end, len(m15_data))]
         trades = run_backtest(chunk_m5, chunk_m15, specs, params, start_idx=0)
@@ -536,8 +499,8 @@ def walk_forward(m5_data, m15_data, specs, params, n_windows=3):
 def main():
     mt5.initialize()
     print("=" * 70)
-    print("  MITEMSHUB AI v16 — WALK-FORWARD BACKTEST & OPTIMIZATION")
-    print("  (Matching MitemshubAI_v16_5.mq5 EA)")
+    print("  MITEMSHUB AI v16.7 — WALK-FORWARD BACKTEST & OPTIMIZATION")
+    print("  Auto-TF + Momentum + Wide Pullback + Daily Reset")
     print("=" * 70)
 
     end = datetime.now()
@@ -556,8 +519,8 @@ def main():
 
         print(f"  M5 bars: {len(m5)}, M15 bars: {len(m15)}")
 
-        # ─── PHASE 1: Walk-forward with v16.5 defaults ───
-        print("\n  Phase 1: Walk-forward with v16.5 defaults...")
+        # ─── PHASE 1: Walk-forward with v16.7 defaults ───
+        print("\n  Phase 1: Walk-forward with v16.7 defaults...")
         wf = walk_forward(m5, m15, specs, {})
         for r in wf:
             pf = r.get('profit_factor', 0)
@@ -565,15 +528,15 @@ def main():
                   f"P&L=${r.get('pnl', 0):.2f}, PF={pf:.2f}, MaxDD={r.get('max_drawdown', 0):.1f}%")
 
         full_trades = run_backtest(m5, m15, specs, {})
-        full = analyze(full_trades, 'FULL (v16.5 defaults)')
+        full = analyze(full_trades, 'FULL (v16.7 defaults)')
         if full['trades'] == 0:
-            print(f"\n  FULL (v16.5 defaults): No trades generated")
+            print(f"\n  FULL (v16.7 defaults): No trades generated")
         else:
-            print(f"\n  FULL (v16.5 defaults): {full['trades']} trades, WR={full['win_rate']:.0f}%, "
+            print(f"\n  FULL (v16.7 defaults): {full['trades']} trades, WR={full['win_rate']:.0f}%, "
                   f"P&L=${full['pnl']:.2f}, PF={full['profit_factor']:.2f}, "
                   f"MaxDD={full['max_drawdown']:.1f}%, Exp={full['expectancy_r']:.3f}R")
 
-        # ─── PHASE 2: Per-regime analysis ───
+        # ─── PHASE 2: Per-regime & per-signal ───
         if full['trades'] > 0:
             print("\n  Per-Regime Performance:")
             for regime, data in full['regimes'].items():
@@ -581,7 +544,6 @@ def main():
                 wr = data['wins'] / total * 100 if total > 0 else 0
                 print(f"    {regime}: {total} trades, WR={wr:.0f}%, P&L=${data['pnl']:.2f}")
 
-            # ─── PHASE 3: Per-signal analysis ───
             print("\n  Per-Signal Performance:")
             for sig, data in full['signals'].items():
                 total = data['wins'] + data['losses']
@@ -589,43 +551,45 @@ def main():
                 avg_r = np.mean(data['r_mults']) if data['r_mults'] else 0
                 print(f"    {sig}: {total} trades, WR={wr:.0f}%, P&L=${data['pnl']:.2f}, AvgR={avg_r:.3f}")
 
-        # ─── PHASE 4: Optimize key parameters ───
-        print("\n  Phase 4: Optimizing key parameters...")
+        # ─── PHASE 3: Optimize ───
+        print("\n  Phase 3: Optimizing key parameters...")
         best_pf = 0
         best_params = {}
         tested = 0
 
-        for atr_stop in [1.4, 1.6, 1.8, 2.0]:
-            for atr_target in [2.2, 2.4, 2.6, 2.8]:
-                for trail_start in [0.6, 0.8, 1.0]:
+        for atr_stop in [1.2, 1.4, 1.6, 1.8, 2.0]:
+            for atr_target in [2.2, 2.4, 2.6, 2.8, 3.0]:
+                for trail_start in [0.5, 0.6, 0.8, 1.0]:
                     for trail_dist in [0.5, 0.7, 0.9]:
-                        params = {
-                            'atr_stop': atr_stop,
-                            'atr_target': atr_target,
-                            'trail_start': trail_start,
-                            'trail_dist': trail_dist,
-                        }
-                        trades = run_backtest(m5, m15, specs, params)
-                        if len(trades) < 10:
-                            continue
-                        r = analyze(trades, 'opt')
-                        # Require: PF>1.0, WR>45%, MaxDD<15%, at least 15 trades
-                        if (r['profit_factor'] > best_pf and
-                            r['win_rate'] > 45 and r['max_drawdown'] < 15 and
-                            r['trades'] >= 15):
-                            best_pf = r['profit_factor']
-                            best_params = params.copy()
-                            best_result = r
-                        tested += 1
+                        for pb_max in [2.5, 3.0, 3.5]:
+                            params = {
+                                'atr_stop': atr_stop,
+                                'atr_target': atr_target,
+                                'trail_start': trail_start,
+                                'trail_dist': trail_dist,
+                                'pullback_max': pb_max,
+                            }
+                            trades = run_backtest(m5, m15, specs, params)
+                            if len(trades) < 10:
+                                continue
+                            r = analyze(trades, 'opt')
+                            if (r['profit_factor'] > best_pf and
+                                r['win_rate'] > 45 and r['max_drawdown'] < 15 and
+                                r['trades'] >= 15):
+                                best_pf = r['profit_factor']
+                                best_params = params.copy()
+                                best_result = r
+                            tested += 1
 
         print(f"  Tested {tested} parameter combinations")
 
         if best_params:
-            print(f"\n  ★ OPTIMAL PARAMETERS (v16.5):")
-            print(f"    ATR Stop:  {best_params['atr_stop']}")
-            print(f"    ATR Target: {best_params['atr_target']}")
+            print(f"\n  ★ OPTIMAL PARAMETERS (v16.7):")
+            print(f"    ATR Stop:    {best_params['atr_stop']}")
+            print(f"    ATR Target:  {best_params['atr_target']}")
             print(f"    Trail Start: {best_params['trail_start']}")
-            print(f"    Trail Dist: {best_params['trail_dist']}")
+            print(f"    Trail Dist:  {best_params['trail_dist']}")
+            print(f"    Pullback Max:{best_params['pullback_max']}")
             print(f"    → {best_result['trades']} trades, WR={best_result['win_rate']:.0f}%, "
                   f"PF={best_result['profit_factor']:.2f}, MaxDD={best_result['max_drawdown']:.1f}%, "
                   f"TotalR={best_result['total_r']:.2f}")
@@ -634,12 +598,9 @@ def main():
             print(f"\n  Walk-forward on optimal params:")
             wf_opt = walk_forward(m5, m15, specs, best_params)
             all_pf = []
-            all_profitable = 0
             for r in wf_opt:
                 pf = r.get('profit_factor', 0)
                 all_pf.append(pf)
-                if r.get('pnl', 0) > 0:
-                    all_profitable += 1
                 trades_n = r.get('trades', 0)
                 if trades_n > 0:
                     print(f"    {r['name']}: {trades_n} trades, WR={r.get('win_rate', 0):.0f}%, "
@@ -651,12 +612,11 @@ def main():
             profitable_windows = sum(1 for r in wf_opt if r.get('trades', 0) > 0 and r.get('pnl', 0) > 0)
             print(f"\n  Walk-forward avg PF: {avg_pf:.2f} ({profitable_windows}/3 windows profitable)")
 
-            # Save optimal params
             sym_short = 'V75' if '75' in sym_name else 'V100'
             with open(f'v16_optimal_{sym_short}.json', 'w') as f:
                 json.dump({
                     'symbol': sym_name,
-                    'version': 'v16.5',
+                    'version': 'v16.7',
                     'params': best_params,
                     'full_result': {k: v for k, v in best_result.items() if k != 'signals'},
                     'walk_forward': [{'name': r['name'], 'trades': r.get('trades', 0),
@@ -665,11 +625,11 @@ def main():
                                        'max_drawdown': r.get('max_drawdown', 0)} for r in wf_opt],
                 }, f, indent=2)
         else:
-            print("  No profitable parameter combination found with constraints")
+            print("  No profitable parameter combination found")
 
     mt5.shutdown()
     print(f"\n{'=' * 70}")
-    print("  BACKTEST COMPLETE (v16.5)")
+    print("  BACKTEST COMPLETE (v16.7)")
     print(f"{'=' * 70}")
 
 
