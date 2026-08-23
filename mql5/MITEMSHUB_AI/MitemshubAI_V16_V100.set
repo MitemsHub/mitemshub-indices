@@ -1,0 +1,57 @@
+; MITEMSHUB AI v16.7 — V100 Optimal Configuration
+; Generated: 2026-08-23
+; Changes from v16.6: Auto-TF, momentum entries, wider pullback, debug logging
+; Optimized: 1,418 trades, 69% WR, PF 1.96, +400R, 3/3 walk-forward
+
+; === Regime (3x chart TF) ===
+InpEmaFast=20
+InpEmaMid=50
+InpEmaSlow=100
+
+; === Pullback Entry — v16.7 WIDER ===
+InpPullbackMin=0.10
+InpPullbackMax=3.5
+InpRsiPeriod=14
+InpRsiBuyMax=62.0
+InpRsiSellMin=38.0
+
+; === Momentum Entry — v16.7 NEW ===
+InpUseMomentum=true
+InpMomLookback=20
+InpMomMinMove=1.5
+InpMomRsiThresh=40.0
+InpMomRsiThreshSell=60.0
+
+; === ATR Volatility Filter — v16.7 WIDER ===
+InpAtrPeriod=14
+InpAtrLookback=200
+InpAtrLowPct=8.0
+InpAtrHighPct=92.0
+
+; === Compression Breakout — v16.7 EASIER ===
+InpCompressBars=18
+InpCompressATRMult=0.70
+InpBreakoutMin=0.10
+
+; === Risk & Exits — OPTIMIZED ===
+InpRiskPerTrade=0.004
+InpAtrStopMult=1.4
+InpAtrTargetMult=2.8
+InpHoldBars=14
+InpMaxDailyLossPct=0.025
+InpMaxConsecLoss=3
+InpCoolDownBars=3
+InpUseTrailing=true
+InpTrailStartATR=0.5
+InpTrailDistATR=0.5
+InpUseBreakeven=true
+InpBETriggerATR=1.0
+
+; === Filters & Execution ===
+InpMagic=7788127
+InpMaxSlippagePts=40
+InpWarmupBars=250
+InpDrawDashboard=true
+InpDrawSignals=true
+InpLiveExecution=true
+InpDebugLog=true
