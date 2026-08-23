@@ -46,7 +46,7 @@ input double InpBreakoutMin      = 0.10;      // v16.7: tighter breakout trigger
 input group "=== Risk & Exits ==="
 input double InpRiskPerTrade     = 0.004;     // 0.4% per trade
 input double InpAtrStopMult      = 1.6;       // optimized for V100
-input double InpAtrTargetMult    = 2.8;
+input double InpAtrTargetMult    = 1.4;       // v16.73: R-multiple of SL (was 2.8×ATR)
 input int    InpHoldBars         = 14;
 input double InpMaxDailyLossPct  = 0.025;
 input int    InpMaxConsecLoss    = 3;
@@ -484,7 +484,7 @@ void OpenTrade(int direction, string sig_type)
    double entry = (direction > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                                   : SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double stop_dist = InpAtrStopMult * atr[0];
-   double tp_dist   = InpAtrTargetMult * atr[0];
+   double tp_dist   = InpAtrTargetMult * stop_dist;  // v16.73: R-multiple of SL distance
 
    double max_stop = entry * 0.025;
    if(stop_dist > max_stop) stop_dist = max_stop;

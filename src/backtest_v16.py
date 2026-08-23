@@ -33,7 +33,7 @@ DEFAULTS = {
     'compress_bars': 18, 'compress_atr_mult': 0.70, 'breakout_min': 0.10,  # v16.7: easier
     'risk_pct': 0.004,              # 0.4% per trade
     'atr_stop': 1.6,                # optimized for V100
-    'atr_target': 2.8,
+    'atr_target': 1.4,              # v16.73: R-multiple of SL (was 2.8×ATR)
     'hold_bars': 14, 'cooldown': 3, 'max_consec_loss': 3,
     'max_daily_loss_pct': 0.025,
     'use_trailing': True, 'trail_start': 0.6, 'trail_dist': 0.7,
@@ -360,7 +360,7 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
         # ─── OPEN TRADE ───
         entry = close5[i]
         stop_dist = p['atr_stop'] * atr_5[i]
-        tp_dist = p['atr_target'] * atr_5[i]
+        tp_dist = p['atr_target'] * stop_dist  # v16.73: R-multiple of SL distance
 
         max_stop = entry * 0.025
         if stop_dist > max_stop:
