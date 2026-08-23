@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
-//|                                         MitemshubAI_v17_3.mq5    |
-//|                     MITEMSHUB AI MARKET ENGINE v17.3              |
-//|   H1 + H4 • Session Filter • Session SL • Early Time Exit         |
+//|                                         MitemshubAI_v17_4.mq5    |
+//|                     MITEMSHUB AI MARKET ENGINE v17.4              |
+//|   V100 Optimized • H1 + H4 • Session SL • Early Time Exit         |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "17.30"
+#property version   "17.40"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -20,15 +20,15 @@ input int    InpSessionEndHour   = 24;        // 24 = full day
 
 input group "=== Session-Specific Stop Loss (UTC) ==="
 input bool   InpUseSessionSL     = true;      // Enable different SL by hour
-input double InpSL_Quiet         = 1.40;      // SL multiplier during quiet hours
-input double InpSL_Active        = 1.60;      // SL multiplier during active hours
+input double InpSL_Quiet         = 1.50;      // SL multiplier during quiet hours
+input double InpSL_Active        = 1.80;      // SL multiplier during active hours
 input int    InpQuietStartHour   = 0;         // Quiet hours start (UTC)
 input int    InpQuietEndHour     = 7;         // Quiet hours end (UTC)
 
 input group "=== Time-Based Exit Logic ==="
-input int    InpHoldBars         = 18;        // Maximum hold (hours on H1)
-input int    InpEarlyExitHours   = 6;         // Close early if not profitable after X hours
-input double InpEarlyExitMinR    = 0.15;      // Minimum R to keep the trade alive
+input int    InpHoldBars         = 16;        // Maximum hold (hours on H1)
+input int    InpEarlyExitHours   = 5;         // Close early if not profitable after X hours
+input double InpEarlyExitMinR    = 0.20;      // Minimum R to keep the trade alive
 input bool   InpUseHardClose     = false;     // Force close all trades at specific hour
 input int    InpHardCloseHour    = 21;        // Hour to force close (UTC)
 
@@ -37,44 +37,44 @@ input int    InpEmaFast          = 20;
 input int    InpEmaMid           = 50;
 input int    InpEmaSlow          = 100;
 input bool   InpTrendOnly        = true;
-input double InpMinEmaSeparation = 0.25;
+input double InpMinEmaSeparation = 0.30;
 
 input group "=== Pullback Entry ==="
-input double InpPullbackMin      = 0.40;
-input double InpPullbackMax      = 2.20;
+input double InpPullbackMin      = 0.45;
+input double InpPullbackMax      = 2.40;
 input int    InpRsiPeriod        = 14;
-input double InpRsiBuyMax        = 62.0;
-input double InpRsiSellMin       = 38.0;
+input double InpRsiBuyMax        = 64.0;
+input double InpRsiSellMin       = 36.0;
 
 input group "=== Momentum ==="
 input bool   InpUseMomentum      = true;
 input int    InpMomLookback      = 10;
-input double InpMomMinMove       = 1.0;
-input double InpMomRsiBuy        = 52.0;
-input double InpMomRsiSell       = 48.0;
-input double InpSlopeThresh      = 0.35;
+input double InpMomMinMove       = 1.1;
+input double InpMomRsiBuy        = 53.0;
+input double InpMomRsiSell       = 47.0;
+input double InpSlopeThresh      = 0.40;
 
 input group "=== ATR Volatility Filter ==="
 input int    InpAtrPeriod        = 14;
 input int    InpAtrLookback      = 150;
-input double InpAtrLowPct        = 8.0;
-input double InpAtrHighPct       = 90.0;
+input double InpAtrLowPct        = 10.0;
+input double InpAtrHighPct       = 88.0;
 
 input group "=== Risk & Trailing ==="
-input double InpRiskPerTrade     = 0.004;
-input double InpAtrTargetMult    = 2.5;       // Target = multiplier × Stop distance
+input double InpRiskPerTrade     = 0.0035;    // 0.35% per trade
+input double InpAtrTargetMult    = 2.6;       // Target = multiplier × Stop distance
 input double InpMaxDailyLossPct  = 0.025;
 input int    InpMaxConsecLoss    = 3;
 input int    InpCoolDownBars     = 3;
 input bool   InpUseTrailing      = true;
-input double InpTrailStartATR    = 0.9;
-input double InpTrailDistATR     = 0.9;
+input double InpTrailStartATR    = 1.0;
+input double InpTrailDistATR     = 1.0;
 input bool   InpUseBreakeven     = true;
-input double InpBETriggerATR     = 1.1;
+input double InpBETriggerATR     = 1.2;
 
 input group "=== Execution ==="
 input long   InpMagic            = 7788131;
-input int    InpMaxSlippagePts   = 50;
+input int    InpMaxSlippagePts   = 60;
 input int    InpWarmupBars       = 300;
 input bool   InpDrawDashboard    = true;
 input bool   InpDrawSignals      = true;
@@ -176,7 +176,7 @@ int OnInit()
       hEMA_Fast_E==INVALID_HANDLE || hEMA_Mid_E==INVALID_HANDLE || hEMA_Slow_E==INVALID_HANDLE ||
       hRSI_E==INVALID_HANDLE || hATR_E==INVALID_HANDLE)
    {
-      Print("v17.3: Handle creation failed");
+      Print("v17.4: Handle creation failed");
       return INIT_FAILED;
    }
 
@@ -191,9 +191,7 @@ int OnInit()
    trade.SetTypeFillingBySymbol(_Symbol);
 
    RecoverPosition();
-   if(InpDrawDashboard) CreateDashboard();
-
-   Print("MITEMSHUB AI v17.3 started | Session SL + Early Exit active | All times = Server/UTC");
+   if(InpDrawDashboard) CreateDashboard();      Print("MITEMSHUB AI v17.4 started | V100 Optimized | Session SL + Early Exit active");
    return INIT_SUCCEEDED;
 }
 
@@ -208,7 +206,7 @@ void OnDeinit(const int reason)
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
    Print("========================================");
-   PrintFormat("v17.3 Summary | Trades:%d WR:%.1f%% TotalR:%+.2f", g_trades, wr, g_total_r);
+   PrintFormat("v17.4 Summary | Trades:%d WR:%.1f%% TotalR:%+.2f", g_trades, wr, g_total_r);
    PrintFormat("Exits → Target:%d Time:%d Early:%d Stop:%d", g_target_exits, g_time_exits, g_early_exits, g_stop_exits);
    Print("========================================");
 }
@@ -280,7 +278,7 @@ void RecoverPosition()
       g_position_volume = PositionGetDouble(POSITION_VOLUME);
       g_entry_time = (datetime)PositionGetInteger(POSITION_TIME);
       g_bars_held = 0;
-      Print("v17.3: Recovered position #", t);
+      Print("v17.4: Recovered position #", t);
       break;
    }
 }
@@ -419,15 +417,15 @@ void OpenTrade(int direction, string sig_type)
    if(InpLiveExecution)
    {
       if(direction>0)
-         ok = trade.Buy(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v17.3");
+         ok = trade.Buy(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v17.4");
       else
-         ok = trade.Sell(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v17.3");
+         ok = trade.Sell(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v17.4");
    }
    else { g_ticket=(ulong)TimeCurrent(); ok=true; }
 
    if(!ok)
    {
-      Print("Order failed: ",trade.ResultRetcode());
+      Print("v17.4 Order failed: ",trade.ResultRetcode());
       g_cooldown = InpCoolDownBars;
       return;
    }
@@ -456,7 +454,7 @@ void OpenTrade(int direction, string sig_type)
 
    if(InpDrawSignals) DrawArrow(direction,TimeCurrent(),entry,sig_type);
 
-   PrintFormat("[v17.3] %s %s @%.5f SL=%.5f (mult=%.2f) TP=%.5f",
+   PrintFormat("[v17.4] %s %s @%.5f SL=%.5f (mult=%.2f) TP=%.5f",
                sig_type, direction>0?"BUY":"SELL", entry, sl, stop_mult, tp);
 }
 
@@ -561,7 +559,7 @@ void ClosePosition(string reason)
    double exit_price = g_dir>0 ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    if(!trade.PositionClose(g_ticket))
    {
-      Print("Close failed: ",trade.ResultRetcode());
+      Print("v17.4 Close failed: ",trade.ResultRetcode());
       return;
    }
 
@@ -582,7 +580,7 @@ void ClosePosition(string reason)
    if(g_consec_loss>=InpMaxConsecLoss) g_paused=true;
    if(g_daily_pnl < -AccountInfoDouble(ACCOUNT_EQUITY)*InpMaxDailyLossPct) g_paused=true;
 
-   PrintFormat("[v17.3] CLOSE %s R=%+.3f", reason, r_mult);
+   PrintFormat("[v17.4] CLOSE %s R=%+.3f", reason, r_mult);
 
    g_ticket=0; g_dir=0; g_bars_held=0;
 }
@@ -594,7 +592,7 @@ void CreateDashboard()
 {
    for(int i=0;i<26;i++)
    {
-      dash_names[i]="M173_"+IntegerToString(i);
+      dash_names[i]="M174_"+IntegerToString(i);
       ObjectCreate(0,dash_names[i],OBJ_LABEL,0,0,0);
       ObjectSetInteger(0,dash_names[i],OBJPROP_CORNER,CORNER_LEFT_UPPER);
       ObjectSetInteger(0,dash_names[i],OBJPROP_XDISTANCE,10);
@@ -613,7 +611,7 @@ void UpdateDashboard()
    double pct = CalcATRPercentile(atr[0]);
 
    string L[26];
-   L[0]  = "=== MITEMSHUB AI v17.3 ===";
+   L[0]  = "=== MITEMSHUB AI v17.4 ===";
    L[1]  = StringFormat("%s | %s > %s", _Symbol, EnumToString(g_tf_entry), EnumToString(g_tf_regime));
    L[2]  = StringFormat("Equity: $%.2f | Peak: $%.2f", g_eq, g_peak_eq);
    L[3]  = StringFormat("Regime: %s | ATR%%: %.0f", RegimeToStr(g_regime), pct);
@@ -671,7 +669,7 @@ string RegimeToStr(ENUM_REGIME r)
 
 void DrawArrow(int dir, datetime t, double price, string tag)
 {
-   string name="M173_"+tag+"_"+IntegerToString((int)t);
+   string name="M174_"+tag+"_"+IntegerToString((int)t);
    if(ObjectFind(0,name)>=0) ObjectDelete(0,name);
    ObjectCreate(0,name,OBJ_ARROW,0,t,price);
    ObjectSetInteger(0,name,OBJPROP_ARROWCODE,dir>0?233:234);
