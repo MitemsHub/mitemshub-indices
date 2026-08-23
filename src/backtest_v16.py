@@ -281,9 +281,22 @@ def run_backtest(m5_data, m15_data, specs, params, start_idx=250):
             if direction != 0:
                 sig_type = 'PULLBACK_LONG' if direction > 0 else 'PULLBACK_SHORT'
 
-        # ─── MODE 2: MOMENTUM (v16.7 NEW) ───
-        if direction == 0 and p['use_momentum'] and regime in ('BULLISH', 'BEARISH'):
-            mom_dir = 1 if regime == 'BULLISH' else -1
+        # ─── MODE 2: MOMENTUM (v16.71: works in ALL regimes) ───
+        if direction == 0 and p['use_momentum']:
+            # Determine direction from regime or EMA slope
+            mom_dir = 0
+            if regime == 'BULLISH':
+                mom_dir = 1
+            elif regime == 'BEARISH':
+                mom_dir = -1
+            elif regime == 'RANGING':
+                # v16.71: use EMA slope to detect direction in ranging
+                if i >= 5 and not np.isnan(ema_fast_5[i]) and not np.isnan(ema_fast_5[i-5]):
+                    ema_slope = ema_fast_5[i] - ema_fast_5[i-5]
+                    if ema_slope > 0.1 * atr_5[i]:
+                        mom_dir = 1
+                    elif ema_slope < -0.1 * atr_5[i]:
+                        mom_dir = -1
 
             # Session high/low over lookback
             lb = min(p['mom_lookback'], i)

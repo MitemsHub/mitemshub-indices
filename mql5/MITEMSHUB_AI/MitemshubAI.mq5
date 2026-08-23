@@ -376,10 +376,24 @@ int GenerateSignal(string &sig_type)
       return dir;
    }
 
-   // ─── MODE 2: MOMENTUM (v16.7 NEW) ───
-   if(InpUseMomentum && (g_regime == REGIME_BULLISH || g_regime == REGIME_BEARISH))
+   // ─── MODE 2: MOMENTUM (v16.71: works in ALL regimes) ───
+   if(InpUseMomentum)
    {
-      int dir = (g_regime == REGIME_BULLISH) ? 1 : -1;
+      int dir = 0;
+      if(g_regime == REGIME_BULLISH) dir = 1;
+      else if(g_regime == REGIME_BEARISH) dir = -1;
+      // v16.71: RANGING — detect direction from momentum itself
+      else if(g_regime == REGIME_RANGING)
+      {
+         // Use EMA slope to determine direction even in ranging
+         double emaF_now[1], emaF_prev[1];
+         if(CopyBuffer(hEMA_Fast_Entry, 0, 1, 1, emaF_now) >= 1 &&
+            CopyBuffer(hEMA_Fast_Entry, 0, 5, 1, emaF_prev) >= 1)
+         {
+            if(emaF_now[0] > emaF_prev[0] + 0.1 * atr[0]) dir = 1;   // EMA rising
+            else if(emaF_now[0] < emaF_prev[0] - 0.1 * atr[0]) dir = -1; // EMA falling
+         }
+      }
 
       // Find session high/low over lookback period
       double session_high = iHigh(_Symbol, g_tf_entry, 1);
