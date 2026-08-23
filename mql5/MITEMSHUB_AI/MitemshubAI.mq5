@@ -737,7 +737,7 @@ void UpdateDashboard()
    double equity_now = AccountInfoDouble(ACCOUNT_EQUITY);
 
    string lines[24];
-   lines[0]  = "=== MITEMSHUB AI v16.7 ===";
+   lines[0]  = "=== MITEMSHUB AI v16.71 ===";
    lines[1]  = "Equity: $" + DoubleToString(equity_now, 2);
    lines[2]  = "Regime: " + RegimeToStr(g_regime);
    lines[3]  = "ATR %ile: " + DoubleToString(pct, 0) + "%";
@@ -760,7 +760,7 @@ void UpdateDashboard()
    lines[19] = "Pullback: " + DoubleToString(InpPullbackMin,2) + "-" + DoubleToString(InpPullbackMax,1) + " ATR";
    lines[20] = "Symbol: " + _Symbol;
    lines[21] = "Magic: " + IntegerToString(InpMagic);
-   lines[22] = "v16.7: Auto-TF + Momentum + Wide PB";
+   lines[22] = "v16.71: Auto-TF + Momentum + All Regimes";
    lines[23] = "Debug: " + (InpDebugLog ? "ON" : "OFF");
 
    for(int i=0; i<24; i++)
