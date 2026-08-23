@@ -1,0 +1,88 @@
+{
+  "symbol": "Volatility 100 Index",
+  "period": "2026-02-24 to 2026-08-23",
+  "params": {
+    "atr_stop": 1.6,
+    "atr_target": 2.8,
+    "trail_start": 0.6,
+    "trail_dist": 0.7
+  },
+  "full": {
+    "name": "V100 6M Optimized",
+    "trades": 22,
+    "wins": 13,
+    "losses": 9,
+    "win_rate": 59.09090909090909,
+    "pnl": 50.92829342863261,
+    "pnl_pct": 0.5092829342863261,
+    "profit_factor": 1.1533832596121278,
+    "avg_win_r": 0.7325150331476191,
+    "avg_loss_r": -0.9123684211901159,
+    "expectancy_r": 0.05960816546400027,
+    "total_r": 1.311379640208006,
+    "max_drawdown": 1.219649245570521,
+    "avg_bars_held": 8.136363636363637,
+    "regimes": {
+      "BULLISH": {
+        "wins": 8,
+        "losses": 4,
+        "pnl": 29.745183524913934
+      },
+      "BEARISH": {
+        "wins": 5,
+        "losses": 5,
+        "pnl": 21.183109903718666
+      }
+    }
+  },
+  "walk_forward": [
+    {
+      "name": "W1",
+      "trades": 19,
+      "win_rate": 52.63157894736842,
+      "pnl": -63.05340640300423,
+      "profit_factor": 0.8086377158879262,
+      "max_drawdown": 1.6442016089982598
+    },
+    {
+      "name": "W2",
+      "trades": 31,
+      "win_rate": 64.51612903225806,
+      "pnl": 314.0787087863211,
+      "profit_factor": 1.7746675956342517,
+      "max_drawdown": 1.4062914222225857
+    },
+    {
+      "name": "W3",
+      "trades": 16,
+      "win_rate": 50.0,
+      "pnl": -37.67573197970075,
+      "profit_factor": 0.8877710362697308,
+      "max_drawdown": 1.6337516322768741
+    },
+    {
+      "name": "W4",
+      "trades": 46,
+      "win_rate": 65.21739130434783,
+      "pnl": 752.9959042247267,
+      "profit_factor": 2.4845186151706735,
+      "max_drawdown": 0.7259657194078533
+    },
+    {
+      "name": "W5",
+      "trades": 46,
+      "win_rate": 69.56521739130434,
+      "pnl": 927.3978911160979,
+      "profit_factor": 2.997265238181565,
+      "max_drawdown": 0.903363572172884
+    },
+    {
+      "name": "W6",
+      "trades": 8,
+      "win_rate": 37.5,
+      "pnl": 81.21213663595293,
+      "profit_factor": 1.6880725416432871,
+      "max_drawdown": 0.8392866693391088
+    }
+  ]
+}
