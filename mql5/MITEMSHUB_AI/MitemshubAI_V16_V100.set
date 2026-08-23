@@ -25,7 +25,7 @@ InpMomRsiThreshSell=60.0
 ; === ATR Volatility Filter — v16.7 WIDER ===
 InpAtrPeriod=14
 InpAtrLookback=200
-InpAtrLowPct=8.0
+InpAtrLowPct=2.0
 InpAtrHighPct=92.0
 
 ; === Compression Breakout — v16.7 EASIER ===
