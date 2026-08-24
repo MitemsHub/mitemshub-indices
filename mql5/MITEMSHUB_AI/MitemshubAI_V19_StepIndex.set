@@ -26,7 +26,7 @@ InpMinStructure=10
 InpRiskPerTrade=0.01
 InpMaxDailyLossPct=0.03
 InpMaxConsecLoss=3
-InpMaxTradesPerDay=5
+InpMaxTradesPerDay=9999
 InpCoolDownBars=2
 InpMaxDDPct=0.10
 

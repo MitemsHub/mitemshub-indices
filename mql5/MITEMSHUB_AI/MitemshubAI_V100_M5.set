@@ -48,4 +48,4 @@ InpDrawDashboard=true
 InpDrawSignals=true
 InpLiveExecution=false
 InpDebugLog=false
-InpMaxTradesPerDay=3
+InpMaxTradesPerDay=9999

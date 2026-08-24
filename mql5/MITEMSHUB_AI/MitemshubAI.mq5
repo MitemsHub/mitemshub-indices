@@ -23,8 +23,8 @@ input bool   InpUsePullback      = true;     // EMA Pullback (Trend)
 input bool   InpUseBreakout      = true;     // Breakout
 input bool   InpUseMomentum      = true;     // Momentum
 input bool   InpUseMeanRevert    = true;     // Mean Reversion (Ranging only)
-input int    InpMinScore         = 5;        // Minimum score to enter
-input bool   InpRequire2Strats   = true;     // Require at least 2 strategies agree
+input int    InpMinScore         = 3;        // Minimum score to enter
+input bool   InpRequire2Strats   = false;    // Require at least 2 strategies agree
 
 input group "=== Regime & Volatility ==="
 input int    InpEmaFast          = 20;
@@ -65,7 +65,7 @@ input int    InpWarmupBars       = 250;
 input bool   InpDrawDashboard    = true;
 input bool   InpDrawSignals      = true;
 input bool   InpLiveExecution    = true;
-input int    InpMaxTradesPerDay  = 4;
+input int    InpMaxTradesPerDay  = 9999; // No daily trade cap
 
 //+------------------------------------------------------------------+
 //| GLOBALS                                                            |
@@ -179,7 +179,6 @@ void OnTick()
    }
 
    if(g_ticket==0 && !g_paused && g_cooldown==0 &&
-      g_trades_today < InpMaxTradesPerDay &&
       Bars(_Symbol,g_tf_entry) >= InpWarmupBars)
    {
       string sig="";
@@ -555,7 +554,7 @@ void UpdateDashboard()
    L[2]=StringFormat("Equity: $%.2f",g_eq);
    L[3]=StringFormat("Regime: %s | ATR%%: %.0f",RegimeToStr(g_regime),pct);
    L[4]=StringFormat("Trades: %d | WR: %.1f%% | R: %+.2f",g_trades,wr,g_total_r);
-   L[5]=StringFormat("Today: %d/%d | Status: %s",g_trades_today,InpMaxTradesPerDay,g_paused?"PAUSED":"ACTIVE");
+   L[5]=StringFormat("Today: %d | Status: %s",g_trades_today,g_paused?"PAUSED":"ACTIVE");
    L[6]=StringFormat("Strategies: Pull+%s Break+%s Mom+%s MR+%s",
         InpUsePullback?"ON":"OFF", InpUseBreakout?"ON":"OFF",
         InpUseMomentum?"ON":"OFF", InpUseMeanRevert?"ON":"OFF");
@@ -569,7 +568,7 @@ void UpdateDashboard()
       double rnow = g_orig_risk>0?(g_dir>0?(cur-g_entry):(g_entry-cur))/g_orig_risk:0;
       L[line++]=StringFormat("OPEN %s @%.5f  R:%+.2f",g_dir>0?"BUY":"SELL",g_entry,rnow);
    }
-   while(line<24) L[line++]="";
+   while(line<24) L[line++]=" ";
 
    for(int i=0;i<24;i++)
    {

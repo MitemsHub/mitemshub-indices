@@ -67,10 +67,26 @@ def refresh_data():
         time.sleep(2)
 
 
+def _ensure_mt5():
+    """Ensure MT5 connection is alive. Reinitialize if needed."""
+    try:
+        ti = mt5.terminal_info()
+        if ti and ti.connected:
+            return True
+    except Exception:
+        pass
+    # Force reinitialize
+    try:
+        mt5.shutdown()
+    except Exception:
+        pass
+    return mt5.initialize()
+
+
 def _fetch_all_data():
     """Fetch all data from MT5."""
-    if not mt5.terminal_info():
-        mt5.initialize()
+    if not _ensure_mt5():
+        return
 
     # Account
     account = mt5.account_info()
@@ -108,7 +124,7 @@ def _fetch_all_data():
                 'tp': p.tp,
                 'profit': p.profit,
                 'swap': p.swap,
-                'commission': p.commission,
+                'commission': getattr(p, 'commission', 0),
                 'time': datetime.fromtimestamp(p.time).strftime('%Y-%m-%d %H:%M'),
                 'magic': p.magic,
                 'comment': p.comment,
@@ -204,7 +220,7 @@ def _fetch_trade_history():
     completed = []
     if deals:
         # Filter MITEM deals only
-        mitem_deals = [d for d in deals if d.magic == 7788123 or d.comment.startswith('MITEM')]
+        mitem_deals = [d for d in deals if d.magic in (7788123, 7788211) or d.comment.startswith('MITEM')]
         # Group by symbol and pair IN/OUT
         pending_in = {}  # symbol -> IN deal
         for deal in mitem_deals:
@@ -216,7 +232,7 @@ def _fetch_trade_history():
                 direction = 'BUY' if in_deal.type == mt5.ORDER_TYPE_BUY else 'SELL'
                 entry_price = in_deal.price
                 exit_price = deal.price
-                pnl = deal.profit + deal.swap + deal.commission
+                pnl = deal.profit + deal.swap + getattr(deal, 'commission', 0)
                 # Parse SL/TP from comment
                 sl = 0
                 tp = 0
@@ -272,10 +288,55 @@ def _parse_ea_log_trades():
                 with open(fp, 'rb') as fh:
                     text = fh.read(200000).decode('utf-16-le', errors='replace')
                     for line in text.split('\n'):
-                        if '[MITEM]' not in line and '[v16.5]' not in line:
+                        if '[MITEM]' not in line and '[v16.5]' not in line and '[v21.1]' not in line:
                             continue
                         if '$10000' in line:
                             continue
+
+                        # --- v21.1 log format: [v21.1] SC{score} BUY/SELL @... SL=... TP=...
+                        if 'v21.1' in line and ('BUY @' in line or 'SELL @' in line):
+                            try:
+                                parts = line.split('\t')
+                                time_str = parts[2].strip() if len(parts) > 2 else ''
+                                msg = line.split('[v21.1]')[1].strip()
+                                direction = 'BUY' if 'BUY @' in msg else 'SELL'
+                                entry_price = float(msg.split('@')[1].split()[0])
+                                sl = float(msg.split('SL=')[1].split()[0]) if 'SL=' in msg else 0
+                                tp = float(msg.split('TP=')[1].split()[0]) if 'TP=' in msg else 0
+                                sig = msg.split()[0] if msg.split() else ''
+                                log_trades.append({
+                                    'time': time_str,
+                                    'symbol': 'Volatility 100 Index' if '100' in line else 'Volatility 75 Index',
+                                    'direction': direction,
+                                    'entry_price': entry_price,
+                                    'sl': sl,
+                                    'tp': tp,
+                                    'rr': 0,
+                                    'z_score': 0,
+                                    'risk': 0,
+                                    'regime': '',
+                                    'signal_type': sig,
+                                    'status': 'OPEN',
+                                    'source': 'EA_LOG',
+                                    'version': 'v21.1',
+                                })
+                            except Exception:
+                                pass
+                        elif 'v21.1' in line and 'CLOSE' in line:
+                            try:
+                                parts = line.split('\t')
+                                time_str = parts[2].strip() if len(parts) > 2 else ''
+                                msg = line.split('[v21.1]')[1].strip()
+                                r_mult = float(msg.split('R=')[1].split()[0]) if 'R=' in msg else 0
+                                reason = 'STOP' if 'STOP' in msg else 'TARGET' if 'TARGET' in msg else 'TIME' if 'TIME' in msg else 'CLOSE'
+                                for ot in reversed(log_trades):
+                                    if ot['status'] == 'OPEN':
+                                        ot['status'] = reason
+                                        ot['exit_time'] = time_str
+                                        ot['r_multiple'] = r_mult
+                                        break
+                            except Exception:
+                                pass
 
                         # --- v16.5 log format: [v16.5] Symbol PULLBACK_LONG BUY @... SL=... TP=... Vol=... Regime=...
                         if 'v16.5' in line and ('BUY @' in line or 'SELL @' in line):

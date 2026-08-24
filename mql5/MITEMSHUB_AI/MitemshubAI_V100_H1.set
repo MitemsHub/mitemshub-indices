@@ -1,13 +1,13 @@
 ; MITEMSHUB AI v21.1 — V100 Optimized Settings
-; 4 Core Strategies • Regime-Aware • Safer
+; 4 Core Strategies • Regime-Aware • Active Trader
 
 ; === Strategy Selection ===
 InpUsePullback=true
 InpUseBreakout=true
 InpUseMomentum=true
 InpUseMeanRevert=true
-InpMinScore=5
-InpRequire2Strats=true
+InpMinScore=3
+InpRequire2Strats=false
 
 ; === Regime & Volatility ===
 InpEmaFast=20
@@ -48,4 +48,4 @@ InpWarmupBars=250
 InpDrawDashboard=true
 InpDrawSignals=true
 InpLiveExecution=true
-InpMaxTradesPerDay=4
+InpMaxTradesPerDay=9999
