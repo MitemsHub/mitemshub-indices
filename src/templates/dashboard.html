@@ -301,10 +301,11 @@
             .row-bottom { grid-template-columns: 1fr; }
 
             .card {
-                padding: 12px;
+                padding: 10px 12px;
                 border-radius: 10px;
             }
-            .card .value { font-size: 22px; }
+            .card .value { font-size: 20px; }
+            .card .label { font-size: 9px; }
 
             .market-card .bid { font-size: 18px; }
 
@@ -330,10 +331,13 @@
            RESPONSIVE: VERY SMALL (≤380px)
            ═══════════════════════════════════════════════════════════════ */
         @media (max-width: 380px) {
-            .row-metrics { grid-template-columns: 1fr; }
-            .row-perf { grid-template-columns: 1fr; }
-            .header h1 { font-size: 12px; }
-            .card .value { font-size: 20px; }
+            .row-metrics { grid-template-columns: 1fr 1fr; }
+            .row-perf { grid-template-columns: 1fr 1fr; }
+            .header h1 { font-size: 11px; }
+            .card { padding: 10px; border-radius: 8px; }
+            .card .value { font-size: 18px; }
+            .card .label { font-size: 9px; }
+            .card .sub { font-size: 10px; }
         }
 
         /* ═══ SAFE AREAS (notch phones) ═══ */
