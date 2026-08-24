@@ -29,7 +29,7 @@ InpRsiOversold=32.0
 InpRsiOverbought=68.0
 
 ; === Risk & Exits ===
-InpRiskPerTrade=0.004
+InpRiskPerTrade=0.25
 InpTpMult=2.5
 InpMaxHoldBars=14
 InpMaxDailyLossPct=0.03

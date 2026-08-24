@@ -46,7 +46,7 @@ input double InpRsiOversold      = 32.0;
 input double InpRsiOverbought    = 68.0;
 
 input group "=== Risk & Exits ==="
-input double InpRiskPerTrade     = 0.004;    // 0.4%
+input double InpRiskPerTrade     = 0.25;     // 25% — V100 min lot 1.0 = $8 risk on $32 account
 input double InpTpMult           = 2.4;
 input int    InpMaxHoldBars      = 14;
 input double InpMaxDailyLossPct  = 0.03;

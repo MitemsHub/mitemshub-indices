@@ -25,7 +25,7 @@ InpMomLookback=5
 InpMomThreshold=0.20
 
 ; === Risk & Exits ===
-InpRiskPerTrade=0.01
+InpRiskPerTrade=0.25
 InpTpMult=2.0
 InpMaxHoldBars=16
 InpMaxDailyLossPct=0.05
