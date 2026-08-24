@@ -1,0 +1,51 @@
+; MITEMSHUB AI v20.0 — V100 M5 Optimized Settings
+; H4 Regime + M5 Structure Entries
+
+; === Regime Detection (H4) ===
+InpEmaFast=20
+InpEmaMid=50
+InpEmaSlow=100
+InpMinEmaSep=0.15
+InpTradeRanging=true
+
+; === Structure Detection (M5) ===
+InpSwingLookback=5
+InpStructureBars=30
+InpBosBuffer=0.10
+InpRequireBos=false
+
+; === Entry Filters ===
+InpMinBodyRatio=0.55
+InpMinRangeAtr=0.6
+InpRsiBuyLo=40.0
+InpRsiBuyHi=70.0
+InpRsiSellLo=30.0
+InpRsiSellHi=60.0
+InpMomLookback=5
+InpMomThreshold=0.20
+
+; === Risk & Exits ===
+InpRiskPerTrade=0.01
+InpTpMult=2.0
+InpMaxHoldBars=16
+InpMaxDailyLossPct=0.05
+InpMaxConsecLoss=4
+InpCoolDownBars=3
+
+; === Trade Management ===
+InpUseTrailing=true
+InpTrailTriggerR=1.0
+InpTrailDistR=0.8
+InpUseBreakeven=true
+InpBeTriggerR=0.8
+InpBeOffsetPts=0.10
+
+; === Execution ===
+InpMagic=7788200
+InpMaxSlippagePts=30
+InpWarmupBars=200
+InpDrawDashboard=true
+InpDrawSignals=true
+InpLiveExecution=false
+InpDebugLog=false
+InpMaxTradesPerDay=3

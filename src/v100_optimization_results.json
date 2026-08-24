@@ -1,0 +1,134 @@
+[
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "5/8",
+    "lots": 25,
+    "train_pnl": 14.48,
+    "test_pnl": 8.7,
+    "combined": 23.18,
+    "wr": 46.3,
+    "pf": 1.15
+  },
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "3/5",
+    "lots": 25,
+    "train_pnl": 5.02,
+    "test_pnl": 7.07,
+    "combined": 12.09,
+    "wr": 43.0,
+    "pf": 1.09
+  },
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "5/8",
+    "lots": 20,
+    "train_pnl": 11.58,
+    "test_pnl": 6.96,
+    "combined": 18.54,
+    "wr": 46.3,
+    "pf": 1.15
+  },
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "3/5",
+    "lots": 20,
+    "train_pnl": 4.02,
+    "test_pnl": 5.66,
+    "combined": 9.67,
+    "wr": 43.0,
+    "pf": 1.09
+  },
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "5/8",
+    "lots": 15,
+    "train_pnl": 8.69,
+    "test_pnl": 5.22,
+    "combined": 13.91,
+    "wr": 46.3,
+    "pf": 1.15
+  },
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "3/5",
+    "lots": 15,
+    "train_pnl": 3.01,
+    "test_pnl": 4.24,
+    "combined": 7.25,
+    "wr": 43.0,
+    "pf": 1.09
+  },
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "5/8",
+    "lots": 10,
+    "train_pnl": 5.79,
+    "test_pnl": 3.48,
+    "combined": 9.27,
+    "wr": 46.3,
+    "pf": 1.15
+  },
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "3/6",
+    "lots": 25,
+    "train_pnl": 4.51,
+    "test_pnl": 3.22,
+    "combined": 7.74,
+    "wr": 37.5,
+    "pf": 1.05
+  },
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "3/5",
+    "lots": 10,
+    "train_pnl": 2.01,
+    "test_pnl": 2.83,
+    "combined": 4.84,
+    "wr": 43.0,
+    "pf": 1.09
+  },
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "3/6",
+    "lots": 20,
+    "train_pnl": 3.61,
+    "test_pnl": 2.58,
+    "combined": 6.19,
+    "wr": 37.5,
+    "pf": 1.05
+  },
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "3/6",
+    "lots": 15,
+    "train_pnl": 2.71,
+    "test_pnl": 1.93,
+    "combined": 4.64,
+    "wr": 37.5,
+    "pf": 1.05
+  },
+  {
+    "tf": "M5",
+    "strategy": "breakout",
+    "sl_tp": "3/6",
+    "lots": 10,
+    "train_pnl": 1.81,
+    "test_pnl": 1.29,
+    "combined": 3.09,
+    "wr": 37.5,
+    "pf": 1.05
+  }
+]
