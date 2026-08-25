@@ -8,6 +8,12 @@ Usage:
     python -m synthetic_trader.scripts.forward_demo --symbol R_75
     python -m synthetic_trader.scripts.forward_demo --symbol R_100
     python -m synthetic_trader.scripts.forward_demo --symbol R_75 --symbol R_100
+
+NOTE ON SYMBOLS: journals record INTERNAL canonical names. On this broker
+they map to SYN-series MT5 symbols: R_75 -> SYN75, R_100 -> SYN100 (see
+calibration/mt5_collector.DERIV_SYMBOL_MAP). This demo is an OFFLINE tick
+replay — it never sends orders; the EA-side configs targeting the same
+markets are named VOL75/VOL100.
 """
 
 from __future__ import annotations

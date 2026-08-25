@@ -228,31 +228,24 @@ def collect_ticks_from_mt5(
         mt5.shutdown()
 
 
-# Symbol mapping: internal name → MT5 venue symbol
+# Symbol mapping: internal name → MT5 venue symbol.
+# Single authoritative map (a stale SYN-series dict used to shadow this one
+# before the 2026-08-25 alignment audit removed it).
 DERIV_SYMBOL_MAP: dict[str, str] = {
-    "SYN50": "SYN50",
-    "SYN75": "SYN75",
-    "SYN100": "SYN100",
-    "SURGE50": "SURGE50",
-    "SURGE75": "SURGE75",
-    "SURGE100": "SURGE100",
-    "DROP50": "DROP50",
-    "DROP75": "DROP75",
-    "DROP100": "DROP100",
-    "LEAP50": "LEAP50",
-    "LEAP75": "LEAP75",
-    "LEAP100": "LEAP100",
-}
-
-DERIV_SYMBOL_MAP: dict[str, str] = {
-    # Verified live on the Deriv MT5 terminal (2026-08):
-    # "Volatility 75 Index" / "Volatility 100 Index" do NOT exist on the
-    # broker; the real symbols are SYN75 / SYN100 (matches the chart the
-    # user trades).  Keep the old names as fallback candidates.
-    "R_75": "SYN75",
-    "R_100": "SYN100",
-    "V75": "Boom 1000 Index",
-    "V100": "Crash 1000 Index",
+    # VERIFIED LIVE 2026-08-25 via scripts/mt5_probe.py against the actual
+    # terminal (730 symbols enumerated): the display names exist and are
+    # FULL-tradeable. There are NO "SYNxx" symbols on this terminal — the
+    # earlier SYN claim was stale/wrong. (1s) variants exist alongside the
+    # standard pairs and have DIFFERENT contract specs.
+    # Also fixed here historically: V75/V100 were once mapped to Boom/Crash
+    # 1000 — completely different one-directional instruments.
+    "R_10": "Volatility 10 Index",
+    "R_25": "Volatility 25 Index",
+    "R_50": "Volatility 50 Index",
+    "R_75": "Volatility 75 Index",
+    "R_100": "Volatility 100 Index",
+    "V75": "Volatility 75 Index",
+    "V100": "Volatility 100 Index",
 }
 
 

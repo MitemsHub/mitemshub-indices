@@ -73,22 +73,26 @@ def find_terminal_set_dir():
 # ═══════════════════════════════════════════════════════════════════════════
 
 SYMBOLS = {
+    # Keys ARE the venue display names (verified FULL-tradeable on this
+    # terminal via scripts/mt5_probe.py); resolve_symbol() is the safety net.
+    # params mirror the deployed *_FINAL.set tunes (z=2.0 won real-history
+    # validation at M15) so self-optimization suggestions stay comparable.
     "Volatility 75 Index": {
         'set_file': 'MitemshubAI_VOL75_FINAL.set',
-        'timeframe': 'H1',
+        'timeframe': 'M15',
         'params': {
-            'z_entry': 1.8, 'stop_mult': 0.10, 'target_mult': 0.8,
+            'z_entry': 2.0, 'stop_mult': 0.10, 'target_mult': 1.20,
             'hold_bars': 12, 'trail_be_r': 1.0, 'trail_behind_r': 0.3,
-            'vol_ratio': 1.03,
+            'vol_ratio': 1.25,
         }
     },
     "Volatility 100 Index": {
         'set_file': 'MitemshubAI_VOL100_FINAL.set',
-        'timeframe': 'H1',
+        'timeframe': 'M15',
         'params': {
-            'z_entry': 1.8, 'stop_mult': 0.10, 'target_mult': 0.6,
+            'z_entry': 2.0, 'stop_mult': 0.10, 'target_mult': 0.80,
             'hold_bars': 12, 'trail_be_r': 1.0, 'trail_behind_r': 0.3,
-            'vol_ratio': 1.03,
+            'vol_ratio': 1.25,
         }
     },
 }
@@ -99,20 +103,51 @@ TF_MAP = {
     'D1': mt5.TIMEFRAME_D1,
 }
 
+# ── Broker-truth alias resolution (2026-08-25 symbol-alignment audit) ────
+# VERIFIED via scripts/mt5_probe.py: the configured display names ARE the
+# terminal's real, FULL-tradeable symbol names (no SYN-series exists).
+# The resolver stays as a safety net: it probes before use, caches the
+# result, and would fall back to alternates if the broker ever renames.
+SYMBOL_ALIASES = {}
+_resolved_symbols = {}
+
+
+def resolve_symbol(sym_name):
+    """Return the venue symbol name that actually exists on this terminal."""
+    if sym_name in _resolved_symbols:
+        return _resolved_symbols[sym_name]
+    candidates = [sym_name] + SYMBOL_ALIASES.get(sym_name, [])
+    found = None
+    for cand in candidates:
+        try:
+            if mt5.symbol_info(cand) is not None:
+                found = cand
+                break
+        except Exception:
+            break
+    _resolved_symbols[sym_name] = found
+    if found and found != sym_name:
+        log(f"Symbol '{sym_name}' resolved to venue name '{found}'")
+    elif not found:
+        log(f"Symbol '{sym_name}' not found under aliases {candidates}", "WARN")
+    return found
+
 
 def enable_all_symbols():
     """Enable all trading symbols automatically."""
     enabled = 0
     for sym_name, sym_cfg in SYMBOLS.items():
-        info = mt5.symbol_info(sym_name)
+        venue = resolve_symbol(sym_name)
+        if venue is None:
+            continue
+        info = mt5.symbol_info(venue)
         if info is None:
-            log(f"Symbol {sym_name} not found", "WARN")
             continue
 
         # Make visible in Market Watch
         if not info.visible:
-            mt5.symbol_select(sym_name, True)
-            log(f"Enabled visibility for {sym_name}")
+            mt5.symbol_select(venue, True)
+            log(f"Enabled visibility for {sym_name} -> {venue}")
 
         # Check trade mode
         if info.trade_mode == mt5.SYMBOL_TRADE_MODE_FULL:
@@ -133,7 +168,8 @@ def check_ea_health():
     """Check if EAs are running on all charts."""
     health = {}
     for sym_name in SYMBOLS:
-        info = mt5.symbol_info(sym_name)
+        venue = resolve_symbol(sym_name)
+        info = mt5.symbol_info(venue) if venue else None
         if info:
             health[sym_name] = {
                 'visible': info.visible,
@@ -205,6 +241,7 @@ def get_open_positions(symbol=None):
 
 def send_order(symbol, order_type, volume, sl=0, tp=0, comment="MITEMSHUB"):
     """Send a trade order directly via MT5 API."""
+    symbol = resolve_symbol(symbol) or symbol
     tick = mt5.symbol_info_tick(symbol)
     if tick is None:
         log(f"Cannot get tick for {symbol}", "ERROR")
@@ -808,8 +845,9 @@ class AutonomousController:
             if sym_name in ('terminal', 'account'):
                 continue
             if not sym_data.get('tradeable'):
-                log(f"{sym_name} not tradeable, enabling...", "WARN")
-                mt5.symbol_select(sym_name, True)
+                venue = resolve_symbol(sym_name) or sym_name
+                log(f"{sym_name} not tradeable, enabling ({venue})...", "WARN")
+                mt5.symbol_select(venue, True)
 
         # Read expert journal
         entries = read_expert_journal(max_lines=5)

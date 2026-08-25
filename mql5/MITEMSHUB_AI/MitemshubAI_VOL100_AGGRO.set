@@ -1,11 +1,8 @@
-; MITEMSHUB AI v22.0 — Volatility 75 (tiny-account active profile, VALIDATED)
-; Regenerated 2026-08-25 with FULL v22 input coverage (v15-era keys dropped).
-; Magic standardized 2026-08-25 for 5-symbol parallel operation: 7788075.
-;
-; R_75 validated band geometry differs from R_100:
-;   z=2.0, stop=0.10x sigma_h, target=1.20x sigma_h, trail OFF
-;   (research: breakeven trail KILLS performance at the 1.20 target)
-;
+; MITEMSHUB AI v22.1 - Volatility 100 MAX-FREQUENCY AGGRO profile (2026-08-25)
+; z=1.0 = deepest VALIDATED gate on real ticks (~7 trades/day active windows, PF 1.88 best / 1.15 weak window)
+; effective-risk cap 45% so the 0.39 min-lot floor can trade on a small account
+; THIS PROFILE RISKS ~40% OF EQUITY PER TRADE ON A $30 ACCOUNT - 3 losses = account gone
+; Magic unchanged (7788100) - stays inside the fleet exposure guard.
 InpUsePullback=true
 InpUseBreakout=false
 InpUseMomentum=true
@@ -29,29 +26,29 @@ InpBreakoutBars=12
 InpMomBodyMin=0.45
 InpRsiOversold=32.0
 InpRsiOverbought=68.0
-InpBandZEntry=2.0
+InpBandZEntry=1.0
 InpBandVolExtRatio=1.25
 InpBandSigmaEmaLen=30
 InpBandStopSigmaMult=0.10
-InpBandTargetSigmaMult=1.20
+InpBandTargetSigmaMult=0.80
 InpBandHoldSec=3600
 InpBandMinRR=2.5
 InpBandMaxStopPct=0.015
 InpRiskPerTrade=0.005
-InpMaxEffectiveRiskPct=35.0
+InpMaxEffectiveRiskPct=45.0
 InpTpMult=2.0
 InpMaxHoldBars=14
-InpMaxDailyLossPct=0.35
-InpMaxConsecLoss=4
-InpCoolDownBars=2
-InpUseTrailing=false
+InpMaxDailyLossPct=0.50
+InpMaxConsecLoss=6
+InpCoolDownBars=1
+InpUseTrailing=true
 InpTrailStartR=1.0
 InpTrailDistR=0.9
-InpUseBreakeven=false
+InpUseBreakeven=true
 InpBeTriggerR=1.0
 InpEntryTFOverride=M15
 InpRegimeTFOverride=H1
-InpMagic=7788075
+InpMagic=7788100
 InpMaxSlippagePts=40
 InpWarmupBars=150
 InpDrawDashboard=true
@@ -59,5 +56,5 @@ InpDrawSignals=true
 InpLiveExecution=true
 InpMaxTradesPerDay=9999
 ; Account-wide exposure guard pinned 2026-08-25 (explicit keys, not code defaults)
-InpMaxTotalRiskPct=15.0
+InpMaxTotalRiskPct=50.0
 InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100

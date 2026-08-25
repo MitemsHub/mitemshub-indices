@@ -36,7 +36,6 @@ from synthetic_trader.domain import Tick
 class BrokerType(str, Enum):
     """Supported broker types with different price generation mechanisms."""
     DERIV = "deriv"
-    DERIV = "deriv"
 
 
 # ── GARCH State ──────────────────────────────────────────────────

@@ -288,17 +288,18 @@ def _parse_ea_log_trades():
                 with open(fp, 'rb') as fh:
                     text = fh.read(200000).decode('utf-16-le', errors='replace')
                     for line in text.split('\n'):
-                        if '[MITEM]' not in line and '[v16.5]' not in line and '[v21.1]' not in line:
+                        if '[MITEM]' not in line and '[v16.5]' not in line and '[v21.1]' not in line and '[v22' not in line:
                             continue
                         if '$10000' in line:
                             continue
 
-                        # --- v21.1 log format: [v21.1] SC{score} BUY/SELL @... SL=... TP=...
-                        if 'v21.1' in line and ('BUY @' in line or 'SELL @' in line):
+                        # --- v21.1/v22 log format: [vTAG] SC{score} BUY/SELL @... SL=... TP=...
+                        if ('[v21.1]' in line or '[v22' in line) and ('BUY @' in line or 'SELL @' in line):
                             try:
                                 parts = line.split('\t')
                                 time_str = parts[2].strip() if len(parts) > 2 else ''
-                                msg = line.split('[v21.1]')[1].strip()
+                                ver_tag = '[v22]' if '[v22' in line else '[v21.1]'
+                                msg = line.split(ver_tag)[1].strip()
                                 direction = 'BUY' if 'BUY @' in msg else 'SELL'
                                 entry_price = float(msg.split('@')[1].split()[0])
                                 sl = float(msg.split('SL=')[1].split()[0]) if 'SL=' in msg else 0
@@ -318,15 +319,16 @@ def _parse_ea_log_trades():
                                     'signal_type': sig,
                                     'status': 'OPEN',
                                     'source': 'EA_LOG',
-                                    'version': 'v21.1',
+                                    'version': 'v22' if '[v22' in line else 'v21.1',
                                 })
                             except Exception:
                                 pass
-                        elif 'v21.1' in line and 'CLOSE' in line:
+                        elif ('[v21.1]' in line or '[v22' in line) and 'CLOSE' in line:
                             try:
                                 parts = line.split('\t')
                                 time_str = parts[2].strip() if len(parts) > 2 else ''
-                                msg = line.split('[v21.1]')[1].strip()
+                                ver_tag = '[v22]' if '[v22' in line else '[v21.1]'
+                                msg = line.split(ver_tag)[1].strip()
                                 r_mult = float(msg.split('R=')[1].split()[0]) if 'R=' in msg else 0
                                 reason = 'STOP' if 'STOP' in msg else 'TARGET' if 'TARGET' in msg else 'TIME' if 'TIME' in msg else 'CLOSE'
                                 for ot in reversed(log_trades):
