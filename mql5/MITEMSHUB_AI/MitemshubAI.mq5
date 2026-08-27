@@ -123,6 +123,15 @@ input double InpScaleFactor      = 0.75;     // Volume multiplier per consecutiv
 input double InpMinVolScale      = 0.30;     // Floor for volume scaling
 input double InpProfitLockR      = 0.5;      // Lock profit if trade reached 1R+ then fell to this R
 
+input group "=== Self-Review Intelligence (v23.1) ==="
+input int    InpStrategyReviewN  = 10;       // Check strategy performance every N trades
+input int    InpRegimeReviewN    = 20;       // Check regime performance every N trades
+input int    InpTimeReviewN      = 30;       // Check time-block performance every N trades
+input int    InpMinTradesToJudge = 15;       // Minimum trades before auto-disabling a strategy
+input double InpMinExpectancy    = 0.0;      // Min expectancy (R/trade) to keep a strategy active
+input bool   InpAutoDisableStrat = true;     // Auto-disable strategies with negative expectancy
+input bool   InpAutoBlockTime    = false;    // Auto-block worst-performing time blocks
+
 //+------------------------------------------------------------------+
 //| GLOBALS                                                            |
 //+------------------------------------------------------------------+
@@ -177,6 +186,34 @@ int    g_fleet_n=0;
 
 // v23: cumulative session P&L (money, not R)
 double g_session_pnl=0;
+
+// v23.1 INTELLIGENCE LAYER — self-review after every trade
+#define REVIEW_FILE "MitemshubAI_review.csv"
+
+// Strategy performance tracking (index 0=PB,1=BO,2=MOM,3=MR,4=BF)
+double g_strat_trades[5];     // total trades per strategy
+double g_strat_wins[5];       // wins per strategy
+double g_strat_total_r[5];    // cumulative R per strategy
+bool   g_strat_enabled[5];    // auto-disable flag
+
+// Regime performance tracking (index 0=BULL,1=BEAR,2=RANGE,3=HVOL,4=NOTRADE)
+double g_regime_trades[5];
+double g_regime_wins[5];
+double g_regime_total_r[5];
+
+// Time-block tracking (index 0=06-10,1=10-14,2=14-18,3=18-21,4=other)
+double g_time_trades[5];
+double g_time_wins[5];
+double g_time_total_r[5];
+
+// Last review counters
+int g_last_strategy_review=0;
+int g_last_regime_review=0;
+int g_last_time_review=0;
+
+// Current signal context (set by GenerateSignal, used by ReviewTrade)
+string g_last_strategy="NONE";
+string g_last_exit_type="NONE";
 
 //+------------------------------------------------------------------+
 ENUM_TIMEFRAMES GetRegimeTF(ENUM_TIMEFRAMES tf)
@@ -242,7 +279,7 @@ int OnInit()
    }
 
    RecoverPosition();
-   LoadState();  // v23: restore persisted trade stats
+   LoadReviewState();  // v23.1: restore persisted trade stats + intelligence
    if(InpDrawDashboard) CreateDashboard();
 
    Print("[v23.0] MITEMSHUB AI v23.0 started | 5 Strategies | Regime-Aware | Intelligent Exits");
@@ -257,6 +294,10 @@ int OnInit()
       Print("[v23] WARNING: risk cap > 10% — tiny-account mode.");
    Print("[v23.0] Telemetry -> MQL5\\Files\\", TELEM_FILE);
    Print("[v23.0] State -> MQL5\\Files\\", STATE_FILE);
+   PrintFormat("[v23.1] Intelligence: StrategyReview@%d trades, RegimeReview@%d, TimeReview@%d",
+               InpStrategyReviewN, InpRegimeReviewN, InpTimeReviewN);
+   PrintFormat("[v23.1] Auto-disable: %s (min %d trades, min expectancy %.2fR)",
+               InpAutoDisableStrat?"ON":"OFF", InpMinTradesToJudge, InpMinExpectancy);
    return INIT_SUCCEEDED;
 }
 
@@ -268,7 +309,7 @@ void OnDeinit(const int reason)
    IndicatorRelease(hRSI_E); IndicatorRelease(hATR_E); IndicatorRelease(hBB_E);
    for(int i=0;i<26;i++) ObjectDelete(0, dash_names[i]);
 
-   SaveState();  // v23: persist trade stats on shutdown
+   SaveReviewState();  // v23.1: persist trade stats + intelligence on shutdown
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
    PrintFormat("[v23] FINAL | Trades:%d WR:%.1f%% R:%+.2f | Stops:%d Time:%d EarlyCut:%d Target:%d",
@@ -532,6 +573,307 @@ void LoadState()
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
    PrintFormat("[v23] Loaded state: Trades=%d WR=%.1f%% R=%+.2f ConsecLoss=%d",
                g_trades, wr, g_total_r, g_consec_loss);
+}
+
+//+------------------------------------------------------------------+
+//| v23.1 INTELLIGENCE LAYER — self-review after every trade          |
+//+------------------------------------------------------------------+
+
+// Map strategy name to array index
+int GetStrategyIndex(string strat)
+{
+   if(strat=="PB") return 0;
+   if(strat=="BO") return 1;
+   if(strat=="MOM") return 2;
+   if(strat=="MR") return 3;
+   if(strat=="BF") return 4;
+   return -1;
+}
+
+// Map regime to array index
+int GetRegimeIndex(ENUM_REGIME r)
+{
+   if(r==REGIME_BULLISH) return 0;
+   if(r==REGIME_BEARISH) return 1;
+   if(r==REGIME_RANGING) return 2;
+   if(r==REGIME_HIGH_VOL) return 3;
+   return 4; // NO_TRADE
+}
+
+// Map server hour to time block index
+int GetTimeBlockIndex(int hour)
+{
+   if(hour >= 6  && hour < 10) return 0;  // Early session
+   if(hour >= 10 && hour < 14) return 1;  // Mid session
+   if(hour >= 14 && hour < 18) return 2;  // Afternoon
+   if(hour >= 18 && hour < 21) return 3;  // Late session
+   return 4; // Off-hours
+}
+
+string TimeBlockStr(int idx)
+{
+   if(idx==0) return "06-10";
+   if(idx==1) return "10-14";
+   if(idx==2) return "14-18";
+   if(idx==3) return "18-21";
+   return "OFF";
+}
+
+// Main post-trade review — called from ClosePosition after every trade
+void PostTradeReview(string strategy, double rMultiple, string exitType)
+{
+   // 1. Update strategy counters
+   int si = GetStrategyIndex(strategy);
+   if(si >= 0)
+   {
+      g_strat_trades[si]++;
+      g_strat_wins[si] += (rMultiple > 0) ? 1 : 0;
+      g_strat_total_r[si] += rMultiple;
+   }
+
+   // 2. Update regime counters
+   int ri = GetRegimeIndex(g_regime);
+   g_regime_trades[ri]++;
+   g_regime_wins[ri] += (rMultiple > 0) ? 1 : 0;
+   g_regime_total_r[ri] += rMultiple;
+
+   // 3. Update time-block counters
+   MqlDateTime dt; TimeCurrent(dt);
+   int ti = GetTimeBlockIndex(dt.hour);
+   g_time_trades[ti]++;
+   g_time_wins[ti] += (rMultiple > 0) ? 1 : 0;
+   g_time_total_r[ti] += rMultiple;
+
+   // 4. Log to review file
+   WriteReviewLog(strategy, RegimeToStr(g_regime), rMultiple, exitType, dt.hour);
+
+   // 5. Periodic reviews
+   if(g_trades >= g_last_strategy_review + InpStrategyReviewN)
+   {
+      CheckStrategyPerformance();
+      g_last_strategy_review = g_trades;
+   }
+   if(g_trades >= g_last_regime_review + InpRegimeReviewN)
+   {
+      CheckRegimePerformance();
+      g_last_regime_review = g_trades;
+   }
+   if(g_trades >= g_last_time_review + InpTimeReviewN)
+   {
+      CheckTimeBlockPerformance();
+      g_last_time_review = g_trades;
+   }
+
+   // 6. If on losing streak, diagnose root cause
+   if(g_consec_loss >= 2)
+      AnalyzeLosingStreak();
+
+   // 7. Save review state
+   SaveReviewState();
+}
+
+// Check if any strategy should be auto-disabled
+void CheckStrategyPerformance()
+{
+   const string names[] = {"PB","BO","MOM","MR","BF"};
+   bool *enabled[] = {&InpUsePullback, &InpUseBreakout, &InpUseMomentum, &InpUseMeanRevert, &InpUseBandFade};
+
+   Print("[v23.1] === STRATEGY PERFORMANCE REVIEW ===");
+   for(int i=0; i<5; i++)
+   {
+      if(g_strat_trades[i] < InpMinTradesToJudge) continue;
+      double wr = g_strat_wins[i] / g_strat_trades[i];
+      double expectancy = g_strat_total_r[i] / g_strat_trades[i];
+      string status = "KEEP";
+
+      if(InpAutoDisableStrat && expectancy < InpMinExpectancy && g_strat_trades[i] >= InpMinTradesToJudge)
+      {
+         g_strat_enabled[i] = false;
+         status = "DISABLED";
+         PrintFormat("[v23.1] STRATEGY %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f → %s (negative expectancy)",
+                     names[i], g_strat_trades[i], wr*100, expectancy, status);
+      }
+      else
+      {
+         g_strat_enabled[i] = true;
+         PrintFormat("[v23.1] STRATEGY %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f → %s",
+                     names[i], g_strat_trades[i], wr*100, expectancy, status);
+      }
+   }
+}
+
+// Log regime performance
+void CheckRegimePerformance()
+{
+   const string names[] = {"BULLISH","BEARISH","RANGING","HIGH_VOL","NO_TRADE"};
+   Print("[v23.1] === REGIME PERFORMANCE REVIEW ===");
+   for(int i=0; i<5; i++)
+   {
+      if(g_regime_trades[i] < 3) continue;
+      double wr = g_regime_wins[i] / g_regime_trades[i];
+      double expectancy = g_regime_total_r[i] / g_regime_trades[i];
+      PrintFormat("[v23.1] REGIME %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f",
+                  names[i], g_regime_trades[i], wr*100, expectancy);
+   }
+}
+
+// Log time-block performance
+void CheckTimeBlockPerformance()
+{
+   Print("[v23.1] === TIME-BLOCK PERFORMANCE REVIEW ===");
+   for(int i=0; i<5; i++)
+   {
+      if(g_time_trades[i] < 3) continue;
+      double wr = g_time_wins[i] / g_time_trades[i];
+      double expectancy = g_time_total_r[i] / g_time_trades[i];
+      PrintFormat("[v23.1] TIME %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f",
+                  TimeBlockStr(i), g_time_trades[i], wr*100, expectancy);
+   }
+}
+
+// Diagnose root cause of losing streaks
+void AnalyzeLosingStreak()
+{
+   PrintFormat("[v23.1] LOSING STREAK ANALYSIS — %d consecutive losses, TotalR=%+.2f", g_consec_loss, g_total_r);
+
+   // Check if losses are concentrated in one strategy
+   for(int i=0; i<5; i++)
+   {
+      if(g_strat_trades[i] == 0) continue;
+      double recent_r = g_strat_total_r[i];
+      if(recent_r < -1.0 && g_strat_trades[i] >= 5)
+         PrintFormat("[v23.1] WARNING: Strategy index %d has R=%+.2f over %.0f trades — review needed", i, recent_r, g_strat_trades[i]);
+   }
+
+   // Check if losses are concentrated in one regime
+   for(int i=0; i<5; i++)
+   {
+      if(g_regime_trades[i] == 0) continue;
+      if(g_regime_total_r[i] < -1.0 && g_regime_trades[i] >= 5)
+         PrintFormat("[v23.1] WARNING: Regime %d has R=%+.2f over %.0f trades", i, g_regime_total_r[i], g_regime_trades[i]);
+   }
+}
+
+// Write one review log line
+void WriteReviewLog(string strategy, string regime, double rMultiple, string exitType, int hour)
+{
+   int h=FileOpen(REVIEW_FILE, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+   if(h==INVALID_HANDLE) return;
+   FileSeek(h,0,SEEK_END);
+   FileWriteString(h, StringFormat("%s,%s,%.3f,%s,%d,%.2f,%d\n",
+                   TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),
+                   strategy, rMultiple, exitType, hour, g_total_r, g_trades));
+   FileClose(h);
+}
+
+// Save review state
+void SaveReviewState()
+{
+   int h=FileOpen(STATE_FILE, FILE_WRITE|FILE_TXT|FILE_ANSI);
+   if(h==INVALID_HANDLE) return;
+   FileWriteString(h, StringFormat("%d,%d,%d,%d,%d,%.4f,%d,%d,%d\n",
+                   g_trades, g_wins, g_losses,
+                   g_target_exits, g_time_exits, g_total_r,
+                   g_stop_exits, g_early_cuts, g_consec_loss));
+   // Strategy performance
+   for(int i=0;i<5;i++)
+      FileWriteString(h, StringFormat("STRAT,%d,%.0f,%.0f,%.4f,%d\n",
+                      i, g_strat_trades[i], g_strat_wins[i], g_strat_total_r[i], g_strat_enabled[i]?1:0));
+   // Regime performance
+   for(int i=0;i<5;i++)
+      FileWriteString(h, StringFormat("REGIME,%d,%.0f,%.0f,%.4f\n",
+                      i, g_regime_trades[i], g_regime_wins[i], g_regime_total_r[i]));
+   // Time-block performance
+   for(int i=0;i<5;i++)
+      FileWriteString(h, StringFormat("TIME,%d,%.0f,%.0f,%.4f\n",
+                      i, g_time_trades[i], g_time_wins[i], g_time_total_r[i]));
+   // Review counters
+   FileWriteString(h, StringFormat("REVIEW,%d,%d,%d\n",
+                   g_last_strategy_review, g_last_regime_review, g_last_time_review));
+   FileClose(h);
+}
+
+// Load review state
+void LoadReviewState()
+{
+   int h=FileOpen(STATE_FILE, FILE_READ|FILE_TXT|FILE_ANSI);
+   if(h==INVALID_HANDLE) return;
+   
+   // Read base state (first line)
+   string line = FileReadString(h);
+   if(StringLen(line)==0) { FileClose(h); return; }
+   string parts[];
+   int n = StringSplit(line, ',', parts);
+   if(n >= 7)
+   {
+      g_trades       = (int)StringToInteger(parts[0]);
+      g_wins         = (int)StringToInteger(parts[1]);
+      g_losses       = (int)StringToInteger(parts[2]);
+      g_target_exits = (int)StringToInteger(parts[3]);
+      g_time_exits   = (int)StringToInteger(parts[4]);
+      g_total_r      = StringToDouble(parts[5]);
+      g_stop_exits   = (int)StringToInteger(parts[6]);
+   }
+   if(n >= 8) g_early_cuts  = (int)StringToInteger(parts[7]);
+   if(n >= 9) g_consec_loss = (int)StringToInteger(parts[8]);
+
+   // Read review data
+   while(!FileIsEnding(h))
+   {
+      line = FileReadString(h);
+      if(StringLen(line)==0) continue;
+      string rp[];
+      int rn = StringSplit(line, ',', rp);
+      if(rn < 2) continue;
+
+      if(rp[0]=="STRAT" && rn >= 6)
+      {
+         int idx = (int)StringToInteger(rp[1]);
+         if(idx >= 0 && idx < 5)
+         {
+            g_strat_trades[idx]  = StringToDouble(rp[2]);
+            g_strat_wins[idx]    = StringToDouble(rp[3]);
+            g_strat_total_r[idx] = StringToDouble(rp[4]);
+            g_strat_enabled[idx] = (StringToInteger(rp[5]) == 1);
+         }
+      }
+      else if(rp[0]=="REGIME" && rn >= 5)
+      {
+         int idx = (int)StringToInteger(rp[1]);
+         if(idx >= 0 && idx < 5)
+         {
+            g_regime_trades[idx]  = StringToDouble(rp[2]);
+            g_regime_wins[idx]    = StringToDouble(rp[3]);
+            g_regime_total_r[idx] = StringToDouble(rp[4]);
+         }
+      }
+      else if(rp[0]=="TIME" && rn >= 5)
+      {
+         int idx = (int)StringToInteger(rp[1]);
+         if(idx >= 0 && idx < 5)
+         {
+            g_time_trades[idx]  = StringToDouble(rp[2]);
+            g_time_wins[idx]    = StringToDouble(rp[3]);
+            g_time_total_r[idx] = StringToDouble(rp[4]);
+         }
+      }
+      else if(rp[0]=="REVIEW" && rn >= 4)
+      {
+         g_last_strategy_review = (int)StringToInteger(rp[1]);
+         g_last_regime_review   = (int)StringToInteger(rp[2]);
+         g_last_time_review     = (int)StringToInteger(rp[3]);
+      }
+   }
+   FileClose(h);
+
+   double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
+   PrintFormat("[v23.1] Loaded intelligence: Trades=%d WR=%.1f%% R=%+.2f", g_trades, wr, g_total_r);
+   for(int i=0;i<5;i++)
+   {
+      if(g_strat_trades[i] >= 5)
+         PrintFormat("[v23.1] Strategy %d: %.0f trades, R=%+.2f, enabled=%s",
+                     i, g_strat_trades[i], g_strat_total_r[i], g_strat_enabled[i]?'1':'0');
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -822,6 +1164,24 @@ int GenerateSignal(string &sig_type)
       sig_type = StringFormat("SC%d%s", MathMax(buy_score,sell_score),
                               g_sig_is_band ? "B" : "");
       g_last_skip="";
+
+      // v23.1: Capture the primary strategy for intelligence review
+      g_last_strategy = "NONE";
+      if(g_sig_is_band) g_last_strategy = "BF";
+      else if(final_dir>0)
+      {
+         if(dirs[0]>0) g_last_strategy = "PB";
+         else if(dirs[1]>0) g_last_strategy = "BO";
+         else if(dirs[2]>0) g_last_strategy = "MOM";
+         else if(dirs[3]>0) g_last_strategy = "MR";
+      }
+      else
+      {
+         if(dirs[0]<0) g_last_strategy = "PB";
+         else if(dirs[1]<0) g_last_strategy = "BO";
+         else if(dirs[2]<0) g_last_strategy = "MOM";
+         else if(dirs[3]<0) g_last_strategy = "MR";
+      }
    }
    else g_last_skip=skip_reason;
 
@@ -1120,7 +1480,11 @@ void ClosePosition(string reason)
       g_consec_loss, (g_paused?"true":"false"), (DailyLossHalted()?"true":"false")));
 
    g_ticket=0; g_dir=0; g_bars_held=0; g_high_water_r=0;
-   SaveState();  // v23: persist after every close
+
+   // v23.1: Run intelligence review after every trade
+   PostTradeReview(g_last_strategy, r, reason);
+
+   SaveReviewState();  // v23.1: persist after every close
 }
 
 //+------------------------------------------------------------------+
@@ -1172,7 +1536,7 @@ void UpdateDashboard()
       L[11]=StringFormat("Guard: fleet $%.2f / $%.2f cap%s",
                          fr,cap, nsl>0?StringFormat(" [%d no-SL!]",nsl):"");
    }
-   L[12]=StringFormat("GradExit: %s ECut@%dR/%dbars | PLock: %.1fR",
+   L[12]=StringFormat("GradExit: %s ECut@%.1fR/%dbars | PLock: %.1fR",
         InpGraduatedExit?"ON":"OFF", InpEarlyCutMaxR, InpEarlyCutBars, InpProfitLockR);
    L[13]=StringFormat("ScaleLoss: %s (%.0f%% per loss, floor %.0f%%) | ConsecLoss: %d",
         InpScaleAfterLoss?"ON":"OFF", InpScaleFactor*100, InpMinVolScale*100, g_consec_loss);
@@ -1185,6 +1549,26 @@ void UpdateDashboard()
       L[line++]=StringFormat("OPEN %s @%.5f R:%+.2f HW:%.2fR bars:%d/%d",
                              g_dir>0?"BUY":"SELL",g_entry,rnow,g_high_water_r,g_bars_held,g_max_hold);
    }
+
+   // v23.1: Intelligence layer status
+   {
+      const string snames[] = {"PB","BO","MOM","MR","BF"};
+      double best_r = -999; int best_i = -1;
+      double worst_r = 999; int worst_i = -1;
+      for(int i=0; i<5; i++)
+      {
+         if(g_strat_trades[i] < 3) continue;
+         if(g_strat_total_r[i] > best_r) { best_r = g_strat_total_r[i]; best_i = i; }
+         if(g_strat_total_r[i] < worst_r) { worst_r = g_strat_total_r[i]; worst_i = i; }
+      }
+      if(best_i >= 0)
+         L[line++]=StringFormat("Intel: Best=%s(%+.1fR) Worst=%s(%+.1fR) Reviews:%d",
+                                snames[best_i], best_r, snames[worst_i], worst_r,
+                                g_last_strategy_review);
+      else
+         L[line++]="Intel: Collecting data... (need 15+ trades)";
+   }
+
    while(line<26) L[line++]=" ";
 
    for(int i=0;i<26;i++)
