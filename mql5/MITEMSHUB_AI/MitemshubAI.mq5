@@ -358,7 +358,22 @@ void OnTick()
    if(g_ticket>0)
    {
       if(PositionSelectByTicket(g_ticket)) ManagePosition();
-      else g_ticket=0;
+      else
+      {
+         // v23.1: Position disappeared — manual close detected
+         double exit_p = g_dir>0 ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+         double r = g_orig_risk>0 ? (g_dir>0?(exit_p-g_entry):(g_entry-exit_p))/g_orig_risk : 0;
+         g_trades++; g_total_r += r;
+         if(r>0) g_wins++; else g_losses++;
+         g_daily_pnl += r*g_risk_money;
+         g_session_pnl += r*g_risk_money;
+         double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
+         PrintFormat("[v23.1] MANUAL CLOSE detected — R=%+.3f | Trades:%d WR:%.1f%% TotalR:%+.2f",
+                     r, g_trades, wr, g_total_r);
+         PostTradeReview(g_last_strategy, r, "MANUAL");
+         g_ticket=0; g_dir=0; g_bars_held=0; g_high_water_r=0;
+         SaveReviewState();
+      }
    }
 
    // v23.1: Periodic position recovery — detect positions that filled during reloads
