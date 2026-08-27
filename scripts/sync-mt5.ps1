@@ -30,8 +30,9 @@ foreach ($mql5Dir in $mql5Dirs) {
     $setsDir    = Join-Path $mql5Dir "Profiles\Sets"
     $expertsDir = Join-Path $mql5Dir "Experts"
     $mitemDir   = Join-Path $mql5Dir "Experts\MITEMSHUB_AI"
+    $presetsDir = Join-Path $mql5Dir "Presets"
 
-    foreach ($dir in @($setsDir, $expertsDir, $mitemDir)) {
+    foreach ($dir in @($setsDir, $expertsDir, $mitemDir, $presetsDir)) {
         if (-not (Test-Path $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
@@ -42,6 +43,7 @@ foreach ($mql5Dir in $mql5Dirs) {
             Copy-Item $_.FullName $setsDir -Force
             Copy-Item $_.FullName $expertsDir -Force
             Copy-Item $_.FullName $mitemDir -Force
+            Copy-Item $_.FullName $presetsDir -Force
             $synced++
         }
     }
