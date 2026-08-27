@@ -1,8 +1,19 @@
-; MITEMSHUB AI v22.1 - Volatility 100 MAX-FREQUENCY AGGRO profile (2026-08-25)
-; z=1.0 = deepest VALIDATED gate on real ticks (~7 trades/day active windows, PF 1.88 best / 1.15 weak window)
-; effective-risk cap 45% so the 0.39 min-lot floor can trade on a small account
-; THIS PROFILE RISKS ~40% OF EQUITY PER TRADE ON A $30 ACCOUNT - 3 losses = account gone
-; Magic unchanged (7788100) - stays inside the fleet exposure guard.
+; MITEMSHUB AI v23.0 - Volatility 100 AGGRO profile
+; Regenerated 2026-08-27 with ALL v23 intelligence & safety upgrades.
+;
+; WARNING: On a $30 account, min-lot risk is ~40% of equity per trade.
+;          This profile is DEMO/FUNDED-ONLY. Use VOL75 for live $30 accounts.
+;
+; KEY v23 FIXES:
+;   1. MaxConsecLoss lowered 6 -> 3
+;   2. CoolDownBars raised 1 -> 3
+;   3. MaxHoldBars raised 14 -> 20
+;   4. MaxDailyLossPct lowered 0.50 -> 0.10 (10% cap for V100's big lots)
+;   5. MaxTotalRiskPct lowered 50 -> 25 (tighter fleet guard)
+;   6. TrailDistR tightened 0.9 -> 0.7
+;   7. Graduated exit, profit lock, session filter, volume scaling ON
+;
+; Magic 7788100 — fleet exposure guard compliant.
 InpUsePullback=true
 InpUseBreakout=false
 InpUseMomentum=true
@@ -35,15 +46,15 @@ InpBandHoldSec=3600
 InpBandMinRR=2.5
 InpBandMaxStopPct=0.015
 InpRiskPerTrade=0.005
-InpMaxEffectiveRiskPct=45.0
+InpMaxEffectiveRiskPct=40.0
 InpTpMult=2.0
-InpMaxHoldBars=14
-InpMaxDailyLossPct=0.50
-InpMaxConsecLoss=6
-InpCoolDownBars=1
+InpMaxHoldBars=20
+InpMaxDailyLossPct=0.10
+InpMaxConsecLoss=3
+InpCoolDownBars=3
 InpUseTrailing=true
 InpTrailStartR=1.0
-InpTrailDistR=0.9
+InpTrailDistR=0.7
 InpUseBreakeven=true
 InpBeTriggerR=1.0
 InpEntryTFOverride=M15
@@ -55,6 +66,18 @@ InpDrawDashboard=true
 InpDrawSignals=true
 InpLiveExecution=true
 InpMaxTradesPerDay=9999
-; Account-wide exposure guard pinned 2026-08-25 (explicit keys, not code defaults)
-InpMaxTotalRiskPct=50.0
+; Account-wide exposure guard
+InpMaxTotalRiskPct=25.0
 InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100
+; v23 Intelligence & Safety
+InpSessionStartHour=6
+InpSessionEndHour=21
+InpSameSymbolMaxPos=1
+InpGraduatedExit=true
+InpEarlyCutBars=6
+InpEarlyCutMaxR=-0.4
+InpExtendWinMult=1.5
+InpScaleAfterLoss=true
+InpScaleFactor=0.75
+InpMinVolScale=0.30
+InpProfitLockR=0.5

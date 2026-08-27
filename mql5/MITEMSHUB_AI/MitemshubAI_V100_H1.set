@@ -1,13 +1,17 @@
-; MITEMSHUB AI v21.1 — V100 Optimized Settings
+; MITEMSHUB AI v22.1 — V100 Optimized Settings
 ; 4 Core Strategies • Regime-Aware • Active Trader
+; De-staled 2026-08-25: full v22 key coverage (band-fade leg pinned explicitly;
+; legacy InpRiskPerTrade=0.25 corrected to 0.005 = 0.5% target risk)
 
 ; === Strategy Selection ===
 InpUsePullback=true
 InpUseBreakout=true
 InpUseMomentum=true
 InpUseMeanRevert=true
+InpUseBandFade=true
 InpMinScore=3
 InpRequire2Strats=false
+InpMomentumStandalone=false
 
 ; === Regime & Volatility ===
 InpEmaFast=20
@@ -28,8 +32,21 @@ InpMomBodyMin=0.45
 InpRsiOversold=32.0
 InpRsiOverbought=68.0
 
+; === Band Fade (validated edge — V100 tune) ===
+InpBandZEntry=2.0
+InpBandVolExtRatio=1.25
+InpBandSigmaEmaLen=30
+InpBandStopSigmaMult=0.10
+InpBandTargetSigmaMult=0.80
+InpBandHoldSec=3600
+InpBandMinRR=2.5
+InpBandMaxStopPct=0.015
+
 ; === Risk & Exits ===
-InpRiskPerTrade=0.25
+InpRiskPerTrade=0.005
+InpMaxEffectiveRiskPct=30.0
+InpMaxTotalRiskPct=15.0
+InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100,7788211
 InpTpMult=2.5
 InpMaxHoldBars=14
 InpMaxDailyLossPct=0.03

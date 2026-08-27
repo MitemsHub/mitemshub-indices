@@ -1,17 +1,21 @@
-; MITEMSHUB AI v22.0 — Volatility 100 (tiny-account active profile, VALIDATED)
-; Regenerated 2026-08-25 with FULL v22 input coverage (v15-era keys dropped).
-; Magic standardized 2026-08-25 for 5-symbol parallel operation: 7788100.
+; MITEMSHUB AI v23.0 — Volatility 100 FINAL profile (VALIDATED)
+; Regenerated 2026-08-27 with ALL v23 intelligence & safety upgrades.
 ;
-; Edge allocation per walk-forward research:
-;   PRIMARY  : Band fade  z>=2.0, stop=0.10x sigma_h, target=0.80x sigma_h (R_100 optimized)
-;   SUPPORT  : Mean reversion (ranging) + EMA pullback (trend)
-;   CONFLUENCE ONLY : Momentum candle (can NEVER trigger an entry alone)
-;   DISABLED : Breakout (unvalidated on synthetics — chase risk)
+; R_100 validated band geometry:
+;   z=2.0, stop=0.10x sigma_h, target=0.80x sigma_h
+;   trailing ON (0.7R dist), breakeven ON at 1R
 ;
-; TINY-ACCOUNT MODE ($30): min lot forces ~25% effective risk/trade.
-; InpMaxEffectiveRiskPct caps catastrophe; DailyLoss 0.30 ~= 1 losing trade.
-; REAL FIX = fund account to $250+ or drop symbol risk; see PRODUCTION_CONFIGS.md.
+; TINY-ACCOUNT MODE: min lot forces ~25% effective risk/trade on $30.
+; Fund to $250+ or drop symbol; see PRODUCTION_CONFIGS.md.
 ;
+; KEY v23 FIXES:
+;   1. MaxConsecLoss 3 (was 4 — tighter circuit breaker)
+;   2. MaxHoldBars 20 (was 14 — give winners room)
+;   3. MaxDailyLossPct 5% (was 30% — much tighter)
+;   4. TrailDistR 0.7 (was 0.9 — lock profit sooner)
+;   5. Graduated exit, profit lock, session filter, volume scaling ON
+;
+; Magic 7788100 — fleet exposure guard compliant.
 InpUsePullback=true
 InpUseBreakout=false
 InpUseMomentum=true
@@ -46,13 +50,13 @@ InpBandMaxStopPct=0.015
 InpRiskPerTrade=0.005
 InpMaxEffectiveRiskPct=30.0
 InpTpMult=2.0
-InpMaxHoldBars=14
-InpMaxDailyLossPct=0.30
-InpMaxConsecLoss=4
-InpCoolDownBars=2
+InpMaxHoldBars=20
+InpMaxDailyLossPct=0.05
+InpMaxConsecLoss=3
+InpCoolDownBars=3
 InpUseTrailing=true
 InpTrailStartR=1.0
-InpTrailDistR=0.9
+InpTrailDistR=0.7
 InpUseBreakeven=true
 InpBeTriggerR=1.0
 InpEntryTFOverride=M15
@@ -64,6 +68,18 @@ InpDrawDashboard=true
 InpDrawSignals=true
 InpLiveExecution=true
 InpMaxTradesPerDay=9999
-; Account-wide exposure guard pinned 2026-08-25 (explicit keys, not code defaults)
+; Account-wide exposure guard
 InpMaxTotalRiskPct=15.0
 InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100
+; v23 Intelligence & Safety
+InpSessionStartHour=6
+InpSessionEndHour=21
+InpSameSymbolMaxPos=1
+InpGraduatedExit=true
+InpEarlyCutBars=6
+InpEarlyCutMaxR=-0.4
+InpExtendWinMult=1.5
+InpScaleAfterLoss=true
+InpScaleFactor=0.75
+InpMinVolScale=0.30
+InpProfitLockR=0.5

@@ -1,19 +1,17 @@
-; MITEMSHUB AI v23.0 - Volatility 75 AGGRO profile
-; Regenerated 2026-08-27 with ALL v23 intelligence & safety upgrades.
+; MITEMSHUB AI v23.0 — Volatility 10 (tiny-account parallel profile #1 of 5)
+; Generated 2026-08-25. UNVALIDATED starting tune — run STRATEGY_TESTER_VALIDATION.md
+; Pass-A gates before scaling size. Internal name R_10.
+; CHART NAME: attach to the V10 chart exactly as named in Market Watch
+; ("Volatility 10 Index" or SYN10 on this broker) — .set pins timeframes.
 ;
-; KEY v23 FIXES vs v22:
-;   1. TRAILING + BREAKEVEN RE-ENABLED — the #1 killer was both OFF
-;   2. MaxConsecLoss lowered 6 -> 3 — stop sooner, preserve capital
-;   3. CoolDownBars raised 1 -> 3 — don't re-enter immediately after loss
-;   4. MaxHoldBars raised 14 -> 20 — give trades room to reach TP
-;   5. MaxEffectiveRiskPct lowered 35 -> 20 — tighter per-trade risk cap
-;   6. MaxDailyLossPct lowered 0.35 -> 0.05 — 5% daily halt, not 35%
-;   7. MaxTotalRiskPct lowered 50 -> 15 — sane fleet exposure
-;   8. TrailDistR tightened 0.9 -> 0.7 — lock profit sooner
-;   9. Graduated exit, profit lock, session filter, volume scaling ON
+; TUNING RATIONALE (vol-tier scaling, ~10% annualized vol):
+;   - Ultra-low vol: sigma is small, so spread eats a larger share of each
+;     move. Demand deep extension (z>=2.3), take nearby profits (0.60 x
+;     sigma_h), hard max-stop 1.0% of price, tightest caps (risk 8% equity,
+;     daily halt 10% = ~1 losing trade).
+;   - Expect FEW signals here — this is the portfolio's stability anchor,
+;     not its volume driver. Starvation is normal, do not loosen gates.
 ;
-; z=1.0 = deepest VALIDATED gate on real ticks (~7 trades/day)
-; Magic 7788075 — fleet exposure guard compliant.
 InpUsePullback=true
 InpUseBreakout=false
 InpUseMomentum=true
@@ -37,39 +35,39 @@ InpBreakoutBars=12
 InpMomBodyMin=0.45
 InpRsiOversold=32.0
 InpRsiOverbought=68.0
-InpBandZEntry=1.0
+InpBandZEntry=2.3
 InpBandVolExtRatio=1.25
 InpBandSigmaEmaLen=30
 InpBandStopSigmaMult=0.10
-InpBandTargetSigmaMult=1.20
+InpBandTargetSigmaMult=0.60
 InpBandHoldSec=3600
 InpBandMinRR=2.5
-InpBandMaxStopPct=0.015
+InpBandMaxStopPct=0.010
 InpRiskPerTrade=0.005
-InpMaxEffectiveRiskPct=20.0
+InpMaxEffectiveRiskPct=8.0
 InpTpMult=2.0
 InpMaxHoldBars=20
-InpMaxDailyLossPct=0.05
+InpMaxDailyLossPct=0.10
 InpMaxConsecLoss=3
 InpCoolDownBars=3
 InpUseTrailing=true
 InpTrailStartR=1.0
-InpTrailDistR=0.7
+InpTrailDistR=0.9
 InpUseBreakeven=true
 InpBeTriggerR=1.0
 InpEntryTFOverride=M15
 InpRegimeTFOverride=H1
-InpMagic=7788075
+InpMagic=7788010
 InpMaxSlippagePts=40
 InpWarmupBars=150
 InpDrawDashboard=true
 InpDrawSignals=true
 InpLiveExecution=true
 InpMaxTradesPerDay=9999
-; Account-wide exposure guard
+; Account-wide exposure guard pinned 2026-08-25 (explicit keys, not code defaults)
 InpMaxTotalRiskPct=15.0
 InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100
-; v23 Intelligence & Safety
+; v23 Intelligence & Safety (added 2026-08-27)
 InpSessionStartHour=6
 InpSessionEndHour=21
 InpSameSymbolMaxPos=1

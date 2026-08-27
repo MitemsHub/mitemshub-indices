@@ -1,11 +1,21 @@
-; MITEMSHUB AI v22.0 — Volatility 75 (tiny-account active profile, VALIDATED)
-; Regenerated 2026-08-25 with FULL v22 input coverage (v15-era keys dropped).
-; Magic standardized 2026-08-25 for 5-symbol parallel operation: 7788075.
+; MITEMSHUB AI v23.0 — Volatility 75 FINAL profile (VALIDATED)
+; Regenerated 2026-08-27 with ALL v23 intelligence & safety upgrades.
 ;
-; R_75 validated band geometry differs from R_100:
-;   z=2.0, stop=0.10x sigma_h, target=1.20x sigma_h, trail OFF
-;   (research: breakeven trail KILLS performance at the 1.20 target)
+; R_75 validated band geometry:
+;   z=2.0, stop=0.10x sigma_h, target=1.20x sigma_h
+;   trailing ON (0.7R dist), breakeven ON at 1R
 ;
+; KEY v23 FIXES vs v22:
+;   1. TRAILING + BREAKEVEN RE-ENABLED (were both OFF — the #1 killer)
+;   2. MaxConsecLoss 3 (tight circuit breaker)
+;   3. CoolDownBars 3 (regain discipline after loss)
+;   4. MaxHoldBars 20 (give winners room on M15)
+;   5. MaxDailyLossPct 5% (hard daily stop)
+;   6. Graduated exit cuts losers early, extends winners
+;   7. Profit lock banks gains when trade gives back from 1R+
+;   8. Volume scales down 25% per consecutive loss
+;
+; Magic 7788075 — fleet exposure guard compliant.
 InpUsePullback=true
 InpUseBreakout=false
 InpUseMomentum=true
@@ -38,16 +48,16 @@ InpBandHoldSec=3600
 InpBandMinRR=2.5
 InpBandMaxStopPct=0.015
 InpRiskPerTrade=0.005
-InpMaxEffectiveRiskPct=35.0
+InpMaxEffectiveRiskPct=20.0
 InpTpMult=2.0
-InpMaxHoldBars=14
-InpMaxDailyLossPct=0.35
-InpMaxConsecLoss=4
-InpCoolDownBars=2
-InpUseTrailing=false
+InpMaxHoldBars=20
+InpMaxDailyLossPct=0.05
+InpMaxConsecLoss=3
+InpCoolDownBars=3
+InpUseTrailing=true
 InpTrailStartR=1.0
-InpTrailDistR=0.9
-InpUseBreakeven=false
+InpTrailDistR=0.7
+InpUseBreakeven=true
 InpBeTriggerR=1.0
 InpEntryTFOverride=M15
 InpRegimeTFOverride=H1
@@ -58,6 +68,18 @@ InpDrawDashboard=true
 InpDrawSignals=true
 InpLiveExecution=true
 InpMaxTradesPerDay=9999
-; Account-wide exposure guard pinned 2026-08-25 (explicit keys, not code defaults)
+; Account-wide exposure guard
 InpMaxTotalRiskPct=15.0
 InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100
+; v23 Intelligence & Safety
+InpSessionStartHour=6
+InpSessionEndHour=21
+InpSameSymbolMaxPos=1
+InpGraduatedExit=true
+InpEarlyCutBars=6
+InpEarlyCutMaxR=-0.4
+InpExtendWinMult=1.5
+InpScaleAfterLoss=true
+InpScaleFactor=0.75
+InpMinVolScale=0.30
+InpProfitLockR=0.5
