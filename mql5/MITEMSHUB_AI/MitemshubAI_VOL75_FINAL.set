@@ -72,8 +72,8 @@ InpMaxTradesPerDay=9999
 InpMaxTotalRiskPct=15.0
 InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100
 ; v23 Intelligence & Safety
-InpSessionStartHour=6
-InpSessionEndHour=21
+InpSessionStartHour=0
+InpSessionEndHour=23
 InpSameSymbolMaxPos=1
 InpGraduatedExit=true
 InpEarlyCutBars=6
