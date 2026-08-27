@@ -720,7 +720,6 @@ void PostTradeReview(string strategy, double rMultiple, string exitType)
 void CheckStrategyPerformance()
 {
    const string names[] = {"PB","BO","MOM","MR","BF"};
-   bool *enabled[] = {&InpUsePullback, &InpUseBreakout, &InpUseMomentum, &InpUseMeanRevert, &InpUseBandFade};
 
    Print("[v23.1] === STRATEGY PERFORMANCE REVIEW ===");
    for(int i=0; i<5; i++)
