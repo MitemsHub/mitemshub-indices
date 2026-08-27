@@ -361,6 +361,35 @@ void OnTick()
       else g_ticket=0;
    }
 
+   // v23.1: Periodic position recovery — detect positions that filled during reloads
+   if(g_ticket==0)
+   {
+      for(int i=PositionsTotal()-1;i>=0;i--)
+      {
+         ulong t=PositionGetTicket(i);
+         if(t==0) continue;
+         if(PositionGetInteger(POSITION_MAGIC)!=InpMagic) continue;
+         if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+         // Found an orphaned position — recover it
+         g_ticket=t;
+         g_dir = PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 1 : -1;
+         g_entry=PositionGetDouble(POSITION_PRICE_OPEN);
+         g_sl=PositionGetDouble(POSITION_SL);
+         g_tp=PositionGetDouble(POSITION_TP);
+         g_orig_risk=MathAbs(g_entry-g_sl);
+         g_position_volume=PositionGetDouble(POSITION_VOLUME);
+         g_entry_time=(datetime)PositionGetInteger(POSITION_TIME);
+         int bar_sec = PeriodSeconds(g_tf_entry);
+         if(bar_sec>0 && g_entry_time>0)
+            g_bars_held = (int)((TimeCurrent() - g_entry_time) / bar_sec);
+         else g_bars_held=0;
+         g_high_water_r=0;
+         PrintFormat("[v23.1] RECOVERED orphaned position %s %s @%.5f (was missed during reload)",
+                     g_dir>0?"BUY":"SELL", _Symbol, g_entry);
+         break;
+      }
+   }
+
    UpdateSigmaBaseline();
    UpdateBandTelemetry();
 
@@ -1509,11 +1538,30 @@ void UpdateDashboard()
    double pct = CalcATRPercentile(atr[0]);
 
    string L[26];
-   L[0]="=== MITEMSHUB AI v23.0 ===";
+   L[0]="=== MITEMSHUB AI v23.1 ===";
    L[1]=StringFormat("%s | %s -> %s",_Symbol,EnumToString(g_tf_entry),EnumToString(g_tf_regime));
-   L[2]=StringFormat("Equity: $%.2f | Session: $%+.2f",g_eq, g_session_pnl);
+   // v23.1: Show real-time session P&L including unrealized gains
+   double realtime_pnl = g_session_pnl;
+   if(g_ticket>0 && PositionSelectByTicket(g_ticket))
+   {
+      double cur = g_dir>0?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      double unr = g_dir>0 ? (cur-g_entry) : (g_entry-cur);
+      double unr_risk = g_orig_risk>0 ? unr/g_orig_risk : 0;
+      realtime_pnl += unr_risk * g_risk_money;
+   }
+   L[2]=StringFormat("Equity: $%.2f | Session: $%+.2f",g_eq, realtime_pnl);
    L[3]=StringFormat("Regime: %s | ATR%%: %.0f",RegimeToStr(g_regime),pct);
-   L[4]=StringFormat("Trades: %d | WR: %.1f%% | R: %+.2f",g_trades,wr,g_total_r);
+   // v23.1: Show closed trades + open position count
+   int open_count=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong t=PositionGetTicket(i);
+      if(t>0 && IsFleetMagic((long)PositionGetInteger(POSITION_MAGIC)) &&
+         PositionGetString(POSITION_SYMBOL)==_Symbol)
+         open_count++;
+   }
+   L[4]=StringFormat("Trades: %d closed | Open: %d | WR: %.1f%% | R: %+.2f",
+                      g_trades, open_count, wr, g_total_r);
    L[5]=StringFormat("Status: %s%s", g_paused?"PAUSED":(DailyLossHalted()?"DAILY-HALT":"ACTIVE"),
         IsSessionActive()?" | SESSION-ON":" | SESSION-OFF");
    L[6]=StringFormat("Strats: PB=%s BO=%s MOM=%s MR=%s BF=%s",
@@ -1542,12 +1590,24 @@ void UpdateDashboard()
         InpScaleAfterLoss?"ON":"OFF", InpScaleFactor*100, InpMinVolScale*100, g_consec_loss);
 
    int line=14;
-   if(g_ticket>0 && PositionSelectByTicket(g_ticket))
+   // v23.1: Always scan for open positions (not just g_ticket)
+   for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      double cur = g_dir>0?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-      double rnow = g_orig_risk>0?(g_dir>0?(cur-g_entry):(g_entry-cur))/g_orig_risk:0;
-      L[line++]=StringFormat("OPEN %s @%.5f R:%+.2f HW:%.2fR bars:%d/%d",
-                             g_dir>0?"BUY":"SELL",g_entry,rnow,g_high_water_r,g_bars_held,g_max_hold);
+      ulong t=PositionGetTicket(i);
+      if(t==0 || !PositionSelectByTicket(t)) continue;
+      if(!IsFleetMagic((long)PositionGetInteger(POSITION_MAGIC))) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      double pe=PositionGetDouble(POSITION_PRICE_OPEN);
+      double psl=PositionGetDouble(POSITION_SL);
+      double ptp=PositionGetDouble(POSITION_TP);
+      double pvol=PositionGetDouble(POSITION_VOLUME);
+      int pdir = PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 1 : -1;
+      double cur = pdir>0?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      double prisk = MathAbs(pe-psl);
+      double rnow = prisk>0 ? (pdir>0?(cur-pe):(pe-cur))/prisk : 0;
+      L[line++]=StringFormat("OPEN %s %.2flot @%.5f R:%+.2f SL=%.0f TP=%.0f",
+                             pdir>0?"BUY":"SELL",pvol,pe,rnow,psl,ptp);
+      if(line>=25) break;
    }
 
    // v23.1: Intelligence layer status
