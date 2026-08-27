@@ -27,7 +27,7 @@
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "23.00"
+#property version   "23.10"
 #property strict
 
 #include <Trade\Trade.mqh>
