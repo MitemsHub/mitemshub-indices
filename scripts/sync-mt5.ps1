@@ -28,11 +28,12 @@ $termCount = 0
 
 foreach ($mql5Dir in $mql5Dirs) {
     $setsDir    = Join-Path $mql5Dir "Profiles\Sets"
+    $setsMitem  = Join-Path $mql5Dir "Profiles\Sets\MITEMSHUB_AI"
     $expertsDir = Join-Path $mql5Dir "Experts"
     $mitemDir   = Join-Path $mql5Dir "Experts\MITEMSHUB_AI"
     $presetsDir = Join-Path $mql5Dir "Presets"
 
-    foreach ($dir in @($setsDir, $expertsDir, $mitemDir, $presetsDir)) {
+    foreach ($dir in @($setsDir, $setsMitem, $expertsDir, $mitemDir, $presetsDir)) {
         if (-not (Test-Path $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
@@ -41,6 +42,7 @@ foreach ($mql5Dir in $mql5Dirs) {
     if (-not $Mq5Only) {
         Get-ChildItem -Path $ProjectDir -Filter "*.set" -File | ForEach-Object {
             Copy-Item $_.FullName $setsDir -Force
+            Copy-Item $_.FullName $setsMitem -Force
             Copy-Item $_.FullName $expertsDir -Force
             Copy-Item $_.FullName $mitemDir -Force
             Copy-Item $_.FullName $presetsDir -Force
