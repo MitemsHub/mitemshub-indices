@@ -1,0 +1,122 @@
+; MITEMSHUB AI v24.11 — Crash 1000 CRASH/BOOM profile
+; Optimized for Crash 1000 Index on M5 timeframe
+; Generated 2026-08-28 with full intelligence suite
+;
+; Crash 1000 characteristics:
+;   - Frequent small spikes (avg 50-100 points)
+;   - Spikes go UP against the grind
+;   - Grind direction is DOWN (slow decline)
+;   - Post-spike fade = BUY opportunity
+;   - Best entry: after spike retrace 30-70%
+;
+; Strategy: Post-Spike Fade + Grind Continuation
+; Risk: Conservative (0.28% per trade, scales with spike probability)
+; Magic: 7788100 — fleet exposure guard compliant
+;
+; v24.11 Intelligence Layers:
+;   1. SpikeDetector — tick speed + candle body analysis
+;   2. TickPatternAnalyzer — individual tick precursor scoring
+;   3. MultiTimeframeConfirm — M1+M5+M15 agreement required
+;   4. TimeOfDayAwareness — learns dangerous hours live
+;   5. SymbolCalibration — auto-detects Crash 1000 parameters
+;   6. DynamicRiskSizing — reduces lot during high spike prob
+;   7. CrashBoomStrategy — post-spike fade + grind entries
+
+; === Strategy Selection (DISABLED for CB mode — strategies handled by CB engine) ===
+InpUsePullback=false
+InpUseBreakout=false
+InpUseMomentum=false
+InpUseMeanRevert=false
+InpUseBandFade=false
+InpMinScore=3
+InpRequire2Strats=false
+InpMomentumStandalone=false
+
+; === Regime & Volatility (still used for context) ===
+InpEmaFast=20
+InpEmaMid=50
+InpEmaSlow=100
+InpMinEmaSep=0.20
+InpAtrPeriod=14
+InpAtrLookback=120
+InpAtrLowPct=10.0
+InpAtrHighPct=90.0
+
+; === Strategy Parameters (minimal — CB engine handles entries) ===
+InpPullbackMin=0.30
+InpPullbackMax=2.2
+InpBreakoutBuffer=0.10
+InpBreakoutBars=12
+InpMomBodyMin=0.45
+InpRsiOversold=32.0
+InpRsiOverbought=68.0
+InpBandZEntry=2.0
+InpBandVolExtRatio=1.25
+InpBandSigmaEmaLen=30
+InpBandStopSigmaMult=0.10
+InpBandTargetSigmaMult=0.80
+InpBandHoldSec=1800
+InpBandMinRR=2.0
+InpBandMaxStopPct=0.015
+
+; === Risk & Exits (conservative for Crash 1000) ===
+InpRiskPerTrade=0.0028
+InpMaxEffectiveRiskPct=15.0
+InpTpMult=1.5
+InpMaxHoldBars=8
+InpMaxDailyLossPct=0.04
+InpMaxConsecLoss=3
+InpCoolDownBars=3
+InpUseTrailing=true
+InpTrailStartR=0.7
+InpTrailDistR=0.45
+InpUseBreakeven=true
+InpBeTriggerR=0.7
+
+; === Execution ===
+InpEntryTFOverride=M5
+InpRegimeTFOverride=M15
+InpMagic=7788100
+InpMaxSlippagePts=30
+InpWarmupBars=100
+InpDrawDashboard=true
+InpDrawSignals=true
+InpLiveExecution=true
+InpMaxTradesPerDay=10
+
+; === Account-wide exposure guard ===
+InpMaxTotalRiskPct=12.0
+InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100
+
+; === Intelligence & Safety (v23) ===
+InpSessionStartHour=0
+InpSessionEndHour=23
+InpSameSymbolMaxPos=1
+InpGraduatedExit=true
+InpEarlyCutBars=4
+InpEarlyCutMaxR=-0.30
+InpExtendWinMult=1.3
+InpScaleAfterLoss=true
+InpScaleFactor=0.70
+InpMinVolScale=0.25
+InpProfitLockR=0.35
+
+; === Self-Review Intelligence (v23.1) ===
+InpStrategyReviewN=8
+InpRegimeReviewN=15
+InpTimeReviewN=20
+InpMinTradesToJudge=12
+InpMinExpectancy=0.1
+InpAutoDisableStrat=true
+InpAutoBlockTime=false
+
+; === Crash/Boom Mode (v24) — ENABLED ===
+InpCrashBoomMode=true
+InpIsCrashIndex=true
+InpCBSpikeThreshold=2.8
+InpCBMaxSpikeProb=0.58
+InpCBFadeR=0.3
+InpCBFadeSL=0.5
+InpCBFadeTP=1.5
+InpCBBaseRisk=0.28
+InpCBMinRisk=0.10
