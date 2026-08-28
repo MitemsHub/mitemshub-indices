@@ -134,7 +134,9 @@ public:
    void SetFadeSL(double atr_mult)               { m_fade_sl_atr_mult = atr_mult; }
    void SetFadeTP(double atr_mult)               { m_fade_tp_atr_mult = atr_mult; }
    void SetMaxSpikeProb(double prob)             { m_max_spike_prob = prob; }
+   double GetMaxSpikeProb() const                { return m_max_spike_prob; }
    void SetPostSpikeWindow(int bars)             { m_post_spike_window = bars; }
+   int  GetPostSpikeWindow() const               { return m_post_spike_window; }
    void SetSpikeCooldown(int bars)               { m_spike_cooldown_bars = bars; }
 
    //--- Main signal generation (call on each bar close)
