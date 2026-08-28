@@ -258,6 +258,10 @@ private:
    }
 
 public:
+   //--- Set spike detection threshold (body size multiplier)
+   void SetSpikeThreshold(double threshold) { m_spike_threshold = threshold; }
+   double GetSpikeThreshold() const { return m_spike_threshold; }
+   
    //--- Get combined spike probability (0.0 to 1.0)
    //    Weights: body_ratio 30%, tick_change 20%, grind_length 25%, time_gap 25%
    double GetSpikeProbability() const
