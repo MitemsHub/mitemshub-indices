@@ -182,19 +182,6 @@ public:
          return fade_dir;
       }
       
-      //--- Step 2b: Log why fade didn't trigger
-      bool spike_just = m_spike_detector_obj.SpikeJustHappened(m_post_spike_window);
-      if(spike_just)
-      {
-         // Spike happened but fade conditions not met — log why
-         double current_price = iClose(_Symbol, PERIOD_M5, 0);
-         double spike_high = iHigh(_Symbol, PERIOD_M5, 1);
-         double spike_body = MathAbs(iClose(_Symbol, PERIOD_M5, 1) - iOpen(_Symbol, PERIOD_M5, 1));
-         double retrace = (spike_high - current_price) / MathMax(spike_body, 0.0001);
-         PrintFormat("[CB-STRAT] Spike ready but fade条件 not met: retrace=%.2f need=[%.2f, 0.70] price=%.5f spike_high=%.5f",
-                     retrace, m_fade_r_entry, current_price, spike_high);
-      }
-      
       //--- Step 3: Check for GRIND CONTINUATION entry
       int grind_dir = CheckGrindContinuation(entry, sl, tp, reason);
       if(grind_dir != 0)
@@ -209,19 +196,7 @@ public:
          return grind_dir;
       }
       
-      //--- Step 3b: Log why grind didn't trigger
-      int gd = m_spike_detector_obj.GetGrindDirection();
-      int gdu = m_spike_detector_obj.GetGrindDuration();
-      if(gd != 0 && gdu >= 3)
-      {
-         PrintFormat("[CB-STRAT] Grind ready but not entered: dir=%s dur=%d is_crash=%d",
-                     gd > 0 ? "UP" : "DN", gdu, m_is_crash ? 1 : 0);
-      }
-      
       //--- No signal
-      PrintFormat("[CB-STRAT] No signal: spike_just=%d grind=%s%d prob=%.2f",
-                  m_spike_detector_obj.SpikeJustHappened(m_post_spike_window) ? 1 : 0,
-                  gd > 0 ? "UP" : (gd < 0 ? "DN" : "--"), gdu, spike_prob);
       return 0;
    }
 

@@ -142,21 +142,6 @@ public:
       // Decrement cooldown
       if(m_spike_cooldown > 0) m_spike_cooldown--;
       
-      // DIAGNOSTIC: Log CB engine state every bar
-      {
-         double prob = m_spike_detector.GetSpikeProbability();
-         int grind = m_spike_detector.GetGrindDuration();
-         int grind_dir = m_spike_detector.GetGrindDirection();
-         double precursor = m_tick_analyzer.GetPrecursorScore();
-         bool tod_avoid = m_tod_awareness.ShouldAvoid();
-         bool spike_just = m_spike_detector.SpikeJustHappened(m_strategy.GetPostSpikeWindow());
-         PrintFormat("[CB-DIAG] prob=%.2f grind=%s%d precursor=%.2f TOD=%s cooldown=%d spike_just=%d",
-                     prob,
-                     grind_dir > 0 ? "UP" : (grind_dir < 0 ? "DN" : "--"), grind,
-                     precursor, tod_avoid ? "AVOID" : "SAFE",
-                     m_spike_cooldown, spike_just ? 1 : 0);
-      }
-      
       // Check for new spike
       if(m_spike_detector.SpikeJustHappened(1))
       {
@@ -210,10 +195,8 @@ public:
          if(!m_mtf_confirm.IsConfirmed(m_sig_dir, mtf_reason))
          {
             reason = mtf_reason;
-            PrintFormat("[CB-DIAG] MTF blocked signal: %s", mtf_reason);
             return 0;
          }
-         PrintFormat("[CB-DIAG] Signal CONFIRMED by MTF: dir=%d reason=%s", m_sig_dir, reason);
          
          // Determine signal type
          if(reason.Find("FADE") >= 0)
