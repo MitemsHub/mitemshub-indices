@@ -346,11 +346,13 @@ void OnTick()
       g_day_start=ds; g_daily_pnl=0; g_trades_today=0;
       g_day_start_eq = g_eq;
       g_session_pnl=0;
+      g_consec_loss=0;
       if(g_paused)
       {
-         g_paused=false; g_consec_loss=0;
+         g_paused=false;
          Print("[v23] New session day — consecutive-loss PAUSE lifted");
       }
+      PrintFormat("[v23] New day — daily counters reset. Equity: %.2f", g_eq);
    }
 
    if(g_cooldown>0) g_cooldown--;
@@ -361,16 +363,45 @@ void OnTick()
       else
       {
          // v23.1: Position disappeared — manual close detected
-         double exit_p = g_dir>0 ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-         double r = g_orig_risk>0 ? (g_dir>0?(exit_p-g_entry):(g_entry-exit_p))/g_orig_risk : 0;
-         g_trades++; g_total_r += r;
-         if(r>0) g_wins++; else g_losses++;
-         g_daily_pnl += r*g_risk_money;
-         g_session_pnl += r*g_risk_money;
+         // FIX: Use deal history to get ACTUAL close price, not current market price
+         double exit_p = 0;
+         double actual_r = 0;
+         if(HistorySelect(0, TimeCurrent()))
+         {
+            for(int d=HistoryDealsTotal()-1; d>=0; d--)
+            {
+               ulong dt = HistoryDealGetTicket(d);
+               if(dt==0) continue;
+               if(HistoryDealGetInteger(dt, DEAL_MAGIC) != InpMagic) continue;
+               if(HistoryDealGetString(dt, DEAL_SYMBOL) != _Symbol) continue;
+               if(HistoryDealGetInteger(dt, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+               // Found the closing deal — use its actual price
+               exit_p = HistoryDealGetDouble(dt, DEAL_PRICE);
+               double deal_profit = HistoryDealGetDouble(dt, DEAL_PROFIT);
+               double deal_swap   = HistoryDealGetDouble(dt, DEAL_SWAP);
+               double deal_comm   = HistoryDealGetDouble(dt, DEAL_COMMISSION);
+               // Calculate R from actual deal P&L
+               actual_r = g_orig_risk>0 ? (g_dir>0?(exit_p-g_entry):(g_entry-exit_p))/g_orig_risk : 0;
+               PrintFormat("[v23.1] Found closing deal #%d: price=%.5f profit=%.2f swap=%.2f comm=%.2f",
+                           dt, exit_p, deal_profit, deal_swap, deal_comm);
+               break; // most recent closing deal
+            }
+         }
+         // Fallback: if no deal found (shouldn't happen), use current price
+         if(exit_p <= 0)
+         {
+            exit_p = g_dir>0 ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+            actual_r = g_orig_risk>0 ? (g_dir>0?(exit_p-g_entry):(g_entry-exit_p))/g_orig_risk : 0;
+            PrintFormat("[v23.1] WARNING: No closing deal found, using current price %.5f", exit_p);
+         }
+         g_trades++; g_total_r += actual_r;
+         if(actual_r>0) g_wins++; else g_losses++;
+         g_daily_pnl += actual_r*g_risk_money;
+         g_session_pnl += actual_r*g_risk_money;
          double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
-         PrintFormat("[v23.1] MANUAL CLOSE detected — R=%+.3f | Trades:%d WR:%.1f%% TotalR:%+.2f",
-                     r, g_trades, wr, g_total_r);
-         PostTradeReview(g_last_strategy, r, "MANUAL");
+         PrintFormat("[v23.1] MANUAL CLOSE detected — R=%+.3f (actual close %.5f) | Trades:%d WR:%.1f%% TotalR:%+.2f",
+                     actual_r, exit_p, g_trades, wr, g_total_r);
+         PostTradeReview(g_last_strategy, actual_r, "MANUAL");
          g_ticket=0; g_dir=0; g_bars_held=0; g_high_water_r=0;
          SaveReviewState();
       }
@@ -955,7 +986,13 @@ double FleetOpenRisk(int &no_sl_count)
 bool DailyLossHalted()
 {
    if(InpMaxDailyLossPct<=0 || g_day_start_eq<=0) return false;
-   return ((g_day_start_eq-g_eq)/g_day_start_eq >= InpMaxDailyLossPct);
+   // FIX: Use realized daily P&L (g_daily_pnl) instead of equity comparison.
+   // Equity comparison is unreliable because:
+   // 1. Manual close detection used wrong price -> false P&L -> false halt
+   // 2. Equity fluctuates with spread/slippage even without trades
+   // g_daily_pnl only accumulates from ACTUAL trade closes.
+   double daily_loss_pct = (g_daily_pnl < 0) ? MathAbs(g_daily_pnl) / g_day_start_eq : 0;
+   return (daily_loss_pct >= InpMaxDailyLossPct);
 }
 
 //+------------------------------------------------------------------+
