@@ -29,7 +29,7 @@ enum ENUM_CB_SIGNAL
 class CCrashBoomStrategy
 {
 private:
-   CSpikeDetector* m_spike_detector;
+   CSpikeDetector  m_spike_detector_obj;  // owned copy, not a pointer
    
    //--- Symbol type detection
    bool m_is_crash;  // true = Crash index, false = Boom index
@@ -62,7 +62,7 @@ private:
 public:
    CCrashBoomStrategy()
    {
-      m_spike_detector = NULL;
+      // m_spike_detector_obj initialized by default constructor
       m_is_crash = false;
       m_is_enabled = false;
       m_bb_handle = INVALID_HANDLE;
@@ -92,13 +92,14 @@ public:
    
    ~CCrashBoomStrategy()
    {
-      // Don't delete m_spike_detector — caller owns it
+      // Object member — no manual delete needed
    }
 
    //--- Initialize
-   void Init(CSpikeDetector* detector, bool is_crash_index, bool enabled)
+   void Init(CSpikeDetector &detector, bool is_crash_index, bool enabled)
    {
-      m_spike_detector = detector;
+      // Copy the detector state from the engine's instance
+      m_spike_detector_obj = detector;
       m_is_crash = is_crash_index;
       m_is_enabled = enabled;
       
@@ -144,14 +145,14 @@ public:
    //    and fills in entry/SL/TP
    int GenerateSignal(double &entry, double &sl, double &tp, string &reason)
    {
-      if(!m_is_enabled || m_spike_detector == NULL) return 0;
+      if(!m_is_enabled) return 0;
       
       m_last_signal = CB_NONE;
       m_last_signal_dir = 0;
       reason = "";
       
       //--- Step 1: Check if spike probability is too high → BLOCK
-      double spike_prob = m_spike_detector->GetSpikeProbability();
+      double spike_prob = m_spike_detector_obj.GetSpikeProbability();
       if(spike_prob > m_max_spike_prob)
       {
          reason = StringFormat("SPIKE-AVOID prob=%.2f > %.2f", spike_prob, m_max_spike_prob);
@@ -212,7 +213,7 @@ private:
    //--- Check for post-spike fade opportunity
    int CheckPostSpikeFade(double &entry, double &sl, double &tp, string &reason)
    {
-      if(!m_spike_detector->SpikeJustHappened(m_post_spike_window)) return 0;
+      if(!m_spike_detector_obj.SpikeJustHappened(m_post_spike_window)) return 0;
       
       // Get ATR using pre-created handle (no leak)
       double atr[];
@@ -221,7 +222,7 @@ private:
       if(CopyBuffer(m_atr_handle, 0, 1, 1, atr) < 1) return 0;
       
       double current_price = iClose(_Symbol, PERIOD_M5, 0);
-      int bars_since_spike = m_spike_detector->GetGrindDuration();  // approximate
+      int bars_since_spike = m_spike_detector_obj.GetGrindDuration();  // approximate
       
       //--- CRASH index: spikes go DOWN → fade by BUYING
       if(m_is_crash)
@@ -281,8 +282,8 @@ private:
    //--- Check for grind continuation entry
    int CheckGrindContinuation(double &entry, double &sl, double &tp, string &reason)
    {
-      int grind_dir = m_spike_detector->GetGrindDirection();
-      int grind_dur = m_spike_detector->GetGrindDuration();
+      int grind_dir = m_spike_detector_obj.GetGrindDirection();
+      int grind_dur = m_spike_detector_obj.GetGrindDuration();
       
       // Need at least 5 bars of grind
       if(grind_dir == 0 || grind_dur < 5) return 0;
@@ -300,7 +301,7 @@ private:
       if(m_atr_handle == INVALID_HANDLE) return 0;
       if(CopyBuffer(m_atr_handle, 0, 1, 1, atr) < 1) return 0;
       
-      double body_avg = m_spike_detector->GetGrindBodyAvg();
+      double body_avg = m_spike_detector_obj.GetGrindBodyAvg();
       double current_price = iClose(_Symbol, PERIOD_M5, 0);
       
       //--- Grind UP → BUY with the trend

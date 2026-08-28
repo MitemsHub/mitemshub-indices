@@ -85,7 +85,7 @@ public:
       m_tick_analyzer.Reset();
       m_tod_awareness.Reset();
       m_calibration.AutoCalibrate();
-      m_strategy.Init(&m_spike_detector, is_crash_index, true);
+      m_strategy.Init(m_spike_detector, is_crash_index, true);
       m_risk_sizer.Init(true);
       m_mtf_confirm.Init(true);
       
