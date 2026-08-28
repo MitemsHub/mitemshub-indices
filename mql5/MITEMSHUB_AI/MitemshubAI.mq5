@@ -331,14 +331,17 @@ int OnInit()
    if(InpCrashBoomMode)
    {
       g_cb.Init(true, InpIsCrashIndex);
-      g_cb.GetSpikeDetector()->SetSpikeThreshold(InpCBSpikeThreshold);
-      g_cb.GetStrategy()->SetSpikeThreshold(InpCBSpikeThreshold);
-      g_cb.GetStrategy()->SetMaxSpikeProb(InpCBMaxSpikeProb);
-      g_cb.GetStrategy()->SetFadeR(InpCBFadeR);
-      g_cb.GetStrategy()->SetFadeSL(InpCBFadeSL);
-      g_cb.GetStrategy()->SetFadeTP(InpCBFadeTP);
-      g_cb.GetRiskSizer()->SetBaseRisk(InpCBBaseRisk);
-      g_cb.GetRiskSizer()->SetMinRisk(InpCBMinRisk);
+      CSpikeDetector *sdet = g_cb.GetSpikeDetector();
+      sdet->SetSpikeThreshold(InpCBSpikeThreshold);
+      CCrashBoomStrategy *strat = g_cb.GetStrategy();
+      CDynamicRiskSizing *rsizer = g_cb.GetRiskSizer();
+      strat->SetSpikeThreshold(InpCBSpikeThreshold);
+      strat->SetMaxSpikeProb(InpCBMaxSpikeProb);
+      strat->SetFadeR(InpCBFadeR);
+      strat->SetFadeSL(InpCBFadeSL);
+      strat->SetFadeTP(InpCBFadeTP);
+      rsizer->SetBaseRisk(InpCBBaseRisk);
+      rsizer->SetMinRisk(InpCBMinRisk);
       PrintFormat("[v24] Crash/Boom mode: %s | spike_thresh=%.1f | max_prob=%.2f | risk=%.2f%%",
                   InpIsCrashIndex?"CRASH":"BOOM", InpCBSpikeThreshold, InpCBMaxSpikeProb, InpCBBaseRisk);
    }
