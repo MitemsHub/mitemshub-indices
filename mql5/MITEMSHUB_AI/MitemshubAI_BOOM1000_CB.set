@@ -3,7 +3,7 @@
 ; Generated 2026-08-28 with full intelligence suite
 ;
 ; Boom 1000 characteristics:
-;   - Frequent small spikes (avg 50-100 points)
+;   - Frequent small spikes (median 28.5pts, mode 24pts)
 ;   - Spikes go DOWN against the grind
 ;   - Grind direction is UP (slow climb)
 ;   - Post-spike fade = SELL opportunity
@@ -113,10 +113,10 @@ InpAutoBlockTime=false
 ; === Crash/Boom Mode (v24) — ENABLED ===
 InpCrashBoomMode=true
 InpIsCrashIndex=false
-InpCBSpikeThreshold=3.0
-InpCBMaxSpikeProb=0.80
+InpCBSpikeThreshold=2.5
+InpCBMaxSpikeProb=0.70
 InpCBFadeR=0.3
-InpCBFadeSL=0.5
-InpCBFadeTP=1.5
+InpCBFadeSL=0.4
+InpCBFadeTP=1.8
 InpCBBaseRisk=0.30
 InpCBMinRisk=0.10

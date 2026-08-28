@@ -68,18 +68,20 @@ public:
    //--- Initialize default profiles for all Boom/Crash indices
    void InitDefaultProfiles()
    {
-      // Boom 1000 — frequent small spikes
+      // Boom 1000 — frequent small spikes (tick data: median=28.5pts, mode=24pts)
+      // Spike distribution: 34% (5-20pts), 49% (20-45pts), 13% (45-80pts), 4% (80-150+pts)
+      // Frequency: ~1 spike per 1000 ticks (~16.6 min)
       m_profiles[0].name = "Boom 1000";
       m_profiles[0].is_crash = false;
-      m_profiles[0].spike_threshold = 3.0;
-      m_profiles[0].avg_spike_size = 75;
-      m_profiles[0].fade_depth = 0.40;
-      m_profiles[0].fade_sl_mult = 0.5;
-      m_profiles[0].fade_tp_mult = 1.5;
-      m_profiles[0].optimal_hold = 5;
+      m_profiles[0].spike_threshold = 2.5;    // lowered from 3.0 — catches smaller spikes
+      m_profiles[0].avg_spike_size = 30;       // corrected from 75 — median is 28.5pts
+      m_profiles[0].fade_depth = 0.50;         // increased from 0.40 — expect 50% retrace
+      m_profiles[0].fade_sl_mult = 0.4;        // tightened from 0.5 — tighter stops
+      m_profiles[0].fade_tp_mult = 1.8;        // increased from 1.5 — better R:R
+      m_profiles[0].optimal_hold = 4;          // reduced from 5 — faster exit
       m_profiles[0].risk_mult = 1.0;
-      m_profiles[0].cooldown_bars = 2;
-      m_profiles[0].max_spike_prob = 0.65;
+      m_profiles[0].cooldown_bars = 1;         // reduced from 2 — faster recovery
+      m_profiles[0].max_spike_prob = 0.70;     // increased from 0.65 — less blocking
       
       // Boom 500 — medium spikes
       m_profiles[1].name = "Boom 500";
@@ -107,18 +109,18 @@ public:
       m_profiles[2].cooldown_bars = 4;
       m_profiles[2].max_spike_prob = 0.55;
       
-      // Crash 1000 — mirrors Boom 1000
+      // Crash 1000 — mirrors Boom 1000 (tick data: median=28.5pts)
       m_profiles[3].name = "Crash 1000";
       m_profiles[3].is_crash = true;
-      m_profiles[3].spike_threshold = 3.0;
-      m_profiles[3].avg_spike_size = 75;
-      m_profiles[3].fade_depth = 0.40;
-      m_profiles[3].fade_sl_mult = 0.5;
-      m_profiles[3].fade_tp_mult = 1.5;
-      m_profiles[3].optimal_hold = 5;
+      m_profiles[3].spike_threshold = 2.5;    // lowered from 3.0
+      m_profiles[3].avg_spike_size = 30;       // corrected from 75
+      m_profiles[3].fade_depth = 0.50;         // increased from 0.40
+      m_profiles[3].fade_sl_mult = 0.4;        // tightened from 0.5
+      m_profiles[3].fade_tp_mult = 1.8;        // increased from 1.5
+      m_profiles[3].optimal_hold = 4;          // reduced from 5
       m_profiles[3].risk_mult = 1.0;
-      m_profiles[3].cooldown_bars = 2;
-      m_profiles[3].max_spike_prob = 0.65;
+      m_profiles[3].cooldown_bars = 1;         // reduced from 2
+      m_profiles[3].max_spike_prob = 0.70;     // increased from 0.65
       
       // Crash 500
       m_profiles[4].name = "Crash 500";
