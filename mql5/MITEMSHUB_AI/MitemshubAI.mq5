@@ -27,10 +27,11 @@
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "23.10"
+#property version   "24.00"
 #property strict
 
 #include <Trade\Trade.mqh>
+#include "CrashBoom/CrashBoomEngine.mqh"
 CTrade trade;
 
 #define TELEM_FILE "MitemshubAI_v23_telemetry.jsonl"
@@ -122,6 +123,17 @@ input bool   InpScaleAfterLoss   = true;     // Scale down volume after consecut
 input double InpScaleFactor      = 0.75;     // Volume multiplier per consecutive loss
 input double InpMinVolScale      = 0.30;     // Floor for volume scaling
 input double InpProfitLockR      = 0.5;      // Lock profit if trade reached 1R+ then fell to this R
+
+input group "=== Crash/Boom Mode (v24) ==="
+input bool   InpCrashBoomMode    = false;    // Enable Crash/Boom trading mode
+input bool   InpIsCrashIndex     = false;    // true = Crash (1000/500/300), false = Boom (1000/500/300)
+input double InpCBSpikeThreshold = 3.0;      // Body ratio to count as spike (default 3x avg)
+input double InpCBMaxSpikeProb   = 0.65;     // Block entries above this spike probability
+input double InpCBFadeR          = 0.3;      // Fade entry at 0.3R into retrace
+input double InpCBFadeSL         = 0.5;      // Fade stop = 0.5x ATR
+input double InpCBFadeTP         = 1.5;      // Fade target = 1.5x ATR
+input double InpCBBaseRisk       = 0.5;      // Base risk % for Crash/Boom trades
+input double InpCBMinRisk        = 0.15;     // Min risk % during high spike probability
 
 input group "=== Self-Review Intelligence (v23.1) ==="
 input int    InpStrategyReviewN  = 10;       // Check strategy performance every N trades
@@ -215,6 +227,9 @@ int g_last_time_review=0;
 string g_last_strategy="NONE";
 string g_last_exit_type="NONE";
 
+// v24: Crash/Boom engine
+CCrashBoomEngine g_cb;
+
 //+------------------------------------------------------------------+
 ENUM_TIMEFRAMES GetRegimeTF(ENUM_TIMEFRAMES tf)
 {
@@ -282,7 +297,7 @@ int OnInit()
    LoadReviewState();  // v23.1: restore persisted trade stats + intelligence
    if(InpDrawDashboard) CreateDashboard();
 
-   Print("[v23.0] MITEMSHUB AI v23.0 started | 5 Strategies | Regime-Aware | Intelligent Exits");
+   Print("[v24] MITEMSHUB AI v24.0 started | 5 Strategies | Regime-Aware | Crash/Boom Mode");
    PrintFormat("[v23.0] Entry TF=%s | Regime TF=%s | Band=%s | MinScore=%d | RiskCap=%.0f%%",
                EnumToString(g_tf_entry), EnumToString(g_tf_regime),
                InpUseBandFade?"ON":"OFF", InpMinScore, InpMaxEffectiveRiskPct);
@@ -298,6 +313,27 @@ int OnInit()
                InpStrategyReviewN, InpRegimeReviewN, InpTimeReviewN);
    PrintFormat("[v23.1] Auto-disable: %s (min %d trades, min expectancy %.2fR)",
                InpAutoDisableStrat?"ON":"OFF", InpMinTradesToJudge, InpMinExpectancy);
+
+   // v24: Initialize Crash/Boom engine
+   if(InpCrashBoomMode)
+   {
+      g_cb.Init(true, InpIsCrashIndex);
+      g_cb.GetSpikeDetector()->SetSpikeThreshold(InpCBSpikeThreshold);
+      g_cb.GetStrategy()->SetSpikeThreshold(InpCBSpikeThreshold);
+      g_cb.GetStrategy()->SetMaxSpikeProb(InpCBMaxSpikeProb);
+      g_cb.GetStrategy()->SetFadeR(InpCBFadeR);
+      g_cb.GetStrategy()->SetFadeSL(InpCBFadeSL);
+      g_cb.GetStrategy()->SetFadeTP(InpCBFadeTP);
+      g_cb.GetRiskSizer()->SetBaseRisk(InpCBBaseRisk);
+      g_cb.GetRiskSizer()->SetMinRisk(InpCBMinRisk);
+      PrintFormat("[v24] Crash/Boom mode: %s | spike_thresh=%.1f | max_prob=%.2f | risk=%.2f%%",
+                  InpIsCrashIndex?"CRASH":"BOOM", InpCBSpikeThreshold, InpCBMaxSpikeProb, InpCBBaseRisk);
+   }
+   else
+   {
+      g_cb.Init(false, false);
+   }
+
    return INIT_SUCCEEDED;
 }
 
@@ -439,6 +475,9 @@ void OnTick()
    UpdateSigmaBaseline();
    UpdateBandTelemetry();
 
+   // v24: Crash/Boom tick handler (runs on every tick, not just bar close)
+   if(InpCrashBoomMode) g_cb.OnTick();
+
    // v23: entry gate — session filter + stacking guard + all existing gates
    if(g_ticket==0 && !g_paused && g_cooldown==0 && !DailyLossHalted() &&
       IsSessionActive() &&
@@ -452,9 +491,37 @@ void OnTick()
       }
       else
       {
-         string sig="";
-         int dir = GenerateSignal(sig);
-         if(dir != 0) OpenTrade(dir, sig);
+         // v24: Crash/Boom mode uses dedicated signal engine
+         if(InpCrashBoomMode)
+         {
+            string cb_reason="", cb_type="";
+            double cb_entry=0, cb_sl=0, cb_tp=0;
+            int cb_dir = g_cb.OnBar(cb_entry, cb_sl, cb_tp, cb_reason, cb_type);
+            if(cb_dir != 0)
+            {
+               g_last_strategy = cb_type;
+               // Use CB entry/SL/TP directly via OpenCBTrade
+               OpenCBTrade(cb_dir, cb_entry, cb_sl, cb_tp, cb_reason);
+            }
+            else if(cb_reason != "")
+            {
+               g_last_skip = cb_reason;
+               if(g_fired_legs == "")
+                  Telem("sig", StringFormat(
+                     "\"sym\":\"%s\",\"action\":\"%s\",\"dir\":0,\"reason\":\"%s\",\"legs\":\"CB\","
+                     "\"score_b\":0,\"score_s\":0,\"regime\":\"%s\",\"z\":%.3f,\"exp\":%.3f,"
+                     "\"sigma\":%.6f,\"sigma_base\":%.6f,\"band_geom\":false",
+                     _Symbol, "SKIP", cb_reason, RegimeToStr(g_regime),
+                     g_z_dev, g_exp_ratio, g_sigma_now, g_sigma_ema));
+            }
+         }
+         else
+         {
+            // Standard Volatility mode
+            string sig="";
+            int dir = GenerateSignal(sig);
+            if(dir != 0) OpenTrade(dir, sig);
+         }
       }
    }
    else if(g_ticket==0 && (g_paused || g_cooldown>0 || DailyLossHalted() || !IsSessionActive()))
@@ -1427,6 +1494,93 @@ void OpenTrade(int direction, string sig_type)
       "\"tf\":\"%s\",\"z\":%.3f,\"exp\":%.3f",
       _Symbol, g_ticket, direction, entry, sl, tp, vol, g_risk_money,
       (g_sig_is_band?"true":"false"), g_fired_legs, RegimeToStr(g_regime),
+      EnumToString(g_tf_entry), g_z_dev, g_exp_ratio));
+}
+
+//+------------------------------------------------------------------+
+//| v24: Crash/Boom trade opener — uses CB-specific risk sizing      |
+//+------------------------------------------------------------------+
+void OpenCBTrade(int direction, double entry, double sl, double tp, string reason)
+{
+   double stop_dist = MathAbs(entry - sl);
+   double tp_dist = MathAbs(tp - entry);
+   if(stop_dist <= 0 || tp_dist <= 0) return;
+
+   double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   double tick_value = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   double min_lot    = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double max_lot    = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double lot_step   = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   if(tick_size<=0 || tick_value<=0) return;
+
+   // v24: Use dynamic risk sizing from Crash/Boom engine
+   double vol = g_cb.CalculateVolume(g_eq, stop_dist, tick_size, tick_value,
+                                     min_lot, max_lot, lot_step);
+   if(vol <= 0) return;
+
+   // EFFECTIVE-RISK GUARDRAIL
+   double eff_risk = vol * ((stop_dist/tick_size)*tick_value);
+   double cap_money = g_eq * InpMaxEffectiveRiskPct / 100.0;
+   if(eff_risk > cap_money)
+   {
+      PrintFormat("[v24] SKIP %s — min-lot risk $%.2f exceeds cap $%.2f",
+                  direction>0?"BUY":"SELL", eff_risk, cap_money);
+      g_cooldown = 1;
+      return;
+   }
+   g_risk_money = eff_risk;
+
+   bool ok = false;
+   if(InpLiveExecution)
+   {
+      PrintFormat("[v24] Executing %s vol=%.2f SL=%.5f TP=%.5f | %s",
+                  direction>0?"BUY":"SELL", vol, sl, tp, reason);
+      if(direction>0) ok = trade.Buy(vol, _Symbol, 0, NormalizeDouble(sl,_Digits), NormalizeDouble(tp,_Digits), "CB_v24");
+      else            ok = trade.Sell(vol, _Symbol, 0, NormalizeDouble(sl,_Digits), NormalizeDouble(tp,_Digits), "CB_v24");
+      if(!ok)
+      {
+         uint retcode = trade.ResultRetcode();
+         string desc = trade.ResultRetcodeDescription();
+         PrintFormat("[v24] ORDER FAILED retcode=%d desc=%s", retcode, desc);
+      }
+   }
+   else { g_ticket = (ulong)TimeCurrent(); ok = true; Print("[v24] PAPER MODE"); }
+
+   if(!ok) { g_cooldown = InpCoolDownBars; return; }
+
+   g_ticket = 0;
+   for(int a=0; a<6; a++)
+   {
+      Sleep(60);
+      for(int i=PositionsTotal()-1; i>=0; i--)
+      {
+         ulong t = PositionGetTicket(i);
+         if(t>0 && PositionGetInteger(POSITION_MAGIC)==InpMagic && PositionGetString(POSITION_SYMBOL)==_Symbol)
+         { g_ticket = t; break; }
+      }
+      if(g_ticket > 0) break;
+   }
+   if(g_ticket == 0) g_ticket = trade.ResultOrder();
+
+   g_dir = direction; g_entry = entry; g_sl = sl; g_tp = tp;
+   g_orig_risk = stop_dist; g_position_volume = vol;
+   g_entry_time = TimeCurrent(); g_bars_held = 0;
+   g_high_water_r = 0;
+   g_max_hold = InpMaxHoldBars;
+   g_trades_today++;
+   g_sig_is_band = false;
+
+   if(InpDrawSignals) DrawArrow(direction, TimeCurrent(), entry, reason);
+   PrintFormat("[v24] %s %s @%.5f SL=%.5f TP=%.5f vol=%.2f | %s",
+               reason, direction>0?"BUY":"SELL", entry, sl, tp, vol,
+               g_cb.GetDashboardInfo());
+
+   Telem("open", StringFormat(
+      "\"sym\":\"%s\",\"ticket\":%I64u,\"dir\":%d,\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,"
+      "\"vol\":%.2f,\"eff_risk\":%.2f,\"band\":false,\"legs\":\"%s\",\"regime\":\"%s\","
+      "\"tf\":\"%s\",\"z\":%.3f,\"exp\":%.3f",
+      _Symbol, g_ticket, direction, entry, sl, tp, vol, g_risk_money,
+      reason, RegimeToStr(g_regime),
       EnumToString(g_tf_entry), g_z_dev, g_exp_ratio));
 }
 
