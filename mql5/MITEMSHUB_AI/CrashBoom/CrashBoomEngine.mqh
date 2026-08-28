@@ -244,6 +244,13 @@ public:
                                           min_lot, max_lot, lot_step);
    }
 
+   //--- v24.11: Notify engine when a trade closes (for trend-reversal guard)
+   void OnTradeClosed(int dir, double entry_price)
+   {
+      if(!m_is_enabled) return;
+      m_strategy.OnTradeClosed(dir, entry_price);
+   }
+   
    //--- Check if we should block entry (spike probability too high)
    bool ShouldBlockEntry() const
    {

@@ -58,6 +58,12 @@ private:
    double   m_last_signal_sl;
    double   m_last_signal_tp;
    string   m_last_signal_reason;
+   
+   //--- v24.11: Post-trade trend-reversal guard
+   int      m_last_trade_dir;       // direction of last closed trade (+1/-1)
+   double   m_last_trade_entry;     // entry price of last trade
+   int      m_bars_since_last_trade; // bars elapsed since last trade closed
+   bool     m_needs_reversal;       // if true, must see trend reversal before re-entry
 
 public:
    CCrashBoomStrategy()
@@ -88,6 +94,12 @@ public:
       m_last_signal_sl = 0;
       m_last_signal_tp = 0;
       m_last_signal_reason = "";
+      
+      // v24.11: post-trade trend-reversal guard
+      m_last_trade_dir = 0;
+      m_last_trade_entry = 0;
+      m_bars_since_last_trade = 999;
+      m_needs_reversal = false;
    }
    
    ~CCrashBoomStrategy()
@@ -146,6 +158,26 @@ public:
    void SetPostSpikeWindow(int bars)             { m_post_spike_window = bars; }
    int  GetPostSpikeWindow() const               { return m_post_spike_window; }
    void SetSpikeCooldown(int bars)               { m_spike_cooldown_bars = bars; }
+   
+   //--- v24.11: Track when a trade closes (call from main EA's ClosePosition)
+   void OnTradeClosed(int dir, double entry_price)
+   {
+      m_last_trade_dir = dir;
+      m_last_trade_entry = entry_price;
+      m_bars_since_last_trade = 0;
+      m_needs_reversal = true;  // must see trend reversal before re-entry
+   }
+   
+   //--- v24.11: Update bar counter (call from OnBar)
+   void UpdateBarCounter()
+   {
+      if(m_bars_since_last_trade < 999)
+         m_bars_since_last_trade++;
+      
+      // After 6 bars (30 min on M5), allow re-entry without reversal check
+      if(m_bars_since_last_trade >= 6)
+         m_needs_reversal = false;
+   }
 
    //--- Main signal generation (call on each bar close)
    //    Returns direction (1=BUY, -1=SELL, 0=no signal)
@@ -167,6 +199,9 @@ public:
          TelemLog(reason);
          return 0;
       }
+      
+      //--- v24.11: Update bar counter since last trade
+      UpdateBarCounter();
       
       //--- Step 2: Check for POST-SPIKE FADE opportunity
       int fade_dir = CheckPostSpikeFade(entry, sl, tp, reason);
@@ -303,6 +338,41 @@ private:
       {
          reason = StringFormat("CB-GRIND-TOO-LONG dur=%d", grind_dur);
          return 0;
+      }
+      
+      //--- v24.11: Post-trade trend-reversal guard
+      // If we just closed a trade, don't re-enter same direction unless trend reversed
+      if(m_needs_reversal && m_last_trade_dir != 0)
+      {
+         double current_price = iClose(_Symbol, PERIOD_M5, 0);
+         double price_vs_entry = current_price - m_last_trade_entry;
+         
+         // Determine the proposed direction for this grind
+         int proposed_dir = 0;
+         if(grind_dir > 0 && !m_is_crash) proposed_dir = 1;   // Boom grind up = BUY
+         else if(grind_dir > 0 && m_is_crash) proposed_dir = -1; // Crash grind up = SELL
+         else if(grind_dir < 0 && m_is_crash) proposed_dir = 1;  // Crash grind down = BUY
+         else if(grind_dir < 0 && !m_is_crash) proposed_dir = -1; // Boom grind down = SELL
+         
+         // If same direction as last trade, check if trend has reversed
+         if(proposed_dir == m_last_trade_dir)
+         {
+            // For SELL trades: trend reversed if price dropped below entry
+            // For BUY trades: trend reversed if price rose above entry
+            bool reversed = false;
+            if(m_last_trade_dir < 0)
+               reversed = (price_vs_entry < -5.0);  // price dropped 5+ points below our entry
+            else
+               reversed = (price_vs_entry > 5.0);   // price rose 5+ points above our entry
+            
+            if(!reversed)
+            {
+               reason = StringFormat("CB-GRIND-REVERSAL-GUARD last_dir=%s bars=%d gap=%.1f",
+                                    m_last_trade_dir>0?"BUY":"SELL",
+                                    m_bars_since_last_trade, price_vs_entry);
+               return 0;  // Block: trend hasn't reversed yet
+            }
+         }
       }
       
       // Get ATR using pre-created handle (no leak)

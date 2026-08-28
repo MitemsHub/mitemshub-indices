@@ -1755,7 +1755,10 @@ void ClosePosition(string reason)
    else if(reason=="STOP") g_stop_exits++;
    else if(reason=="ECUT") g_early_cuts++;
 
-   if(r<0){ g_consec_loss++; g_cooldown=InpCoolDownBars; } else g_consec_loss=0;
+   // v24.11: ALWAYS set cooldown after trade closes (not just after losses)
+   // This prevents re-entry while market is still moving against us
+   g_cooldown = InpCoolDownBars;
+   if(r<0){ g_consec_loss++; } else g_consec_loss=0;
    if(g_consec_loss>=InpMaxConsecLoss)
    {
       g_paused=true;
@@ -1774,6 +1777,10 @@ void ClosePosition(string reason)
       _Symbol, closed_ticket, g_dir, reason, exit_p, r, r*g_risk_money,
       g_consec_loss, (g_paused?"true":"false"), (DailyLossHalted()?"true":"false")));
 
+   // v24.11: Notify CB engine of trade close (for trend-reversal guard)
+   if(InpCrashBoomMode && g_dir != 0)
+      g_cb.OnTradeClosed(g_dir, g_entry);
+   
    g_ticket=0; g_dir=0; g_bars_held=0; g_high_water_r=0;
 
    // v23.1: Run intelligence review after every trade
