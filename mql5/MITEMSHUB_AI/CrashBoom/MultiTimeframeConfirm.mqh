@@ -35,7 +35,7 @@ private:
    int        m_tf_count;
    bool       m_is_enabled;
    
-   //--- BB handles per timeframe
+   //--- Indicator handles per timeframe (created ONCE, reused)
    int m_bb_handles[3];
    int m_atr_handles[3];
    int m_ema_handles[3];
@@ -65,7 +65,7 @@ public:
       }
    }
 
-   //--- Initialize with timeframes
+   //--- Initialize with timeframes (create handles ONCE)
    void Init(bool enabled)
    {
       m_is_enabled = enabled;
@@ -82,6 +82,20 @@ public:
       }
       
       Print("[CB-MTF] Multi-timeframe confirmation enabled: M1 + M5 + M15");
+   }
+
+   //--- Release handles on shutdown
+   void Deinit()
+   {
+      for(int i = 0; i < 3; i++)
+      {
+         if(m_bb_handles[i] != INVALID_HANDLE)  IndicatorRelease(m_bb_handles[i]);
+         if(m_atr_handles[i] != INVALID_HANDLE) IndicatorRelease(m_atr_handles[i]);
+         if(m_ema_handles[i] != INVALID_HANDLE) IndicatorRelease(m_ema_handles[i]);
+         m_bb_handles[i] = INVALID_HANDLE;
+         m_atr_handles[i] = INVALID_HANDLE;
+         m_ema_handles[i] = INVALID_HANDLE;
+      }
    }
 
    //--- Analyze all timeframes (call on each M5 bar close)

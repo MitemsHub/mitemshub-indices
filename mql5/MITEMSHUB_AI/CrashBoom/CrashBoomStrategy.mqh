@@ -35,8 +35,9 @@ private:
    bool m_is_crash;  // true = Crash index, false = Boom index
    bool m_is_enabled;
    
-   //--- Bollinger Band state (for post-spike fade)
+   //--- Indicator handles (created ONCE in Init, reused everywhere)
    int      m_bb_handle;
+   int      m_atr_handle;
    double   m_bb_upper, m_bb_middle, m_bb_lower;
    double   m_bb_deviation;
    
@@ -64,7 +65,8 @@ public:
       m_spike_detector = NULL;
       m_is_crash = false;
       m_is_enabled = false;
-      m_bb_handle = 0;
+      m_bb_handle = INVALID_HANDLE;
+      m_atr_handle = INVALID_HANDLE;
       m_bb_upper = 0;
       m_bb_middle = 0;
       m_bb_lower = 0;
@@ -102,15 +104,28 @@ public:
       
       if(enabled)
       {
-         // Initialize Bollinger Bands for fade detection
+         // Create indicator handles ONCE — reuse on every bar
          m_bb_handle = iBands(_Symbol, PERIOD_M5, 20, 0, m_bb_deviation, PRICE_CLOSE);
+         m_atr_handle = iATR(_Symbol, PERIOD_M5, 14);
+         
          if(m_bb_handle == INVALID_HANDLE)
             Print("[CB] WARNING: Failed to create BB handle");
+         if(m_atr_handle == INVALID_HANDLE)
+            Print("[CB] WARNING: Failed to create ATR handle");
          
          PrintFormat("[CB] Initialized: %s mode, spike_threshold=%.1f, max_spike_prob=%.2f",
                      is_crash_index ? "CRASH" : "BOOM",
                      m_spike_threshold, m_max_spike_prob);
       }
+   }
+
+   //--- Release indicator handles on shutdown
+   void Deinit()
+   {
+      if(m_bb_handle != INVALID_HANDLE) IndicatorRelease(m_bb_handle);
+      if(m_atr_handle != INVALID_HANDLE) IndicatorRelease(m_atr_handle);
+      m_bb_handle = INVALID_HANDLE;
+      m_atr_handle = INVALID_HANDLE;
    }
 
    //--- Set parameters
@@ -197,12 +212,11 @@ private:
    {
       if(!m_spike_detector->SpikeJustHappened(m_post_spike_window)) return 0;
       
-      // Get ATR for stop/target calculation
+      // Get ATR using pre-created handle (no leak)
       double atr[];
       ArraySetAsSeries(atr, true);
-      int h_atr = iATR(_Symbol, PERIOD_M5, 14);
-      if(h_atr == INVALID_HANDLE) return 0;
-      if(CopyBuffer(h_atr, 0, 1, 1, atr) < 1) return 0;
+      if(m_atr_handle == INVALID_HANDLE) return 0;
+      if(CopyBuffer(m_atr_handle, 0, 1, 1, atr) < 1) return 0;
       
       double current_price = iClose(_Symbol, PERIOD_M5, 0);
       int bars_since_spike = m_spike_detector->GetGrindDuration();  // approximate
@@ -278,11 +292,11 @@ private:
          return 0;
       }
       
+      // Get ATR using pre-created handle (no leak)
       double atr[];
       ArraySetAsSeries(atr, true);
-      int h_atr = iATR(_Symbol, PERIOD_M5, 14);
-      if(h_atr == INVALID_HANDLE) return 0;
-      if(CopyBuffer(h_atr, 0, 1, 1, atr) < 1) return 0;
+      if(m_atr_handle == INVALID_HANDLE) return 0;
+      if(CopyBuffer(m_atr_handle, 0, 1, 1, atr) < 1) return 0;
       
       double body_avg = m_spike_detector->GetGrindBodyAvg();
       double current_price = iClose(_Symbol, PERIOD_M5, 0);
@@ -294,7 +308,7 @@ private:
          sl = entry - m_grind_sl_mult * body_avg;
          tp = entry + m_grind_sl_mult * body_avg * 2.0;  // 2:1 R:R
          
-         reason = StringFormat("CB-GRIND-BUY dur=%d body_avg=%.5f", grind_dir, body_avg);
+         reason = StringFormat("CB-GRIND-BUY dur=%d body_avg=%.5f", grind_dur, body_avg);
          return 1;
       }
       else if(grind_dir > 0 && m_is_crash)  // Crash grind up = sell (spike will be down)

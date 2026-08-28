@@ -109,6 +109,14 @@ public:
                   prof.name, prof.spike_threshold, prof.fade_depth*100, prof.risk_mult);
    }
 
+   //--- Release all indicator handles on shutdown
+   void Deinit()
+   {
+      m_strategy.Deinit();
+      m_mtf_confirm.Deinit();
+      Print("[CB] Engine deinitialized — handles released");
+   }
+
    //--- Call on every tick
    void OnTick(double bid, double ask)
    {
@@ -138,12 +146,21 @@ public:
       {
          m_total_spikes++;
          m_spike_cooldown = m_calibration.GetProfile().cooldown_bars;
+         
+         // v24.1: Update calibration with live spike data
+         double spike_body = MathAbs(iClose(_Symbol, PERIOD_M5, 1) - iOpen(_Symbol, PERIOD_M5, 1));
+         m_calibration.UpdateLive(PERIOD_M5, true, spike_body, -1);
+         
          PrintFormat("[CB] Spike #%d detected! prob=%.2f grind=%d precursor=%.2f TOD=%s",
                      m_total_spikes, m_spike_detector.GetSpikeProbability(),
                      m_spike_detector.GetGrindDuration(),
                      m_tick_analyzer.GetPrecursorScore(),
                      m_tod_awareness.GetDashboard());
       }
+      
+      // Update calibration with current body size (non-spike)
+      double cur_body = MathAbs(iClose(_Symbol, PERIOD_M5, 1) - iOpen(_Symbol, PERIOD_M5, 1));
+      m_calibration.UpdateLive(PERIOD_M5, false, cur_body, -1);
       
       // Skip if in cooldown
       if(m_spike_cooldown > 0)

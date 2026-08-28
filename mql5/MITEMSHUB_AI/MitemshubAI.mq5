@@ -27,7 +27,7 @@
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "24.10"
+#property version   "24.11"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -346,6 +346,7 @@ void OnDeinit(const int reason)
    for(int i=0;i<26;i++) ObjectDelete(0, dash_names[i]);
 
    SaveReviewState();  // v23.1: persist trade stats + intelligence on shutdown
+   if(InpCrashBoomMode) g_cb.Deinit();  // v24.1: release indicator handles
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
    PrintFormat("[v23] FINAL | Trades:%d WR:%.1f%% R:%+.2f | Stops:%d Time:%d EarlyCut:%d Target:%d",
@@ -1613,6 +1614,54 @@ void ManagePosition()
 
    double r_now = g_orig_risk>0 ? (g_dir>0?(bid-g_entry):(g_entry-ask))/g_orig_risk : 0;
 
+   // v24.1: CRASH/BOOM SPIKE-AWARE EXIT — check spike probability first
+   if(InpCrashBoomMode && g_cb.IsEnabled())
+   {
+      double spike_prob = g_cb.GetSpikeProbability();
+      
+      // If spike probability > 80% and trade is in profit, exit NOW
+      if(spike_prob > 0.80 && r_now > 0)
+      {
+         PrintFormat("[v24] CB SPIKE EXIT — prob=%.2f R=+.2f, banking profit before spike",
+                     spike_prob, r_now);
+         ClosePosition("CB-SPIKE");
+         return;
+      }
+      
+      // If spike probability > 60% and trade is losing, cut immediately
+      if(spike_prob > 0.60 && r_now < 0)
+      {
+         PrintFormat("[v24] CB SPIKE-CUT — prob=%.2f R=%.2f, cutting loss before spike",
+                     spike_prob, r_now);
+         ClosePosition("CB-SPIKE-CUT");
+         return;
+      }
+      
+      // CB-specific tighter trailing: start at 0.5R instead of 1.0R
+      if(r_now >= 0.5)
+      {
+         double cb_dist = 0.4 * g_orig_risk;  // tighter than standard 0.7R
+         if(g_dir>0){ double ns=NormalizeDouble(bid-cb_dist,_Digits); if(ns>g_sl && ns>g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
+         else       { double ns=NormalizeDouble(ask+cb_dist,_Digits); if(ns<g_sl && ns<g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
+      }
+      
+      // CB-specific profit lock: lock at 0.3R if reached 0.8R (tighter than standard)
+      if(g_high_water_r >= 0.8 && r_now <= 0.3 && r_now > 0)
+      {
+         PrintFormat("[v24] CB PROFIT LOCK — high-water %.2fR now %.2fR", g_high_water_r, r_now);
+         ClosePosition("CB-PLOCK");
+         return;
+      }
+      
+      // CB-specific early cut: 4 bars instead of 6
+      if(g_bars_held >= 4 && r_now <= -0.3 && g_high_water_r < 0.2)
+      {
+         PrintFormat("[v24] CB EARLY CUT — %d bars R=%.2f", g_bars_held, r_now);
+         ClosePosition("CB-ECUT");
+         return;
+      }
+   }
+
    // v23: update high-water mark
    if(r_now > g_high_water_r) g_high_water_r = r_now;
 
@@ -1668,8 +1717,8 @@ void ManagePosition()
          if(trade.PositionModify(g_ticket,NormalizeDouble(be,_Digits),g_tp)) g_sl=be;
    }
 
-   // trailing stop
-   if(InpUseTrailing && r_now >= InpTrailStartR)
+   // trailing stop (standard mode — CB mode handled above)
+   if(!InpCrashBoomMode && InpUseTrailing && r_now >= InpTrailStartR)
    {
       double dist = InpTrailDistR * g_orig_risk;
       if(g_dir>0){ double ns=NormalizeDouble(bid-dist,_Digits); if(ns>g_sl && ns>g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
