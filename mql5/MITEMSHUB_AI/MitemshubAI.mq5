@@ -1,7 +1,20 @@
 //+------------------------------------------------------------------+
-//|                                    MitemshubAI_v23_0.mq5         |
-//|                     MITEMSHUB AI MULTI-STRATEGY ENGINE v23.0     |
-//|   Intelligent • Regime-Aware • 5 Core Strategies • Safer Exits   |
+//|                                    MitemshubAI_v24_11.mq5        |
+//|                     MITEMSHUB AI MULTI-STRATEGY ENGINE v24.11    |
+//|   Intelligent • Regime-Aware • Crash/Boom • Spike-Aware • Smart  |
+//|                                                                  |
+//| v24.11 CHANGES (2026-08-28):                                     |
+//|  1. CRASH/BOOM MODE: full spike detection, post-spike fade,      |
+//|     grind continuation, dynamic risk sizing, symbol calibration. |
+//|  2. TICK-PATTERN ANALYZER: monitors individual tick behavior      |
+//|     for spike precursors (speed, direction, size, pause, entropy).|
+//|  3. MULTI-TIMEFRAME CONFIRM: M1+M5+M15 must agree (2/3).        |
+//|  4. TIME-OF-DAY AWARENESS: learns spike clustering by hour.      |
+//|  5. SYMBOL CALIBRATION: auto-detects Boom/Crash 300/500/1000.    |
+//|  6. CB-SPECIFIC EXITS: spike-aware trailing, faster profit lock. |
+//|  7. FIXED: indicator handle leaks (created once, reused).        |
+//|  8. FIXED: DAILY-HALT uses realized P&L, not equity comparison.  |
+//|  9. FIXED: manual close detection uses deal history price.       |
 //|                                                                  |
 //| v23.0 CHANGES (2026-08-27):                                      |
 //|  1. CROSS-INSTANCE STACKING GUARD: blocks new entries when ANY   |
