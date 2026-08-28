@@ -27,7 +27,7 @@
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "24.00"
+#property version   "24.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -476,7 +476,7 @@ void OnTick()
    UpdateBandTelemetry();
 
    // v24: Crash/Boom tick handler (runs on every tick, not just bar close)
-   if(InpCrashBoomMode) g_cb.OnTick();
+   if(InpCrashBoomMode) g_cb.OnTick(SymbolInfoDouble(_Symbol,SYMBOL_BID), SymbolInfoDouble(_Symbol,SYMBOL_ASK));
 
    // v23: entry gate — session filter + stacking guard + all existing gates
    if(g_ticket==0 && !g_paused && g_cooldown==0 && !DailyLossHalted() &&

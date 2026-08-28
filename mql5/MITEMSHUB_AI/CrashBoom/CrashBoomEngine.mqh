@@ -18,15 +18,23 @@
 #define MITEMSHUB_CRASHBOOM_ENGINE_MQH
 
 #include "SpikeDetector.mqh"
+#include "TickPatternAnalyzer.mqh"
+#include "MultiTimeframeConfirm.mqh"
+#include "TimeOfDayAwareness.mqh"
+#include "SymbolCalibration.mqh"
 #include "CrashBoomStrategy.mqh"
 #include "DynamicRiskSizing.mqh"
 
 class CCrashBoomEngine
 {
 private:
-   CSpikeDetector     m_spike_detector;
-   CCrashBoomStrategy m_strategy;
-   CDynamicRiskSizing m_risk_sizer;
+   CSpikeDetector          m_spike_detector;
+   CTickPatternAnalyzer    m_tick_analyzer;
+   CMultiTimeframeConfirm  m_mtf_confirm;
+   CTimeOfDayAwareness     m_tod_awareness;
+   CSymbolCalibration      m_calibration;
+   CCrashBoomStrategy      m_strategy;
+   CDynamicRiskSizing      m_risk_sizer;
    
    bool m_is_enabled;
    bool m_is_crash;
@@ -74,31 +82,39 @@ public:
       
       // Initialize sub-modules
       m_spike_detector.Reset();
+      m_tick_analyzer.Reset();
+      m_tod_awareness.Reset();
+      m_calibration.AutoCalibrate();
       m_strategy.Init(&m_spike_detector, is_crash_index, true);
       m_risk_sizer.Init(true);
+      m_mtf_confirm.Init(true);
       
-      // Set default parameters (can be overridden)
-      m_spike_detector.SetSpikeThreshold(3.0);
-      m_strategy.SetSpikeThreshold(3.0);
-      m_strategy.SetMaxSpikeProb(0.65);
-      m_strategy.SetPostSpikeWindow(5);
-      m_strategy.SetSpikeCooldown(2);
+      // Apply calibrated parameters
+      SymbolProfile prof = m_calibration.GetProfile();
+      m_spike_detector.SetSpikeThreshold(prof.spike_threshold);
+      m_strategy.SetSpikeThreshold(prof.spike_threshold);
+      m_strategy.SetMaxSpikeProb(prof.max_spike_prob);
+      m_strategy.SetPostSpikeWindow(prof.optimal_hold);
+      m_strategy.SetSpikeCooldown(prof.cooldown_bars);
+      m_strategy.SetFadeSL(prof.fade_sl_mult);
+      m_strategy.SetFadeTP(prof.fade_tp_mult);
       
-      m_risk_sizer.SetBaseRisk(0.5);
+      m_risk_sizer.SetBaseRisk(0.5 * prof.risk_mult);
       m_risk_sizer.SetMinRisk(0.15);
-      m_risk_sizer.SetMaxRisk(0.75);
+      m_risk_sizer.SetMaxRisk(0.75 * prof.risk_mult);
       m_risk_sizer.SetSpikeThreshold(0.5);
       
-      PrintFormat("[CB] Engine initialized: %s mode | spike_thresh=%.1f | max_spike_prob=%.2f | risk=%.2f%%",
+      PrintFormat("[CB] Engine initialized: %s | %s | thresh=%.1f | fade=%.0f%% | risk_mult=%.1f",
                   is_crash_index ? "CRASH" : "BOOM",
-                  3.0, 0.65, 0.5);
+                  prof.name, prof.spike_threshold, prof.fade_depth*100, prof.risk_mult);
    }
 
    //--- Call on every tick
-   void OnTick()
+   void OnTick(double bid, double ask)
    {
       if(!m_is_enabled) return;
       m_spike_detector.OnTick();
+      m_tick_analyzer.OnTick(bid, ask);  // v24.1: tick pattern analysis
    }
 
    //--- Call on every bar close
@@ -108,10 +124,10 @@ public:
    {
       if(!m_is_enabled) return 0;
       
-      // Update spike detector
-      m_spike_detector.OnBar(PERIOD_M5, 20, 3.0);
-      
-      // Update Bollinger Bands
+      // Update all analyzers
+      m_spike_detector.OnBar(PERIOD_M5, 20, m_calibration.GetProfile().spike_threshold);
+      m_mtf_confirm.Analyze();           // v24.1: multi-timeframe confirmation
+      m_tod_awareness.OnBar(PERIOD_M5);  // v24.1: time-of-day awareness
       m_strategy.UpdateBands();
       
       // Decrement cooldown
@@ -121,10 +137,12 @@ public:
       if(m_spike_detector.SpikeJustHappened(1))
       {
          m_total_spikes++;
-         m_spike_cooldown = 2;  // wait 2 bars after spike
-         PrintFormat("[CB] Spike #%d detected! prob=%.2f grind_dur=%d",
+         m_spike_cooldown = m_calibration.GetProfile().cooldown_bars;
+         PrintFormat("[CB] Spike #%d detected! prob=%.2f grind=%d precursor=%.2f TOD=%s",
                      m_total_spikes, m_spike_detector.GetSpikeProbability(),
-                     m_spike_detector.GetGrindDuration());
+                     m_spike_detector.GetGrindDuration(),
+                     m_tick_analyzer.GetPrecursorScore(),
+                     m_tod_awareness.GetDashboard());
       }
       
       // Skip if in cooldown
@@ -134,11 +152,34 @@ public:
          return 0;
       }
       
+      // v24.1: Check tick precursor score — block if spike imminent
+      double precursor = m_tick_analyzer.GetPrecursorScore();
+      if(precursor > 0.7)
+      {
+         reason = StringFormat("CB-TICK-BLOCK precursor=%.2f > 0.70", precursor);
+         return 0;
+      }
+      
+      // v24.1: Check time-of-day risk — block during dangerous hours
+      if(m_tod_awareness.ShouldAvoid())
+      {
+         reason = StringFormat("CB-TOD-AVOID %s", m_tod_awareness.GetRiskDescription());
+         return 0;
+      }
+      
       // Generate signal from strategy
       m_sig_dir = m_strategy.GenerateSignal(entry, sl, tp, reason);
       
       if(m_sig_dir != 0)
       {
+         // v24.1: Multi-timeframe confirmation check
+         string mtf_reason = "";
+         if(!m_mtf_confirm.IsConfirmed(m_sig_dir, mtf_reason))
+         {
+            reason = mtf_reason;
+            return 0;
+         }
+         
          // Determine signal type
          if(reason.Find("FADE") >= 0)
          {
@@ -154,6 +195,11 @@ public:
          {
             signal_type = "CB-UNKNOWN";
          }
+         
+         // v24.1: Apply time-of-day risk multiplier to entry
+         double tod_mult = m_tod_awareness.GetRiskMultiplier();
+         if(tod_mult != 1.0)
+            reason += StringFormat(" TOD Mult=%.1f", tod_mult);
          
          m_sig_entry = entry;
          m_sig_sl = sl;
@@ -187,7 +233,7 @@ public:
       return (m_spike_detector.GetSpikeProbability() > m_strategy.GetMaxSpikeProb());
    }
 
-   //--- Get dashboard info
+   //--- Get dashboard info (multi-line)
    string GetDashboardInfo() const
    {
       if(!m_is_enabled) return "CB: OFF";
@@ -196,14 +242,31 @@ public:
       int grind = m_spike_detector.GetGrindDuration();
       int grind_dir = m_spike_detector.GetGrindDirection();
       string risk_desc = m_risk_sizer.GetRiskDescription(prob, m_spike_detector.SpikeJustHappened(5));
+      double precursor = m_tick_analyzer.GetPrecursorScore();
       
-      return StringFormat("CB: %s | Spike:%.0f%% | Grind:%s%d | Risk:%s | Spikes:%d Fades:%d Grinds:%d",
+      string info = StringFormat("CB: %s | Spike:%.0f%% Precursor:%.0f%% | Grind:%s%d",
                           m_is_crash ? "CRASH" : "BOOM",
-                          prob * 100,
-                          grind_dir > 0 ? "UP" : (grind_dir < 0 ? "DN" : "--"),
-                          grind,
-                          risk_desc,
-                          m_total_spikes, m_fade_trades, m_grind_trades);
+                          prob * 100, precursor * 100,
+                          grind_dir > 0 ? "UP" : (grind_dir < 0 ? "DN" : "--"), grind);
+      info += StringFormat(" | Risk:%s | Spikes:%d Fades:%d",
+                          risk_desc, m_total_spikes, m_fade_trades);
+      return info;
+   }
+
+   //--- Get detailed info for Experts journal
+   string GetDetailedInfo() const
+   {
+      string info = "";
+      info += m_calibration.GetDashboard() + "\n";
+      info += m_mtf_confirm.GetDashboard() + "\n";
+      info += m_tod_awareness.GetDashboard() + "\n";
+      info += StringFormat("Tick: speed=%.1f/s cluster=%d anomaly=%.1f entropy=%.2f precursor=%.2f",
+                          m_tick_analyzer.GetCurrentSpeed(),
+                          m_tick_analyzer.GetDirectionCluster(),
+                          m_tick_analyzer.GetAnomalyRatio(),
+                          m_tick_analyzer.GetEntropy(),
+                          m_tick_analyzer.GetPrecursorScore());
+      return info;
    }
 
    //--- Get spike probability
