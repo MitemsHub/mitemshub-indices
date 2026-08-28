@@ -109,10 +109,33 @@ public:
 
    //--- Check if signal is confirmed by multiple timeframes
    //    direction: proposed trade direction (1=BUY, -1=SELL)
-   //    Returns: true if at least 2 of 3 TFs agree
-   bool IsConfirmed(int direction, string &reason) const
+   //    Returns: true if at least 1 of 3 TFs agree
+   bool IsConfirmed(int direction, string &reason)
    {
       if(!m_is_enabled) return true;  // pass through if disabled
+      
+      // CRITICAL: Set agrees_with_signal based on each TF's grind direction
+      // This was NEVER done before — MTF always blocked!
+      for(int i = 0; i < 3; i++)
+      {
+         m_analysis[i].agrees_with_signal = false;
+         
+         // A TF agrees if:
+         // 1. It has a grind in the same direction as the signal, OR
+         // 2. It has no strong opposing grind, OR
+         // 3. It has a spike that supports the direction
+         if(m_analysis[i].grind_detected)
+         {
+            // Grind direction matches signal direction
+            if(m_analysis[i].grind_direction == direction)
+               m_analysis[i].agrees_with_signal = true;
+         }
+         else
+         {
+            // No strong grind — TF is neutral, counts as agreement
+            m_analysis[i].agrees_with_signal = true;
+         }
+      }
       
       int agree_count = 0;
       int total_score = 0;

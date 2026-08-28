@@ -310,7 +310,7 @@ int OnInit()
    LoadReviewState();  // v23.1: restore persisted trade stats + intelligence
    if(InpDrawDashboard) CreateDashboard();
 
-   Print("[v24] MITEMSHUB AI v24.0 started | 5 Strategies | Regime-Aware | Crash/Boom Mode");
+   Print("[v24.11] MITEMSHUB AI v24.11 started | 5 Strategies | Regime-Aware | Crash/Boom Mode");
    PrintFormat("[v23.0] Entry TF=%s | Regime TF=%s | Band=%s | MinScore=%d | RiskCap=%.0f%%",
                EnumToString(g_tf_entry), EnumToString(g_tf_regime),
                InpUseBandFade?"ON":"OFF", InpMinScore, InpMaxEffectiveRiskPct);
@@ -1804,7 +1804,7 @@ void UpdateDashboard()
    double pct = CalcATRPercentile(atr[0]);
 
    string L[26];
-   L[0]="=== MITEMSHUB AI v23.1 ===";
+   L[0]="=== MITEMSHUB AI v24.11 ===";
    L[1]=StringFormat("%s | %s -> %s",_Symbol,EnumToString(g_tf_entry),EnumToString(g_tf_regime));
    // v23.1: Show real-time session P&L including unrealized gains
    double realtime_pnl = g_session_pnl;

@@ -119,6 +119,9 @@ public:
    {
       m_spike_threshold = spike_body_threshold;
       
+      //--- Age the last spike bar (so SpikeJustHappened tracks bars-ago correctly)
+      if(m_last_spike_bar > 0) m_last_spike_bar++;
+      
       //--- Update body history
       double body = MathAbs(iClose(_Symbol, tf, 1) - iOpen(_Symbol, tf, 1));
       m_body_history[m_body_head] = body;
@@ -141,7 +144,7 @@ public:
       {
          spike_detected = true;
          m_last_spike_time = iTime(_Symbol, tf, 1);
-         m_last_spike_bar = 1;
+         m_last_spike_bar = 1;  // reset to 1 (this bar)
       }
       
       //--- Update grind detection (look at last N bars)
