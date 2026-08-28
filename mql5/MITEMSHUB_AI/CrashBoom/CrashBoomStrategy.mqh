@@ -285,11 +285,11 @@ private:
       int grind_dir = m_spike_detector_obj.GetGrindDirection();
       int grind_dur = m_spike_detector_obj.GetGrindDuration();
       
-      // Need at least 5 bars of grind
-      if(grind_dir == 0 || grind_dur < 5) return 0;
+      // Need at least 3 bars of grind ( lowered from 5 for more opportunities)
+      if(grind_dir == 0 || grind_dur < 3) return 0;
       
       // Don't enter if grind is too long (spike imminent)
-      if(grind_dur > 15)
+      if(grind_dur > 20)
       {
          reason = StringFormat("CB-GRIND-TOO-LONG dur=%d", grind_dur);
          return 0;

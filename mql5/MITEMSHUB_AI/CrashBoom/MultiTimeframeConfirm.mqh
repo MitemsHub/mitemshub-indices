@@ -126,14 +126,14 @@ public:
          }
       }
       
-      if(agree_count >= 2)
+      if(agree_count >= 1)
       {
          reason = StringFormat("MTF-CONFIRM %d/3 TFs agree (score=%d)", agree_count, total_score);
          return true;
       }
       else
       {
-         reason = StringFormat("MTF-BLOCK %d/3 TFs agree (need 2+)", agree_count);
+         reason = StringFormat("MTF-BLOCK %d/3 TFs agree (need 1+)", agree_count);
          return false;
       }
    }
