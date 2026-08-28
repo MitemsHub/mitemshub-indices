@@ -219,21 +219,42 @@ private:
       m_analysis[index].grind_direction = dir;
       m_analysis[index].grind_duration = dur;
       
-      //--- BB position
-      double upper = iBands(_Symbol, tf, 20, 0, 2.0, PRICE_CLOSE, MODE_UPPER, 1);
-      double lower = iBands(_Symbol, tf, 20, 0, 2.0, PRICE_CLOSE, MODE_LOWER, 1);
+      //--- BB position (use pre-created handle)
+      double bb_upper[], bb_lower[];
+      ArraySetAsSeries(bb_upper, true);
+      ArraySetAsSeries(bb_lower, true);
+      double upper = 0, lower = 0;
+      if(m_bb_handles[index] != INVALID_HANDLE)
+      {
+         if(CopyBuffer(m_bb_handles[index], 1, 1, 1, bb_upper) >= 1) upper = bb_upper[0];
+         if(CopyBuffer(m_bb_handles[index], 2, 1, 1, bb_lower) >= 1) lower = bb_lower[0];
+      }
       double close = iClose(_Symbol, tf, 1);
       if(upper > lower)
          m_analysis[index].bb_position = (close - lower) / (upper - lower);
       else
          m_analysis[index].bb_position = 0.5;
       
-      //--- ATR ratio
-      double atr_now = iATR(_Symbol, tf, 14, 1);
+      //--- ATR ratio (use pre-created handle)
+      double atr_buf[];
+      ArraySetAsSeries(atr_buf, true);
+      double atr_now = 0;
+      if(m_atr_handles[index] != INVALID_HANDLE)
+      {
+         if(CopyBuffer(m_atr_handles[index], 0, 1, 1, atr_buf) >= 1)
+            atr_now = atr_buf[0];
+      }
       double atr_avg = 0;
+      int atr_count = 0;
       for(int i = 2; i <= 20; i++)
-         atr_avg += iATR(_Symbol, tf, 14, i);
-      atr_avg /= 19;
+      {
+         if(CopyBuffer(m_atr_handles[index], 0, i, 1, atr_buf) >= 1)
+         {
+            atr_avg += atr_buf[0];
+            atr_count++;
+         }
+      }
+      if(atr_count > 0) atr_avg /= atr_count;
       m_analysis[index].atr_ratio = (atr_avg > 0) ? atr_now / atr_avg : 1.0;
       
       //--- Consecutive same-direction bars
