@@ -303,10 +303,14 @@ public:
    bool IsEnabled() const { return m_is_enabled; }
    bool IsCrash() const   { return m_is_crash; }
    
-   //--- Access individual modules
-   CSpikeDetector*     GetSpikeDetector()  { return &m_spike_detector; }
-   CCrashBoomStrategy* GetStrategy()       { return &m_strategy; }
-   CDynamicRiskSizing* GetRiskSizer()      { return &m_risk_sizer; }
+   //--- Parameter setters (wrappers — avoid pointer access from main EA)
+   void SetSpikeThreshold(double val)  { m_spike_detector.SetSpikeThreshold(val); m_strategy.SetSpikeThreshold(val); }
+   void SetMaxSpikeProb(double val)    { m_strategy.SetMaxSpikeProb(val); }
+   void SetFadeR(double val)           { m_strategy.SetFadeR(val); }
+   void SetFadeSL(double val)          { m_strategy.SetFadeSL(val); }
+   void SetFadeTP(double val)          { m_strategy.SetFadeTP(val); }
+   void SetBaseRisk(double val)        { m_risk_sizer.SetBaseRisk(val); }
+   void SetMinRisk(double val)         { m_risk_sizer.SetMinRisk(val); }
 };
 
 #endif
