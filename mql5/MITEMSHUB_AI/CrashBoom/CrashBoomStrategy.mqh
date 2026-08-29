@@ -47,6 +47,7 @@ private:
    double   m_fade_r_entry;         // R level to enter fade after spike
    double   m_fade_sl_atr_mult;     // stop loss = this x ATR
    double   m_fade_tp_atr_mult;     // take profit = this x ATR
+   double   m_min_rr;               // minimum planned reward:risk
    double   m_grind_sl_mult;        // stop for grind continuation = this x avg body
    double   m_max_spike_prob;       // block entries above this probability
    int      m_post_spike_window;   // bars after spike that fade is valid
@@ -65,6 +66,16 @@ private:
    int      m_bars_since_last_trade; // bars elapsed since last trade closed
    bool     m_needs_reversal;       // if true, must see trend reversal before re-entry
 
+   //--- v25: Grind leg control
+   bool     m_enable_grind;         // false = fade-only mode
+
+   //--- v25: Fade-only optimized parameters
+   double   m_fade_retrace_max;     // max retrace % for entry (quality filter)
+   double   m_breakeven_r;          // lock SL at entry after this R
+   bool     m_use_trail;            // use trailing stop in CB mode
+   bool     m_require_spike_direction; // require spike candle to match index direction
+   double   m_min_atr_points;       // reject untradeably small ATR values
+
 public:
    CCrashBoomStrategy()
    {
@@ -78,15 +89,21 @@ public:
       m_bb_lower = 0;
       m_bb_deviation = 2.0;
       
-      // Default parameters
-      m_spike_threshold = 3.0;
-      m_spike_cooldown_bars = 2;
-      m_fade_r_entry = 0.3;        // enter at 0.3R into the fade
-      m_fade_sl_atr_mult = 0.5;
-      m_fade_tp_atr_mult = 1.5;
+      // Default parameters (v25: optimized from 60-day Boom 1000 data)
+      m_spike_threshold = 2.8;       // optimized: 2.8x avg body
+      m_spike_cooldown_bars = 1;     // optimized: 1 bar cooldown
+      m_fade_r_entry = 0.40;         // optimized: enter at 40% retrace (deeper = cleaner)
+      m_fade_sl_atr_mult = 0.4;     // optimized: tighter stop = 0.4x ATR
+      m_fade_tp_atr_mult = 3.5;     // optimized: wider target = 3.5x ATR (PF 10.33)
+      m_min_rr = 2.0;               // reject plans whose geometry is not asymmetric
+      m_fade_retrace_max = 0.50;    // optimized: max 50% retrace (quality filter)
       m_grind_sl_mult = 2.0;
-      m_max_spike_prob = 0.65;
+      m_max_spike_prob = 0.70;      // optimized: 70% spike prob threshold
       m_post_spike_window = 5;
+      m_breakeven_r = 0.5;          // optimized: lock at 0.5R
+      m_use_trail = false;           // optimized: trailing KILLS expectancy on CB fade
+      m_require_spike_direction = true;
+      m_min_atr_points = 0.0;
       
       m_last_signal = CB_NONE;
       m_last_signal_dir = 0;
@@ -100,6 +117,9 @@ public:
       m_last_trade_entry = 0;
       m_bars_since_last_trade = 999;
       m_needs_reversal = false;
+
+      // v25: default to fade-only
+      m_enable_grind = false;
    }
    
    ~CCrashBoomStrategy()
@@ -153,11 +173,22 @@ public:
    void SetFadeR(double r)                       { m_fade_r_entry = r; }
    void SetFadeSL(double atr_mult)               { m_fade_sl_atr_mult = atr_mult; }
    void SetFadeTP(double atr_mult)               { m_fade_tp_atr_mult = atr_mult; }
+   void SetMinRR(double rr)                       { m_min_rr = MathMax(0.0, rr); }
    void SetMaxSpikeProb(double prob)             { m_max_spike_prob = prob; }
    double GetMaxSpikeProb() const                { return m_max_spike_prob; }
    void SetPostSpikeWindow(int bars)             { m_post_spike_window = bars; }
    int  GetPostSpikeWindow() const               { return m_post_spike_window; }
    void SetSpikeCooldown(int bars)               { m_spike_cooldown_bars = bars; }
+   void SetEnableGrind(bool val)                 { m_enable_grind = val; }
+   bool IsGrindEnabled() const                   { return m_enable_grind; }
+   void SetFadeRetraceMax(double val)            { m_fade_retrace_max = val; }
+   void SetBreakevenR(double val)                { m_breakeven_r = val; }
+   void SetUseTrail(bool val)                    { m_use_trail = val; }
+   void SetRequireSpikeDirection(bool val)        { m_require_spike_direction = val; }
+   void SetMinATRPoints(double val)               { m_min_atr_points = MathMax(0.0, val); }
+   double GetFadeRetraceMax() const              { return m_fade_retrace_max; }
+   double GetBreakevenR() const                  { return m_breakeven_r; }
+   bool   GetUseTrail() const                    { return m_use_trail; }
    
    //--- v24.11: Track when a trade closes (call from main EA's ClosePosition)
    void OnTradeClosed(int dir, double entry_price)
@@ -217,18 +248,21 @@ public:
          return fade_dir;
       }
       
-      //--- Step 3: Check for GRIND CONTINUATION entry
-      int grind_dir = CheckGrindContinuation(entry, sl, tp, reason);
-      if(grind_dir != 0)
+      //--- Step 3: Check for GRIND CONTINUATION entry (only if enabled)
+      if(m_enable_grind)
       {
-         m_last_signal = CB_GRIND_CONTINUATION;
-         m_last_signal_dir = grind_dir;
-         m_last_signal_entry = entry;
-         m_last_signal_sl = sl;
-         m_last_signal_tp = tp;
-         m_last_signal_reason = reason;
-         TelemLog(reason);
-         return grind_dir;
+         int grind_dir = CheckGrindContinuation(entry, sl, tp, reason);
+         if(grind_dir != 0)
+         {
+            m_last_signal = CB_GRIND_CONTINUATION;
+            m_last_signal_dir = grind_dir;
+            m_last_signal_entry = entry;
+            m_last_signal_sl = sl;
+            m_last_signal_tp = tp;
+            m_last_signal_reason = reason;
+            TelemLog(reason);
+            return grind_dir;
+         }
       }
       
       //--- No signal
@@ -265,6 +299,7 @@ private:
       ArraySetAsSeries(atr, true);
       if(m_atr_handle == INVALID_HANDLE) return 0;
       if(CopyBuffer(m_atr_handle, 0, 1, 1, atr) < 1) return 0;
+      if(atr[0] <= 0 || (m_min_atr_points > 0 && atr[0] / _Point < m_min_atr_points)) return 0;
       
       double current_price = iClose(_Symbol, PERIOD_M5, 0);
       int bars_since_spike = m_spike_detector_obj.GetGrindDuration();  // approximate
@@ -274,22 +309,25 @@ private:
       {
          // Check if price has retraced enough from spike low
          double spike_low = iLow(_Symbol, PERIOD_M5, 1);
-         double spike_body = MathAbs(iClose(_Symbol, PERIOD_M5, 1) - iOpen(_Symbol, PERIOD_M5, 1));
+         double spike_body_signed = iClose(_Symbol, PERIOD_M5, 1) - iOpen(_Symbol, PERIOD_M5, 1);
+         double spike_body = MathAbs(spike_body_signed);
+         if(m_require_spike_direction && spike_body_signed >= 0) return 0;
          
          if(spike_body > 0 && current_price > spike_low)
          {
             double retrace = (current_price - spike_low) / spike_body;
             
-            // Enter if retracted 30-70% of spike
-            if(retrace >= m_fade_r_entry && retrace <= 0.70)
+            // Enter if retracted in optimized window
+            if(retrace >= m_fade_r_entry && retrace <= m_fade_retrace_max)
             {
                entry = current_price;
                sl = entry - m_fade_sl_atr_mult * atr[0];
                tp = entry + m_fade_tp_atr_mult * atr[0];
                
-               // Ensure TP is above spike high
+               // Ensure TP is above spike high and preserves minimum R:R.
                double spike_high = iHigh(_Symbol, PERIOD_M5, 1);
                if(tp < spike_high) tp = spike_high + atr[0] * 0.2;
+               if((tp-entry) / MathMax(entry-sl, _Point) < m_min_rr) return 0;
                
                reason = StringFormat("CB-FADE-BUY retrace=%.0f%% bars=%d", retrace*100, bars_since_spike);
                return 1;  // BUY
@@ -300,13 +338,15 @@ private:
       else
       {
          double spike_high = iHigh(_Symbol, PERIOD_M5, 1);
-         double spike_body = MathAbs(iClose(_Symbol, PERIOD_M5, 1) - iOpen(_Symbol, PERIOD_M5, 1));
+         double spike_body_signed = iClose(_Symbol, PERIOD_M5, 1) - iOpen(_Symbol, PERIOD_M5, 1);
+         double spike_body = MathAbs(spike_body_signed);
+         if(m_require_spike_direction && spike_body_signed <= 0) return 0;
          
          if(spike_body > 0 && current_price < spike_high)
          {
             double retrace = (spike_high - current_price) / spike_body;
             
-            if(retrace >= m_fade_r_entry && retrace <= 0.70)
+            if(retrace >= m_fade_r_entry && retrace <= m_fade_retrace_max)
             {
                entry = current_price;
                sl = entry + m_fade_sl_atr_mult * atr[0];
@@ -314,6 +354,7 @@ private:
                
                double spike_low = iLow(_Symbol, PERIOD_M5, 1);
                if(tp > spike_low) tp = spike_low - atr[0] * 0.2;
+               if((entry-tp) / MathMax(sl-entry, _Point) < m_min_rr) return 0;
                
                reason = StringFormat("CB-FADE-SELL retrace=%.0f%% bars=%d", retrace*100, bars_since_spike);
                return -1;  // SELL

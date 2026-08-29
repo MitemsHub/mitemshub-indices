@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
-//|                                    MitemshubAI_v24_11.mq5        |
-//|                     MITEMSHUB AI MULTI-STRATEGY ENGINE v24.11    |
+//|                                    MitemshubAI_v25_1.mq5        |
+//|                     MITEMSHUB AI MULTI-STRATEGY ENGINE v25.1     |
 //|   Intelligent • Regime-Aware • Crash/Boom • Spike-Aware • Smart  |
 //|                                                                  |
-//| v24.11 CHANGES (2026-08-28):                                     |
+//| v25.1 CHANGES (2026-08-29):                                       |
 //|  1. CRASH/BOOM MODE: full spike detection, post-spike fade,      |
 //|     grind continuation, dynamic risk sizing, symbol calibration. |
 //|  2. TICK-PATTERN ANALYZER: monitors individual tick behavior      |
@@ -40,12 +40,14 @@
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
 #property copyright "MITEMSHUB AI"
-#property version   "24.11"
+#property version   "25.1"
 #property strict
 
 #include <Trade\Trade.mqh>
 #include "CrashBoom/CrashBoomEngine.mqh"
+#include "CrashBoom/TickRecorder.mqh"
 CTrade trade;
+CTickRecorder g_tick_rec;   // v25.1: always-on tick microstructure archive
 
 #define TELEM_FILE "MitemshubAI_v23_telemetry.jsonl"
 #define STATE_FILE "MitemshubAI_state.csv"
@@ -147,6 +149,14 @@ input double InpCBFadeSL         = 0.5;      // Fade stop = 0.5x ATR
 input double InpCBFadeTP         = 1.5;      // Fade target = 1.5x ATR
 input double InpCBBaseRisk       = 0.5;      // Base risk % for Crash/Boom trades
 input double InpCBMinRisk        = 0.15;     // Min risk % during high spike probability
+input bool   InpCBEnableGrind    = false;    // Enable grind continuation leg (default: fade-only)
+input bool   InpCBRequireSpikeDirection = true; // Only fade correctly directed spike candles
+input double InpCBMinATRPoints   = 0.0;     // Optional minimum ATR in points; 0 disables
+
+input group "=== Tick Recorder (v25.1) ==="
+input bool   InpTickRecordEnabled = true;   // Always-on tick recorder (microstructure archive)
+input int    InpTickFlushTicks    = 500;     // Flush buffer every N ticks
+input int    InpTickFlushSeconds  = 60;      // Max seconds between flushes
 
 input group "=== Self-Review Intelligence (v23.1) ==="
 input int    InpStrategyReviewN  = 10;       // Check strategy performance every N trades
@@ -309,8 +319,10 @@ int OnInit()
    RecoverPosition();
    LoadReviewState();  // v23.1: restore persisted trade stats + intelligence
    if(InpDrawDashboard) CreateDashboard();
+   // v25.1: tick recorder — degrades to no-op if the file can't be opened
+   g_tick_rec.Init(_Symbol, InpTickRecordEnabled, InpTickFlushTicks, InpTickFlushSeconds);
 
-   Print("[v24.11] MITEMSHUB AI v24.11 started | 5 Strategies | Regime-Aware | Crash/Boom Mode");
+   Print("[v25.1] MITEMSHUB AI v25.1 started | 5 Strategies | Regime-Aware | Crash/Boom Mode");
    PrintFormat("[v23.0] Entry TF=%s | Regime TF=%s | Band=%s | MinScore=%d | RiskCap=%.0f%%",
                EnumToString(g_tf_entry), EnumToString(g_tf_regime),
                InpUseBandFade?"ON":"OFF", InpMinScore, InpMaxEffectiveRiskPct);
@@ -338,8 +350,12 @@ int OnInit()
       g_cb.SetFadeTP(InpCBFadeTP);
       g_cb.SetBaseRisk(InpCBBaseRisk);
       g_cb.SetMinRisk(InpCBMinRisk);
-      PrintFormat("[v24] Crash/Boom mode: %s | spike_thresh=%.1f | max_prob=%.2f | risk=%.2f%%",
-                  InpIsCrashIndex?"CRASH":"BOOM", InpCBSpikeThreshold, InpCBMaxSpikeProb, InpCBBaseRisk);
+      g_cb.SetEnableGrind(InpCBEnableGrind);
+      g_cb.SetRequireSpikeDirection(InpCBRequireSpikeDirection);
+      g_cb.SetMinATRPoints(InpCBMinATRPoints);
+      PrintFormat("[v24] Crash/Boom mode: %s | spike_thresh=%.1f | max_prob=%.2f | risk=%.2f%% | grind=%s",
+                  InpIsCrashIndex?"CRASH":"BOOM", InpCBSpikeThreshold, InpCBMaxSpikeProb, InpCBBaseRisk,
+                  InpCBEnableGrind?"ON":"OFF");
    }
    else
    {
@@ -359,6 +375,7 @@ void OnDeinit(const int reason)
 
    SaveReviewState();  // v23.1: persist trade stats + intelligence on shutdown
    if(InpCrashBoomMode) g_cb.Deinit();  // v24.1: release indicator handles
+   g_tick_rec.Flush();  // v25.1: persist buffered ticks (file closed by destructor)
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
    PrintFormat("[v23] FINAL | Trades:%d WR:%.1f%% R:%+.2f | Stops:%d Time:%d EarlyCut:%d Target:%d",
@@ -381,6 +398,11 @@ bool IsSessionActive()
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   // v25.1: tick recorder first — captures EVERY tick, including those
+   // between bar changes (the bar-guard below skips most of them)
+   if(InpTickRecordEnabled) g_tick_rec.OnTick(SymbolInfoDouble(_Symbol,SYMBOL_BID),
+                                              SymbolInfoDouble(_Symbol,SYMBOL_ASK));
+
    static datetime last_bar=0;
    datetime cur = iTime(_Symbol, g_tf_entry, 0);
    if(cur == last_bar) { if(InpDrawDashboard) UpdateDashboard(); return; }
@@ -1534,6 +1556,16 @@ void OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
    // EFFECTIVE-RISK GUARDRAIL
    double eff_risk = vol * ((stop_dist/tick_size)*tick_value);
    double cap_money = g_eq * InpMaxEffectiveRiskPct / 100.0;
+   int fleet_no_sl = 0;
+   double fleet_risk = FleetOpenRisk(fleet_no_sl);
+   double fleet_cap = g_eq * InpMaxTotalRiskPct / 100.0;
+   if(fleet_risk + eff_risk > fleet_cap)
+   {
+      PrintFormat("[v24] SKIP %s — fleet risk $%.2f + new $%.2f exceeds cap $%.2f",
+                  direction>0?"BUY":"SELL", fleet_risk, eff_risk, fleet_cap);
+      g_cooldown = 1;
+      return;
+   }
    if(eff_risk > cap_money)
    {
       PrintFormat("[v24] SKIP %s — min-lot risk $%.2f exceeds cap $%.2f",
@@ -1574,6 +1606,12 @@ void OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
       if(g_ticket > 0) break;
    }
    if(g_ticket == 0) g_ticket = trade.ResultOrder();
+   if(g_ticket == 0)
+   {
+      Print("[v24] ORDER accepted but position ticket was not found; waiting for recovery");
+      g_cooldown = InpCoolDownBars;
+      return;
+   }
 
    g_dir = direction; g_entry = entry; g_sl = sl; g_tp = tp;
    g_orig_risk = stop_dist; g_position_volume = vol;
@@ -1837,12 +1875,21 @@ void UpdateDashboard()
                       g_trades, open_count, wr, g_total_r);
    L[5]=StringFormat("Status: %s%s", g_paused?"PAUSED":(DailyLossHalted()?"DAILY-HALT":"ACTIVE"),
         IsSessionActive()?" | SESSION-ON":" | SESSION-OFF");
-   L[6]=StringFormat("Strats: PB=%s BO=%s MOM=%s MR=%s BF=%s",
-        InpUsePullback?"ON":"OFF", InpUseBreakout?"ON":"OFF",
-        InpUseMomentum?"ON":"OFF", InpUseMeanRevert?"ON":"OFF", InpUseBandFade?"ON":"OFF");
+   if(InpCrashBoomMode)
+      L[6]=StringFormat("CB: %s | Mode: FADE-ONLY | Grind: %s | DirFilter: %s",
+         InpIsCrashIndex?"CRASH":"BOOM", InpCBEnableGrind?"ON":"OFF",
+         InpCBRequireSpikeDirection?"ON":"OFF");
+   else
+      L[6]=StringFormat("Strats: PB=%s BO=%s MOM=%s MR=%s BF=%s",
+         InpUsePullback?"ON":"OFF", InpUseBreakout?"ON":"OFF",
+         InpUseMomentum?"ON":"OFF", InpUseMeanRevert?"ON":"OFF", InpUseBandFade?"ON":"OFF");
    L[7]=StringFormat("MinScore: %d | 2+Agree: %s | Cooldown: %d",InpMinScore,InpRequire2Strats?"YES":"NO", g_cooldown);
-   L[8]=StringFormat("Risk: %.2f%% (cap %.0f%%) | TP: %.1fx | Hold: %d",
-        InpRiskPerTrade*100,InpMaxEffectiveRiskPct,InpTpMult,InpMaxHoldBars);
+   L[8]=InpCrashBoomMode
+      ? StringFormat("CB Risk: %.2f%% | Cap: %.0f%% | Fade TP: %.1fx | Hold: %d",
+         InpCBBaseRisk, InpMaxEffectiveRiskPct,
+         InpIsCrashIndex ? InpCBFadeTP : InpCBFadeTP, InpMaxHoldBars)
+      : StringFormat("Risk: %.2f%% (cap %.0f%%) | TP: %.1fx | Hold: %d",
+         InpRiskPerTrade*100,InpMaxEffectiveRiskPct,InpTpMult,InpMaxHoldBars);
    L[9]=StringFormat("Band: z>=%.1f tgt=%.2f sig | Trail: %s (%.1fR/%.1fR) BE: %s",
         InpBandZEntry,InpBandTargetSigmaMult,
         InpUseTrailing?"ON":"OFF",InpTrailStartR,InpTrailDistR,
@@ -1901,6 +1948,10 @@ void UpdateDashboard()
       else
          L[line++]="Intel: Collecting data... (need 15+ trades)";
    }
+
+   // v25.1: tick recorder status (CB mode only)
+   if(InpCrashBoomMode)
+      L[line++]=g_tick_rec.GetDashboard();
 
    while(line<26) L[line++]=" ";
 

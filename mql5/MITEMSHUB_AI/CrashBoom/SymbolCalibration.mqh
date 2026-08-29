@@ -195,6 +195,8 @@ public:
    //--- Update calibration with live data
    void UpdateLive(ENUM_TIMEFRAMES tf, bool is_spike, double body_size, double retrace_pct)
    {
+      // Live observations are telemetry only. Deployment parameters must remain
+      // stable until an offline, out-of-sample review promotes new values.
       if(is_spike)
       {
          m_live_spike_count++;
@@ -213,23 +215,8 @@ public:
       else
          m_live_avg_body = 0.1 * body_size + 0.9 * m_live_avg_body;
       
-      // Adapt parameters based on live data (after enough samples)
-      if(m_live_spike_count >= 10)
-      {
-         // Adjust fade depth based on actual retrace behavior
-         if(m_live_retrace_count >= 5)
-         {
-            m_current.fade_depth = MathMax(0.20, MathMin(0.60, m_live_retrace_avg));
-            m_current.fade_tp_mult = m_current.fade_depth * 4.0;  // TP = 4x fade depth
-         }
-         
-         // Adjust spike threshold based on actual spike sizes
-         if(m_live_avg_body > 0)
-         {
-            double expected_spike_body = m_live_avg_spike;
-            m_current.spike_threshold = MathMax(2.5, MathMin(5.0, expected_spike_body / m_live_avg_body));
-         }
-      }
+      // Do not mutate the active profile from a handful of live samples.
+      // This prevents parameter drift and keeps live behavior reproducible.
    }
 
    //--- Get active profile

@@ -42,6 +42,7 @@ private:
    //--- State tracking
    int      m_last_spike_bar;        // bar index of last detected spike
    int      m_spike_cooldown;        // bars to wait after spike
+   datetime m_last_bar_time;          // prevents duplicate bar processing
    int      m_total_spikes;          // spikes detected this session
    int      m_fade_trades;           // fade trades taken
    int      m_grind_trades;          // grind trades taken
@@ -61,6 +62,7 @@ public:
       m_is_crash = false;
       m_last_spike_bar = 0;
       m_spike_cooldown = 0;
+      m_last_bar_time = 0;
       m_total_spikes = 0;
       m_fade_trades = 0;
       m_grind_trades = 0;
@@ -96,17 +98,20 @@ public:
       m_strategy.SetMaxSpikeProb(prof.max_spike_prob);
       m_strategy.SetPostSpikeWindow(prof.optimal_hold);
       m_strategy.SetSpikeCooldown(prof.cooldown_bars);
+      m_spike_cooldown = 0;
       m_strategy.SetFadeSL(prof.fade_sl_mult);
       m_strategy.SetFadeTP(prof.fade_tp_mult);
+      m_strategy.SetMinRR(2.0);
       
       m_risk_sizer.SetBaseRisk(0.5 * prof.risk_mult);
       m_risk_sizer.SetMinRisk(0.15);
       m_risk_sizer.SetMaxRisk(0.75 * prof.risk_mult);
       m_risk_sizer.SetSpikeThreshold(0.5);
       
-      PrintFormat("[CB] Engine initialized: %s | %s | thresh=%.1f | fade=%.0f%% | risk_mult=%.1f",
+      PrintFormat("[CB] Engine initialized: %s | %s | thresh=%.1f | fade=%.0f%% | risk_mult=%.1f | grind=%s",
                   is_crash_index ? "CRASH" : "BOOM",
-                  prof.name, prof.spike_threshold, prof.fade_depth*100, prof.risk_mult);
+                  prof.name, prof.spike_threshold, prof.fade_depth*100, prof.risk_mult,
+                  m_strategy.IsGrindEnabled() ? "ON" : "OFF");
    }
 
    //--- Release all indicator handles on shutdown
@@ -132,8 +137,14 @@ public:
    {
       if(!m_is_enabled) return 0;
       
+      // OnBar is normally called once per EA bar, but guard against duplicate
+      // calls so cooldowns and spike ages cannot be consumed twice.
+      datetime bar_time = iTime(_Symbol, PERIOD_M5, 0);
+      if(bar_time <= 0 || bar_time == m_last_bar_time) return 0;
+      m_last_bar_time = bar_time;
+
       // Update all analyzers
-      m_spike_detector.OnBar(PERIOD_M5, 20, m_calibration.GetProfile().spike_threshold);
+      m_spike_detector.OnBar(PERIOD_M5, 20, m_spike_detector.GetSpikeThreshold());
       m_mtf_confirm.Analyze();           // v24.1: multi-timeframe confirmation
       m_tod_awareness.OnBar(PERIOD_M5);  // v24.1: time-of-day awareness
       m_strategy.UpdateBands();
@@ -269,10 +280,10 @@ public:
       string risk_desc = m_risk_sizer.GetRiskDescription(prob, m_spike_detector.SpikeJustHappened(5));
       double precursor = m_tick_analyzer.GetPrecursorScore();
       
-      string info = StringFormat("CB: %s | Spike:%.0f%% Precursor:%.0f%% | Grind:%s%d",
+      string info = StringFormat("CB: %s | Spike:%.0f%% Precursor:%.0f%% | Mode:%s",
                           m_is_crash ? "CRASH" : "BOOM",
                           prob * 100, precursor * 100,
-                          grind_dir > 0 ? "UP" : (grind_dir < 0 ? "DN" : "--"), grind);
+                          m_strategy.IsGrindEnabled() ? "FADE+GRIND" : "FADE-ONLY");
       info += StringFormat(" | Risk:%s | Spikes:%d Fades:%d",
                           risk_desc, m_total_spikes, m_fade_trades);
       return info;
@@ -317,8 +328,12 @@ public:
    void SetFadeR(double val)           { m_strategy.SetFadeR(val); }
    void SetFadeSL(double val)          { m_strategy.SetFadeSL(val); }
    void SetFadeTP(double val)          { m_strategy.SetFadeTP(val); }
+   void SetMinRR(double val)            { m_strategy.SetMinRR(val); }
    void SetBaseRisk(double val)        { m_risk_sizer.SetBaseRisk(val); }
    void SetMinRisk(double val)         { m_risk_sizer.SetMinRisk(val); }
+   void SetEnableGrind(bool val)       { m_strategy.SetEnableGrind(val); }
+   void SetRequireSpikeDirection(bool val) { m_strategy.SetRequireSpikeDirection(val); }
+   void SetMinATRPoints(double val)        { m_strategy.SetMinATRPoints(val); }
    
    //--- Get spike detector (for diagnostic access)
    CSpikeDetector *GetSpikeDetectorPtr() { return &m_spike_detector; }

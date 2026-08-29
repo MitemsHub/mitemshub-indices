@@ -6,6 +6,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [MITEMSHUB AI EA v25.1] - 2026-08-29
+
+### Overview
+Fade-only Crash/Boom mode with optimized parameters from 60-day real-broker sweeps, tick microstructure recorder, fleet risk guard, and removal of live parameter drift.
+
+### Changed — Crash/Boom strategy reoptimized
+- **Fade-only by default** — grind gated by `InpCBEnableGrind` (off); EA only trades post-spike fade on Boom/Crash
+- Defaults re-optimized from 60-day sweep: spike threshold 3.0→2.8, cooldown 2→1 bars, entry retrace 30%→40%, SL 0.5x→0.4x ATR, TP 1.5x→3.5x ATR, max spike prob 0.65→0.70
+- New minimum R:R filter (2.0), spike direction filter, ATR minimum filter, retrace quality window (max 50%)
+- Duplicate-bar guard prevents double-processing cooldowns and spike ages
+- Spike threshold read from detector instead of calibration profile
+- **Removed live parameter drift** — SymbolCalibration no longer mutates fade_depth/tp/threshold from live samples; parameters stable until offline review
+
+### Added — Tick microstructure recorder
+- New `TickRecorder.mqh`: buffered CSV writes (every 500 ticks or 60s), daily rotation, degrades to no-op on errors
+- Integrated into `OnTick()` (runs first, captures every tick), `OnInit()`, `OnDeinit()`, and dashboard
+
+### Added — Fleet risk guard
+- `OpenCBTrade()` now rejects trades if fleet-wide risk exceeds cap
+- Safety net for ticket=0 on accepted orders
+
+### New inputs
+`InpCBEnableGrind`, `InpCBRequireSpikeDirection`, `InpCBMinATRPoints`, `InpTickRecordEnabled`, `InpTickFlushTicks`, `InpTickFlushSeconds`
+
+### Updated `.set` files
+- BOOM1000_CB: TP 1.8→3.2, fade-only, tick recorder on, fleet cap 12→13%, added magic 7788300
+- CRASH1000_CB: TP 1.8→3.5, magic→7788300, fade-only, tick recorder on, fleet cap 12→13%
+
+---
+
 ## [MITEMSHUB AI EA v22.0] - 2026-08-25
 
 ### Fixed — why the live bot was bleeding opportunities (Aug 17 journal: 1W/8L, −19.87, 287 signals blocked)

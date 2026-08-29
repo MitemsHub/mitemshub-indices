@@ -4,7 +4,7 @@
 Answers the questions the codebase kept guessing at:
   * Which volatility/synthetic symbols actually exist (SYN-series? display names?)
   * Their trade mode, min lot / step, tick value/size -> real min-lot risk math
-  * How much M5 history the terminal will give us (saved to artifacts/ CSVs)
+  * How much M5 history the terminal will give us (saved to the shared .npy cache)
 
 No orders are sent. Safe to run while the terminal is open.
 
@@ -15,12 +15,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.mt5_data import _write_cache
 
 try:
     import MetaTrader5 as mt5
@@ -30,6 +31,10 @@ except ImportError:
 
 PATTERN = re.compile(r"volatil|syn\d+|boom|crash|jump|step", re.IGNORECASE)
 HISTORY_SYMBOLS = ["SYN75", "SYN100"]  # extended dynamically by matches
+
+
+def _sanitize_name(symbol: str) -> str:
+    return symbol.replace(" ", "_").replace("(", "").replace(")", "")
 
 
 def main(argv: list[str]) -> int:
@@ -100,25 +105,31 @@ def main(argv: list[str]) -> int:
                                   if re.match(r"(?i)^(syn|volatility)\s*?(10|25|50)\b|^syn(10|25|50)$",
                                               m.name)]
         seen = set()
-        out_dir = ROOT / "artifacts"
-        out_dir.mkdir(exist_ok=True)
         print(f"\n=== HISTORY FETCH ({a.timeframe}, up to {a.bars} bars) ===")
         for name in want:
             if name in seen:
                 continue
             seen.add(name)
-            rates = mt5.copy_rates_from_pos(name, tf, 0, a.bars)
+            try:
+                rates = mt5.copy_rates_from_pos(name, tf, 0, a.bars)
+            except Exception as exc:
+                print(f"  {name}: fetch failed ({exc})")
+                continue
             if rates is None or len(rates) == 0:
                 print(f"  {name}: no history ({mt5.last_error()})")
                 continue
-            fp = out_dir / f"real_{name}_{a.timeframe}.csv"
-            with fp.open("w", newline="", encoding="utf-8") as fh:
-                w = csv.writer(fh)
-                w.writerow(["epoch", "open", "high", "low", "close",
-                            "spread", "volume"])
-                for r in rates:
-                    w.writerow([r['time'], r['open'], r['high'], r['low'],
-                                r['close'], r['spread'], r['tick_volume']])
+            import numpy as _np
+            from scripts.mt5_data import DTYPE as _DTYPE, CACHE_DIR as _CACHE_DIR, _write_cache as _wc
+            _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            out = _np.zeros(len(rates), dtype=_DTYPE)
+            out["epoch"] = rates["time"].astype("f8")
+            out["open"] = rates["open"]
+            out["high"] = rates["high"]
+            out["low"] = rates["low"]
+            out["close"] = rates["close"]
+            out["spread"] = rates["spread"]
+            out["volume"] = rates["tick_volume"]
+            _wc(out, name, a.timeframe)
             import datetime as _dt
             d0 = _dt.datetime.fromtimestamp(rates[0]['time'],
                                             tz=_dt.timezone.utc)
@@ -126,7 +137,7 @@ def main(argv: list[str]) -> int:
                                             tz=_dt.timezone.utc)
             days = (rates[-1]['time'] - rates[0]['time']) / 86400.0
             print(f"  {name}: {len(rates)} bars  {d0:%Y-%m-%d} -> {d1:%Y-%m-%d} "
-                  f"({days:.0f}d)  -> {fp.name}")
+                  f"({days:.0f}d)  -> npy cache ({_sanitize_name(name)}_{a.timeframe}.npy)")
         return 0
     finally:
         mt5.shutdown()

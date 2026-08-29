@@ -10,13 +10,12 @@ This is the EA-faithful pipeline (identical math to MitemshubAI.mq5):
   fills           = conservative (SL assumed hit before TP within a bar)
   management      = one position, cooldown after close, raw edge (no halts)
 
-Input: artifacts/real_<symbol>_M5.csv written by scripts/mt5_probe.py.
+Input: MT5 terminal via the shared mt5_data loader (terminal + .npy cache).
 Usage: python scripts/backtest_real_history.py [--tf M15] [--zlist 1.0,1.4,2.0]
 """
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import statistics
@@ -25,6 +24,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ART = ROOT / "artifacts"
+sys.path.insert(0, str(ROOT))
+from scripts.mt5_data import load_m5
 
 SYMBOLS = {
     # venue name: (target_sigma_mult, tuned z-entry list per deployed .set)
@@ -37,15 +38,6 @@ SYMBOLS = {
     "Volatility 50 Index": (0.80, [2.0]),
 }
 GATE_RATIO, SIGMA_EMA_LEN, STOP_MULT, HOLD_SEC, WARMUP, COOLDOWN = 1.25, 30, 0.10, 3600, 60, 2
-
-
-def load_m5(path: Path):
-    rows = []
-    with path.open(newline="", encoding="utf-8") as fh:
-        for r in csv.DictReader(fh):
-            rows.append({k: float(r[k]) for k in
-                         ("epoch", "open", "high", "low", "close")})
-    return rows
 
 
 def aggregate(m5, factor):
@@ -148,11 +140,12 @@ def main(argv):
     for name, (tgt, z_list) in SYMBOLS.items():
         if a.only and a.only.lower() not in name.lower():
             continue
-        p = ART / f"real_{name}_M5.csv"
-        if not p.exists():
-            print(f"[skip] missing {p.name}")
+        try:
+            m5 = load_m5(name, "M5")
+        except Exception as exc:
+            print(f"[skip] {name}: {exc}")
             continue
-        bars = aggregate(load_m5(p), factor) if factor > 1 else load_m5(p)
+        bars = aggregate(m5, factor) if factor > 1 else list(m5)
         zs = [float(x) for x in a.zlist.split(",")] if a.zlist else z_list
         print(f"[{name}] {len(bars)} {a.tf} bars "
               f"({(bars[-1]['epoch']-bars[0]['epoch'])/86400:.0f}d, target={tgt}sig_h)")
