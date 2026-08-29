@@ -1849,7 +1849,7 @@ void UpdateDashboard()
    double pct = CalcATRPercentile(atr[0]);
 
    string L[26];
-   L[0]="=== MITEMSHUB AI v24.11 ===";
+   L[0]="=== MITEMSHUB AI v25.1 ===";
    L[1]=StringFormat("%s | %s -> %s",_Symbol,EnumToString(g_tf_entry),EnumToString(g_tf_regime));
    // v23.1: Show real-time session P&L including unrealized gains
    double realtime_pnl = g_session_pnl;
