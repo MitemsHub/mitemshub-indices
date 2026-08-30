@@ -1,8 +1,40 @@
 //+------------------------------------------------------------------+
-//|                                    MitemshubAI_v25_1.mq5        |
-//|                     MITEMSHUB AI MULTI-STRATEGY ENGINE v25.1     |
+//|                                    MitemshubAI_v25_7.mq5        |
+//|                     MITEMSHUB AI MULTI-STRATEGY ENGINE v25.7     |
 //|   Intelligent • Regime-Aware • Crash/Boom • Spike-Aware • Smart  |
 //|                                                                  |
+//| v25.7 CHANGES (2026-08-30):  size-scaled fade entry               |
+//|  1. Retrace entry threshold scales with spike size on BOTH      |
+//|     paths: lo = clamp(0.30*sqrt(12/size), 0.18, 0.40). Big      |
+//|     spikes enter on shallower retrace (they decay slowly);      |
+//|     small spikes demand a deeper retrace (junk filter).         |
+//|  2. Backtest: tick path +17% expectancy on the recorded night;  |
+//|     60d M5: +89 trades, expectancy unchanged, PF 4.19.          |
+//| v25.6 CHANGES (2026-08-30):  filter tuning from evidence tally    |
+//| v25.6 CHANGES (2026-08-30):  filter tuning from evidence tally    |
+//|  1. Fade retrace ceiling 0.50 -> 0.60 (overshoot was the #2      |
+//|     entry blocker; 60d sweep: PF 4.06->4.22, +216 trades).       |
+//|  2. Tick fast-fade timeout 600s -> 900s (big spikes retrace      |
+//|     slowly; live sweep: 5 -> 9 entries on the recorded night).   |
+//|  3. Strategy fade-entry default aligned to deployed 0.30.        |
+//| v25.5 CHANGES (2026-08-30):                                       |
+//| v25.5 CHANGES (2026-08-30):                                       |
+//|  1. Tick recorder opens CSV with FILE_SHARE_READ — external      |
+//|     tools can analyze the live file while the EA writes it.      |
+//|  2. Flush cadence tightened: 100 ticks / 10s (was 500 / 60s).    |
+//| v25.4 CHANGES (2026-08-30):                                       |
+//| v25.4 CHANGES (2026-08-30):                                       |
+//|  1. TICK-TRIGGERED FAST FADE: fades fire on the tick spike       |
+//|     itself (jump >= 3pts) once retrace enters the window —       |
+//|     enters ~1-3 min earlier than the M5-close path.              |
+//|  2. Tick analyzers now fed EVERY tick (was: once per M5 bar).    |
+//|  3. Micro-fade risk scaling applies to tick fades too.           |
+//| v25.3 CHANGES (2026-08-30):                                       |
+//|  1. MICRO-FADE TIER: spike threshold 2.8→2.2x avg body; small    |
+//|     spikes trade at reduced risk (0.5x at 2.2x → 1.0x at 3.0x).  |
+//|  2. Per-spike rejection logging: [CB-SKIP] shows exactly why     |
+//|     each spike produced no trade (ATR/dir/retrace/R:R/cooldown). |
+//|  3. APP_VERSION single-source: version string can never drift.   |
 //| v25.1 CHANGES (2026-08-29):                                       |
 //|  1. CRASH/BOOM MODE: full spike detection, post-spike fade,      |
 //|     grind continuation, dynamic risk sizing, symbol calibration. |
@@ -39,8 +71,15 @@
 //|  - Entry/regime TF overrides, telemetry journal                  |
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
+#define APP_VERSION "25.7"
+
+//--- v25.2: single source of truth for the version string.
+//--- #property version, every log tag, and every order comment derive from
+//--- APP_VERSION — bump THIS line only; nothing else can drift.
+const string VTAG = "[v" + APP_VERSION + "] ";
+
 #property copyright "MITEMSHUB AI"
-#property version   "25.1"
+#property version   APP_VERSION
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -142,7 +181,13 @@ input double InpProfitLockR      = 0.5;      // Lock profit if trade reached 1R+
 input group "=== Crash/Boom Mode (v24) ==="
 input bool   InpCrashBoomMode    = false;    // Enable Crash/Boom trading mode
 input bool   InpIsCrashIndex     = false;    // true = Crash (1000/500/300), false = Boom (1000/500/300)
-input double InpCBSpikeThreshold = 3.0;      // Body ratio to count as spike (default 3x avg)
+input double InpCBSpikeThreshold = 2.2;      // Body ratio to count as spike (v25.3 micro-fade: 2.2x avg)
+input bool   InpCBMicroFade      = true;     // v25.3: reduce risk on small (micro) spikes
+
+input group "=== Tick Fast-Fade (v25.4) ==="
+input bool   InpCBTickFade      = true;     // Fire fades on the tick spike itself (no M5 wait)
+input double InpCBTickSpikePts  = 3.0;      // Min tick jump (points) that counts as a spike
+input int    InpCBTickFadeTOSec = 900;      // Fast-fade pending timeout (v25.6: 900s — big spikes retrace slowly)
 input double InpCBMaxSpikeProb   = 0.65;     // Block entries above this spike probability
 input double InpCBFadeR          = 0.3;      // Fade entry at 0.3R into retrace
 input double InpCBFadeSL         = 0.5;      // Fade stop = 0.5x ATR
@@ -155,8 +200,8 @@ input double InpCBMinATRPoints   = 0.0;     // Optional minimum ATR in points; 0
 
 input group "=== Tick Recorder (v25.1) ==="
 input bool   InpTickRecordEnabled = true;   // Always-on tick recorder (microstructure archive)
-input int    InpTickFlushTicks    = 500;     // Flush buffer every N ticks
-input int    InpTickFlushSeconds  = 60;      // Max seconds between flushes
+input int    InpTickFlushTicks    = 100;     // Flush buffer every N ticks (v25.5: live-analysis cadence)
+input int    InpTickFlushSeconds  = 10;      // Max seconds between flushes (v25.5)
 
 input group "=== Self-Review Intelligence (v23.1) ==="
 input int    InpStrategyReviewN  = 10;       // Check strategy performance every N trades
@@ -187,7 +232,7 @@ bool   g_sigma_init=false;
 
 // v22 TELEMETRY
 double g_sigma_now=0, g_z_dev=0, g_exp_ratio=0;
-string g_fired_legs="", g_last_skip="";
+string g_fired_legs="", g_last_skip="", g_last_cb_skip="";
 
 // per-signal exit geometry
 bool   g_sig_is_band=false;
@@ -322,21 +367,21 @@ int OnInit()
    // v25.1: tick recorder — degrades to no-op if the file can't be opened
    g_tick_rec.Init(_Symbol, InpTickRecordEnabled, InpTickFlushTicks, InpTickFlushSeconds);
 
-   Print("[v25.1] MITEMSHUB AI v25.1 started | 5 Strategies | Regime-Aware | Crash/Boom Mode");
-   PrintFormat("[v23.0] Entry TF=%s | Regime TF=%s | Band=%s | MinScore=%d | RiskCap=%.0f%%",
+   Print(VTAG+"MITEMSHUB AI v"+APP_VERSION+" started | 5 Strategies | Regime-Aware | Crash/Boom Mode");
+   PrintFormat(VTAG+"Entry TF=%s | Regime TF=%s | Band=%s | MinScore=%d | RiskCap=%.0f%%",
                EnumToString(g_tf_entry), EnumToString(g_tf_regime),
                InpUseBandFade?"ON":"OFF", InpMinScore, InpMaxEffectiveRiskPct);
-   PrintFormat("[v23.0] Session=%02d-%02d | GradExit=%s | ScaleLoss=%s | ProfitLock=%.1fR | TrailDist=%.1fR",
+   PrintFormat(VTAG+"Session=%02d-%02d | GradExit=%s | ScaleLoss=%s | ProfitLock=%.1fR | TrailDist=%.1fR",
                InpSessionStartHour, InpSessionEndHour,
                InpGraduatedExit?"ON":"OFF", InpScaleAfterLoss?"ON":"OFF",
                InpProfitLockR, InpTrailDistR);
    if(InpMaxEffectiveRiskPct > 10.0)
-      Print("[v23] WARNING: risk cap > 10% — tiny-account mode.");
-   Print("[v23.0] Telemetry -> MQL5\\Files\\", TELEM_FILE);
-   Print("[v23.0] State -> MQL5\\Files\\", STATE_FILE);
-   PrintFormat("[v23.1] Intelligence: StrategyReview@%d trades, RegimeReview@%d, TimeReview@%d",
+      Print(VTAG+"WARNING: risk cap > 10% — tiny-account mode.");
+   Print(VTAG+"Telemetry -> MQL5\\Files\\", TELEM_FILE);
+   Print(VTAG+"State -> MQL5\\Files\\", STATE_FILE);
+   PrintFormat(VTAG+"Intelligence: StrategyReview@%d trades, RegimeReview@%d, TimeReview@%d",
                InpStrategyReviewN, InpRegimeReviewN, InpTimeReviewN);
-   PrintFormat("[v23.1] Auto-disable: %s (min %d trades, min expectancy %.2fR)",
+   PrintFormat(VTAG+"Auto-disable: %s (min %d trades, min expectancy %.2fR)",
                InpAutoDisableStrat?"ON":"OFF", InpMinTradesToJudge, InpMinExpectancy);
 
    // v24: Initialize Crash/Boom engine
@@ -353,9 +398,11 @@ int OnInit()
       g_cb.SetEnableGrind(InpCBEnableGrind);
       g_cb.SetRequireSpikeDirection(InpCBRequireSpikeDirection);
       g_cb.SetMinATRPoints(InpCBMinATRPoints);
-      PrintFormat("[v24] Crash/Boom mode: %s | spike_thresh=%.1f | max_prob=%.2f | risk=%.2f%% | grind=%s",
+      g_cb.SetMicroFade(InpCBMicroFade);
+      g_cb.SetTickFade(InpCBTickFade, InpCBTickSpikePts, InpCBTickFadeTOSec);
+      PrintFormat(VTAG+"Crash/Boom mode: %s | spike_thresh=%.1f | max_prob=%.2f | risk=%.2f%% | grind=%s | micro=%s",
                   InpIsCrashIndex?"CRASH":"BOOM", InpCBSpikeThreshold, InpCBMaxSpikeProb, InpCBBaseRisk,
-                  InpCBEnableGrind?"ON":"OFF");
+                  InpCBEnableGrind?"ON":"OFF", InpCBMicroFade?"ON":"OFF");
    }
    else
    {
@@ -378,7 +425,7 @@ void OnDeinit(const int reason)
    g_tick_rec.Flush();  // v25.1: persist buffered ticks (file closed by destructor)
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
-   PrintFormat("[v23] FINAL | Trades:%d WR:%.1f%% R:%+.2f | Stops:%d Time:%d EarlyCut:%d Target:%d",
+   PrintFormat(VTAG+"FINAL | Trades:%d WR:%.1f%% R:%+.2f | Stops:%d Time:%d EarlyCut:%d Target:%d",
                g_trades, wr, g_total_r, g_stop_exits, g_time_exits, g_early_cuts, g_target_exits);
 }
 
@@ -398,10 +445,26 @@ bool IsSessionActive()
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // v25.1: tick recorder first — captures EVERY tick, including those
-   // between bar changes (the bar-guard below skips most of them)
-   if(InpTickRecordEnabled) g_tick_rec.OnTick(SymbolInfoDouble(_Symbol,SYMBOL_BID),
-                                              SymbolInfoDouble(_Symbol,SYMBOL_ASK));
+   // v25.4: per-tick feeds run BEFORE the bar-guard — they must see every tick
+   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   // v25.1: tick recorder captures EVERY tick
+   if(InpTickRecordEnabled) g_tick_rec.OnTick(bid, ask);
+   // v24: Crash/Boom tick handler (tick-pattern analyzer + detector tick speed)
+   if(InpCrashBoomMode) g_cb.OnTick(bid, ask);
+   // v25.4: tick-triggered fast fade — track every tick, fire only when gates open
+   if(InpCrashBoomMode && InpCBTickFade)
+   {
+      bool can_trade = (g_ticket==0 && !g_paused && g_cooldown==0 && !DailyLossHalted()
+                        && IsSessionActive() && !HasOpenPositionOnSymbol(_Symbol));
+      double fe=0, fs=0, ftp=0; string tfr="";
+      int fd = g_cb.OnTickFade(bid, fe, fs, ftp, tfr, can_trade);
+      if(fd != 0 && can_trade)
+      {
+         g_last_strategy = "CB-TICKFADE";
+         OpenCBTrade(fd, fe, fs, ftp, tfr);
+      }
+   }
 
    static datetime last_bar=0;
    datetime cur = iTime(_Symbol, g_tf_entry, 0);
@@ -421,9 +484,9 @@ void OnTick()
       if(g_paused)
       {
          g_paused=false;
-         Print("[v23] New session day — consecutive-loss PAUSE lifted");
+         Print(VTAG+"New session day — consecutive-loss PAUSE lifted");
       }
-      PrintFormat("[v23] New day — daily counters reset. Equity: %.2f", g_eq);
+      PrintFormat(VTAG+"New day — daily counters reset. Equity: %.2f", g_eq);
    }
 
    if(g_cooldown>0) g_cooldown--;
@@ -453,7 +516,7 @@ void OnTick()
                double deal_comm   = HistoryDealGetDouble(dt, DEAL_COMMISSION);
                // Calculate R from actual deal P&L
                actual_r = g_orig_risk>0 ? (g_dir>0?(exit_p-g_entry):(g_entry-exit_p))/g_orig_risk : 0;
-               PrintFormat("[v23.1] Found closing deal #%d: price=%.5f profit=%.2f swap=%.2f comm=%.2f",
+               PrintFormat(VTAG+"Found closing deal #%d: price=%.5f profit=%.2f swap=%.2f comm=%.2f",
                            dt, exit_p, deal_profit, deal_swap, deal_comm);
                break; // most recent closing deal
             }
@@ -463,14 +526,14 @@ void OnTick()
          {
             exit_p = g_dir>0 ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
             actual_r = g_orig_risk>0 ? (g_dir>0?(exit_p-g_entry):(g_entry-exit_p))/g_orig_risk : 0;
-            PrintFormat("[v23.1] WARNING: No closing deal found, using current price %.5f", exit_p);
+            PrintFormat(VTAG+"WARNING: No closing deal found, using current price %.5f", exit_p);
          }
          g_trades++; g_total_r += actual_r;
          if(actual_r>0) g_wins++; else g_losses++;
          g_daily_pnl += actual_r*g_risk_money;
          g_session_pnl += actual_r*g_risk_money;
          double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
-         PrintFormat("[v23.1] MANUAL CLOSE detected — R=%+.3f (actual close %.5f) | Trades:%d WR:%.1f%% TotalR:%+.2f",
+         PrintFormat(VTAG+"MANUAL CLOSE detected — R=%+.3f (actual close %.5f) | Trades:%d WR:%.1f%% TotalR:%+.2f",
                      actual_r, exit_p, g_trades, wr, g_total_r);
          PostTradeReview(g_last_strategy, actual_r, "MANUAL");
          g_ticket=0; g_dir=0; g_bars_held=0; g_high_water_r=0;
@@ -501,7 +564,7 @@ void OnTick()
             g_bars_held = (int)((TimeCurrent() - g_entry_time) / bar_sec);
          else g_bars_held=0;
          g_high_water_r=0;
-         PrintFormat("[v23.1] RECOVERED orphaned position %s %s @%.5f (was missed during reload)",
+         PrintFormat(VTAG+"RECOVERED orphaned position %s %s @%.5f (was missed during reload)",
                      g_dir>0?"BUY":"SELL", _Symbol, g_entry);
          break;
       }
@@ -509,9 +572,6 @@ void OnTick()
 
    UpdateSigmaBaseline();
    UpdateBandTelemetry();
-
-   // v24: Crash/Boom tick handler (runs on every tick, not just bar close)
-   if(InpCrashBoomMode) g_cb.OnTick(SymbolInfoDouble(_Symbol,SYMBOL_BID), SymbolInfoDouble(_Symbol,SYMBOL_ASK));
 
    // v23: entry gate — session filter + stacking guard + all existing gates
    if(g_ticket==0 && !g_paused && g_cooldown==0 && !DailyLossHalted() &&
@@ -521,7 +581,7 @@ void OnTick()
       // v23: check if another fleet instance already has a position on this symbol
       if(HasOpenPositionOnSymbol(_Symbol))
       {
-         PrintFormat("[v23] BLOCKED — another fleet instance already has a position on %s", _Symbol);
+         PrintFormat(VTAG+"BLOCKED — another fleet instance already has a position on %s", _Symbol);
          g_cooldown = InpCoolDownBars;
       }
       else
@@ -540,6 +600,12 @@ void OnTick()
             }
             else if(cb_reason != "")
             {
+               // v25.2: surface every CB skip to the Experts log (deduped)
+               if(cb_reason != g_last_cb_skip)
+               {
+                  PrintFormat("[CB-SKIP] %s", cb_reason);
+                  g_last_cb_skip = cb_reason;
+               }
                g_last_skip = cb_reason;
                if(g_fired_legs == "")
                   Telem("sig", StringFormat(
@@ -561,10 +627,10 @@ void OnTick()
    }
    else if(g_ticket==0 && (g_paused || g_cooldown>0 || DailyLossHalted() || !IsSessionActive()))
    {
-      if(g_paused) Print("[v23] PAUSED — consecutive-loss breaker");
-      if(g_cooldown>0) PrintFormat("[v23] COOLDOWN %d bars left", g_cooldown);
-      if(DailyLossHalted()) Print("[v23] DAILY-HALT");
-      if(!IsSessionActive()) Print("[v23] SESSION-OFF — outside trading hours");
+      if(g_paused) Print(VTAG+"PAUSED — consecutive-loss breaker");
+      if(g_cooldown>0) PrintFormat(VTAG+"COOLDOWN %d bars left", g_cooldown);
+      if(DailyLossHalted()) Print(VTAG+"DAILY-HALT");
+      if(!IsSessionActive()) Print(VTAG+"SESSION-OFF — outside trading hours");
    }
 
    if(InpDrawDashboard) UpdateDashboard();
@@ -619,7 +685,7 @@ void RecoverPosition()
       g_high_water_r = g_orig_risk>0 ? (g_dir>0?(cur-g_entry):(g_entry-cur))/g_orig_risk : 0;
       if(g_high_water_r<0) g_high_water_r=0;
 
-      PrintFormat("[v23] Recovered %s %s @%.5f held %d bars (estimated)", g_dir>0?"BUY":"SELL",
+      PrintFormat(VTAG+"Recovered %s %s @%.5f held %d bars (estimated)", g_dir>0?"BUY":"SELL",
                   _Symbol, g_entry, g_bars_held);
       break;
    }
@@ -638,7 +704,7 @@ ENUM_TIMEFRAMES ParseTF(const string s, const ENUM_TIMEFRAMES fallback)
    if(t=="H1")  return PERIOD_H1;
    if(t=="H4")  return PERIOD_H4;
    if(t=="D1")  return PERIOD_D1;
-   Print("[v23] Unknown TF override '", s, "' — using fallback");
+   Print(VTAG+"Unknown TF override '", s, "' — using fallback");
    return fallback;
 }
 
@@ -694,7 +760,7 @@ void Telem(const string type, const string kv)
 {
    int h=FileOpen(TELEM_FILE, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
    if(h==INVALID_HANDLE)
-   { Print("[v23] telem write failed err=",GetLastError()); return; }
+   { Print(VTAG+"telem write failed err=",GetLastError()); return; }
    FileSeek(h,0,SEEK_END);
    FileWriteString(h, StringFormat("{\"ts\":\"%s\",\"epoch\":%I64d,\"type\":\"%s\",%s}\n",
                    TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),
@@ -708,7 +774,7 @@ void Telem(const string type, const string kv)
 void SaveState()
 {
    int h=FileOpen(STATE_FILE, FILE_WRITE|FILE_TXT|FILE_ANSI);
-   if(h==INVALID_HANDLE) { Print("[v23] state save failed"); return; }
+   if(h==INVALID_HANDLE) { Print(VTAG+"state save failed"); return; }
    FileWriteString(h, StringFormat("%d,%d,%d,%d,%d,%.4f,%d,%d,%d\n",
                    g_trades, g_wins, g_losses,
                    g_target_exits, g_time_exits, g_total_r,
@@ -719,7 +785,7 @@ void SaveState()
 void LoadState()
 {
    int h=FileOpen(STATE_FILE, FILE_READ|FILE_TXT|FILE_ANSI);
-   if(h==INVALID_HANDLE) { Print("[v23] no prior state found — starting fresh"); return; }
+   if(h==INVALID_HANDLE) { Print(VTAG+"no prior state found — starting fresh"); return; }
    string line = FileReadString(h);
    FileClose(h);
    if(StringLen(line)==0) return;
@@ -744,11 +810,11 @@ void LoadState()
    if(g_ticket>0 && g_consec_loss >= InpMaxConsecLoss)
    {
       g_paused=true;
-      PrintFormat("[v23] Restored PAUSE state — %d consecutive losses from prior session", g_consec_loss);
+      PrintFormat(VTAG+"Restored PAUSE state — %d consecutive losses from prior session", g_consec_loss);
    }
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
-   PrintFormat("[v23] Loaded state: Trades=%d WR=%.1f%% R=%+.2f ConsecLoss=%d",
+   PrintFormat(VTAG+"Loaded state: Trades=%d WR=%.1f%% R=%+.2f ConsecLoss=%d",
                g_trades, wr, g_total_r, g_consec_loss);
 }
 
@@ -854,7 +920,7 @@ void CheckStrategyPerformance()
 {
    const string names[] = {"PB","BO","MOM","MR","BF"};
 
-   Print("[v23.1] === STRATEGY PERFORMANCE REVIEW ===");
+   Print(VTAG+"=== STRATEGY PERFORMANCE REVIEW ===");
    for(int i=0; i<5; i++)
    {
       if(g_strat_trades[i] < InpMinTradesToJudge) continue;
@@ -866,13 +932,13 @@ void CheckStrategyPerformance()
       {
          g_strat_enabled[i] = false;
          status = "DISABLED";
-         PrintFormat("[v23.1] STRATEGY %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f → %s (negative expectancy)",
+         PrintFormat(VTAG+"STRATEGY %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f → %s (negative expectancy)",
                      names[i], g_strat_trades[i], wr*100, expectancy, status);
       }
       else
       {
          g_strat_enabled[i] = true;
-         PrintFormat("[v23.1] STRATEGY %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f → %s",
+         PrintFormat(VTAG+"STRATEGY %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f → %s",
                      names[i], g_strat_trades[i], wr*100, expectancy, status);
       }
    }
@@ -882,13 +948,13 @@ void CheckStrategyPerformance()
 void CheckRegimePerformance()
 {
    const string names[] = {"BULLISH","BEARISH","RANGING","HIGH_VOL","NO_TRADE"};
-   Print("[v23.1] === REGIME PERFORMANCE REVIEW ===");
+   Print(VTAG+"=== REGIME PERFORMANCE REVIEW ===");
    for(int i=0; i<5; i++)
    {
       if(g_regime_trades[i] < 3) continue;
       double wr = g_regime_wins[i] / g_regime_trades[i];
       double expectancy = g_regime_total_r[i] / g_regime_trades[i];
-      PrintFormat("[v23.1] REGIME %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f",
+      PrintFormat(VTAG+"REGIME %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f",
                   names[i], g_regime_trades[i], wr*100, expectancy);
    }
 }
@@ -896,13 +962,13 @@ void CheckRegimePerformance()
 // Log time-block performance
 void CheckTimeBlockPerformance()
 {
-   Print("[v23.1] === TIME-BLOCK PERFORMANCE REVIEW ===");
+   Print(VTAG+"=== TIME-BLOCK PERFORMANCE REVIEW ===");
    for(int i=0; i<5; i++)
    {
       if(g_time_trades[i] < 3) continue;
       double wr = g_time_wins[i] / g_time_trades[i];
       double expectancy = g_time_total_r[i] / g_time_trades[i];
-      PrintFormat("[v23.1] TIME %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f",
+      PrintFormat(VTAG+"TIME %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f",
                   TimeBlockStr(i), g_time_trades[i], wr*100, expectancy);
    }
 }
@@ -910,7 +976,7 @@ void CheckTimeBlockPerformance()
 // Diagnose root cause of losing streaks
 void AnalyzeLosingStreak()
 {
-   PrintFormat("[v23.1] LOSING STREAK ANALYSIS — %d consecutive losses, TotalR=%+.2f", g_consec_loss, g_total_r);
+   PrintFormat(VTAG+"LOSING STREAK ANALYSIS — %d consecutive losses, TotalR=%+.2f", g_consec_loss, g_total_r);
 
    // Check if losses are concentrated in one strategy
    for(int i=0; i<5; i++)
@@ -918,7 +984,7 @@ void AnalyzeLosingStreak()
       if(g_strat_trades[i] == 0) continue;
       double recent_r = g_strat_total_r[i];
       if(recent_r < -1.0 && g_strat_trades[i] >= 5)
-         PrintFormat("[v23.1] WARNING: Strategy index %d has R=%+.2f over %.0f trades — review needed", i, recent_r, g_strat_trades[i]);
+         PrintFormat(VTAG+"WARNING: Strategy index %d has R=%+.2f over %.0f trades — review needed", i, recent_r, g_strat_trades[i]);
    }
 
    // Check if losses are concentrated in one regime
@@ -926,7 +992,7 @@ void AnalyzeLosingStreak()
    {
       if(g_regime_trades[i] == 0) continue;
       if(g_regime_total_r[i] < -1.0 && g_regime_trades[i] >= 5)
-         PrintFormat("[v23.1] WARNING: Regime %d has R=%+.2f over %.0f trades", i, g_regime_total_r[i], g_regime_trades[i]);
+         PrintFormat(VTAG+"WARNING: Regime %d has R=%+.2f over %.0f trades", i, g_regime_total_r[i], g_regime_trades[i]);
    }
 }
 
@@ -1043,11 +1109,11 @@ void LoadReviewState()
    FileClose(h);
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
-   PrintFormat("[v23.1] Loaded intelligence: Trades=%d WR=%.1f%% R=%+.2f", g_trades, wr, g_total_r);
+   PrintFormat(VTAG+"Loaded intelligence: Trades=%d WR=%.1f%% R=%+.2f", g_trades, wr, g_total_r);
    for(int i=0;i<5;i++)
    {
       if(g_strat_trades[i] >= 5)
-         PrintFormat("[v23.1] Strategy %d: %.0f trades, R=%+.2f, enabled=%s",
+         PrintFormat(VTAG+"Strategy %d: %.0f trades, R=%+.2f, enabled=%s",
                      i, g_strat_trades[i], g_strat_total_r[i], g_strat_enabled[i]?'1':'0');
    }
 }
@@ -1393,7 +1459,7 @@ double GetScaledVolume(double base_vol)
    double scaled = base_vol * scale;
 
    if(scaled < base_vol)
-      PrintFormat("[v23] Volume scaled %.2f -> %.2f (%d consecutive losses, factor=%.2f)",
+      PrintFormat(VTAG+"Volume scaled %.2f -> %.2f (%d consecutive losses, factor=%.2f)",
                   base_vol, scaled, g_consec_loss, scale);
    return scaled;
 }
@@ -1454,14 +1520,14 @@ void OpenTrade(int direction, string sig_type)
    double cap_money  = g_eq*InpMaxEffectiveRiskPct/100.0;
    if(eff_risk > cap_money)
    {
-      PrintFormat("[v23] SKIP %s — min-lot risk $%.2f exceeds cap $%.2f (%.0f%% equity)",
+      PrintFormat(VTAG+"SKIP %s — min-lot risk $%.2f exceeds cap $%.2f (%.0f%% equity)",
                   direction>0?"BUY":"SELL", eff_risk, cap_money, InpMaxEffectiveRiskPct);
       g_cooldown=1;
       return;
    }
    g_risk_money = eff_risk;
    if(eff_risk > g_eq*0.05)
-      PrintFormat("[v23] WARNING: effective risk $%.2f = %.1f%% of equity",
+      PrintFormat(VTAG+"WARNING: effective risk $%.2f = %.1f%% of equity",
                   eff_risk, eff_risk/g_eq*100);
 
    // ACCOUNT-WIDE EXPOSURE GUARD
@@ -1471,7 +1537,7 @@ void OpenTrade(int direction, string sig_type)
    double total_cap  = acct_eq*InpMaxTotalRiskPct/100.0;
    if(fleet_risk + eff_risk > total_cap)
    {
-      PrintFormat("[v23] SKIP %s — ACCOUNT GUARD: fleet $%.2f + new $%.2f > cap $%.2f",
+      PrintFormat(VTAG+"SKIP %s — ACCOUNT GUARD: fleet $%.2f + new $%.2f > cap $%.2f",
                   direction>0?"BUY":"SELL", fleet_risk, eff_risk, total_cap);
       Telem("risk_block", StringFormat(
          "\"sym\":\"%s\",\"fleet_risk\":%.2f,\"new_risk\":%.2f,\"ceiling\":%.2f,\"eq\":%.2f",
@@ -1483,17 +1549,17 @@ void OpenTrade(int direction, string sig_type)
    bool ok=false;
    if(InpLiveExecution)
    {
-      PrintFormat("[v23] Executing %s vol=%.2f SL=%.5f TP=%.5f", direction>0?"BUY":"SELL", vol, sl, tp);
-      if(direction>0) ok=trade.Buy(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v23.0");
-      else            ok=trade.Sell(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v23.0");
+      PrintFormat(VTAG+"Executing %s vol=%.2f SL=%.5f TP=%.5f", direction>0?"BUY":"SELL", vol, sl, tp);
+      if(direction>0) ok=trade.Buy(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v"+APP_VERSION);
+      else            ok=trade.Sell(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v"+APP_VERSION);
       if(!ok)
       {
          uint retcode = trade.ResultRetcode();
          string desc   = trade.ResultRetcodeDescription();
-         PrintFormat("[v23] ORDER FAILED retcode=%d desc=%s", retcode, desc);
+         PrintFormat(VTAG+"ORDER FAILED retcode=%d desc=%s", retcode, desc);
       }
    }
-   else { g_ticket=(ulong)TimeCurrent(); ok=true; Print("[v23] PAPER MODE"); }
+   else { g_ticket=(ulong)TimeCurrent(); ok=true; Print(VTAG+"PAPER MODE"); }
 
    if(!ok){ g_cooldown=InpCoolDownBars; return; }
 
@@ -1521,7 +1587,7 @@ void OpenTrade(int direction, string sig_type)
    g_trades_today++;
 
    if(InpDrawSignals) DrawArrow(direction,TimeCurrent(),entry,sig_type);
-   PrintFormat("[v23] %s %s @%.5f SL=%.5f TP=%.5f vol=%.2f", sig_type, direction>0?"BUY":"SELL", entry,sl,tp,vol);
+   PrintFormat(VTAG+"%s %s @%.5f SL=%.5f TP=%.5f vol=%.2f", sig_type, direction>0?"BUY":"SELL", entry,sl,tp,vol);
 
    Telem("open", StringFormat(
       "\"sym\":\"%s\",\"ticket\":%I64u,\"dir\":%d,\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,"
@@ -1561,14 +1627,14 @@ void OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
    double fleet_cap = g_eq * InpMaxTotalRiskPct / 100.0;
    if(fleet_risk + eff_risk > fleet_cap)
    {
-      PrintFormat("[v24] SKIP %s — fleet risk $%.2f + new $%.2f exceeds cap $%.2f",
+      PrintFormat(VTAG+"SKIP %s — fleet risk $%.2f + new $%.2f exceeds cap $%.2f",
                   direction>0?"BUY":"SELL", fleet_risk, eff_risk, fleet_cap);
       g_cooldown = 1;
       return;
    }
    if(eff_risk > cap_money)
    {
-      PrintFormat("[v24] SKIP %s — min-lot risk $%.2f exceeds cap $%.2f",
+      PrintFormat(VTAG+"SKIP %s — min-lot risk $%.2f exceeds cap $%.2f",
                   direction>0?"BUY":"SELL", eff_risk, cap_money);
       g_cooldown = 1;
       return;
@@ -1578,18 +1644,18 @@ void OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
    bool ok = false;
    if(InpLiveExecution)
    {
-      PrintFormat("[v24] Executing %s vol=%.2f SL=%.5f TP=%.5f | %s",
+      PrintFormat(VTAG+"Executing %s vol=%.2f SL=%.5f TP=%.5f | %s",
                   direction>0?"BUY":"SELL", vol, sl, tp, reason);
-      if(direction>0) ok = trade.Buy(vol, _Symbol, 0, NormalizeDouble(sl,_Digits), NormalizeDouble(tp,_Digits), "CB_v24");
-      else            ok = trade.Sell(vol, _Symbol, 0, NormalizeDouble(sl,_Digits), NormalizeDouble(tp,_Digits), "CB_v24");
+      if(direction>0) ok = trade.Buy(vol, _Symbol, 0, NormalizeDouble(sl,_Digits), NormalizeDouble(tp,_Digits), "CB_v"+APP_VERSION);
+      else            ok = trade.Sell(vol, _Symbol, 0, NormalizeDouble(sl,_Digits), NormalizeDouble(tp,_Digits), "CB_v"+APP_VERSION);
       if(!ok)
       {
          uint retcode = trade.ResultRetcode();
          string desc = trade.ResultRetcodeDescription();
-         PrintFormat("[v24] ORDER FAILED retcode=%d desc=%s", retcode, desc);
+         PrintFormat(VTAG+"ORDER FAILED retcode=%d desc=%s", retcode, desc);
       }
    }
-   else { g_ticket = (ulong)TimeCurrent(); ok = true; Print("[v24] PAPER MODE"); }
+   else { g_ticket = (ulong)TimeCurrent(); ok = true; Print(VTAG+"PAPER MODE"); }
 
    if(!ok) { g_cooldown = InpCoolDownBars; return; }
 
@@ -1608,7 +1674,7 @@ void OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
    if(g_ticket == 0) g_ticket = trade.ResultOrder();
    if(g_ticket == 0)
    {
-      Print("[v24] ORDER accepted but position ticket was not found; waiting for recovery");
+      Print(VTAG+"ORDER accepted but position ticket was not found; waiting for recovery");
       g_cooldown = InpCoolDownBars;
       return;
    }
@@ -1622,7 +1688,7 @@ void OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
    g_sig_is_band = false;
 
    if(InpDrawSignals) DrawArrow(direction, TimeCurrent(), entry, reason);
-   PrintFormat("[v24] %s %s @%.5f SL=%.5f TP=%.5f vol=%.2f | %s",
+   PrintFormat(VTAG+"%s %s @%.5f SL=%.5f TP=%.5f vol=%.2f | %s",
                reason, direction>0?"BUY":"SELL", entry, sl, tp, vol,
                g_cb.GetDashboardInfo());
 
@@ -1672,7 +1738,7 @@ void ManagePosition()
       // If spike probability > 80% and trade is in profit, exit NOW
       if(spike_prob > 0.80 && r_now > 0)
       {
-         PrintFormat("[v24] CB SPIKE EXIT — prob=%.2f R=+.2f, banking profit before spike",
+         PrintFormat(VTAG+"CB SPIKE EXIT — prob=%.2f R=+.2f, banking profit before spike",
                      spike_prob, r_now);
          ClosePosition("CB-SPIKE");
          return;
@@ -1681,7 +1747,7 @@ void ManagePosition()
       // If spike probability > 60% and trade is losing, cut immediately
       if(spike_prob > 0.60 && r_now < 0)
       {
-         PrintFormat("[v24] CB SPIKE-CUT — prob=%.2f R=%.2f, cutting loss before spike",
+         PrintFormat(VTAG+"CB SPIKE-CUT — prob=%.2f R=%.2f, cutting loss before spike",
                      spike_prob, r_now);
          ClosePosition("CB-SPIKE-CUT");
          return;
@@ -1698,7 +1764,7 @@ void ManagePosition()
       // CB-specific profit lock: lock at 0.3R if reached 0.8R (tighter than standard)
       if(g_high_water_r >= 0.8 && r_now <= 0.3 && r_now > 0)
       {
-         PrintFormat("[v24] CB PROFIT LOCK — high-water %.2fR now %.2fR", g_high_water_r, r_now);
+         PrintFormat(VTAG+"CB PROFIT LOCK — high-water %.2fR now %.2fR", g_high_water_r, r_now);
          ClosePosition("CB-PLOCK");
          return;
       }
@@ -1706,7 +1772,7 @@ void ManagePosition()
       // CB-specific early cut: 4 bars instead of 6
       if(g_bars_held >= 4 && r_now <= -0.3 && g_high_water_r < 0.2)
       {
-         PrintFormat("[v24] CB EARLY CUT — %d bars R=%.2f", g_bars_held, r_now);
+         PrintFormat(VTAG+"CB EARLY CUT — %d bars R=%.2f", g_bars_held, r_now);
          ClosePosition("CB-ECUT");
          return;
       }
@@ -1718,7 +1784,7 @@ void ManagePosition()
    // v23: PROFIT LOCK — trade reached 1R+ then reversed below InpProfitLockR
    if(g_high_water_r >= 1.0 && r_now <= InpProfitLockR && r_now > 0)
    {
-      PrintFormat("[v23] PROFIT LOCK — high-water %.2fR now at %.2fR, banking profit", g_high_water_r, r_now);
+      PrintFormat(VTAG+"PROFIT LOCK — high-water %.2fR now at %.2fR, banking profit", g_high_water_r, r_now);
       ClosePosition("PLOCK");
       return;
    }
@@ -1728,7 +1794,7 @@ void ManagePosition()
    {
       if(r_now <= InpEarlyCutMaxR && g_high_water_r < 0.3)
       {
-         PrintFormat("[v23] EARLY CUT — %d bars, R=%.2f, high-water=%.2fR, cutting loss",
+         PrintFormat(VTAG+"EARLY CUT — %d bars, R=%.2f, high-water=%.2fR, cutting loss",
                      g_bars_held, r_now, g_high_water_r);
          ClosePosition("ECUT");
          return;
@@ -1743,7 +1809,7 @@ void ManagePosition()
       if(g_bars_held >= effective_hold)
       {
          // still winning at extended hold — let it go (don't cut a winner)
-         PrintFormat("[v23] EXTENDED HOLD — %d bars, R=%.2f, letting winner run", g_bars_held, r_now);
+         PrintFormat(VTAG+"EXTENDED HOLD — %d bars, R=%.2f, letting winner run", g_bars_held, r_now);
       }
    }
 
@@ -1753,7 +1819,7 @@ void ManagePosition()
       if(r_now > 0.2)
       {
          // v23: winning trade at time limit — don't cut it, let trailing handle it
-         PrintFormat("[v23] WINNING TIME — %d bars, R=%.2f, holding via trailing", g_bars_held, r_now);
+         PrintFormat(VTAG+"WINNING TIME — %d bars, R=%.2f, holding via trailing", g_bars_held, r_now);
       }
       else
          { ClosePosition("TIME"); return; }
@@ -1800,13 +1866,13 @@ void ClosePosition(string reason)
    if(g_consec_loss>=InpMaxConsecLoss)
    {
       g_paused=true;
-      PrintFormat("[v23] %d consecutive losses — PAUSED", g_consec_loss);
+      PrintFormat(VTAG+"%d consecutive losses — PAUSED", g_consec_loss);
    }
    g_daily_pnl += r*g_risk_money;
    g_session_pnl += r*g_risk_money;
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
-   PrintFormat("[v23] CLOSE %s R=%+.3f | Trades:%d WR:%.1f%% TotalR:%+.2f SessionPnL=$%+.2f",
+   PrintFormat(VTAG+"CLOSE %s R=%+.3f | Trades:%d WR:%.1f%% TotalR:%+.2f SessionPnL=$%+.2f",
                reason, r, g_trades, wr, g_total_r, g_session_pnl);
 
    Telem("close", StringFormat(
@@ -1849,7 +1915,7 @@ void UpdateDashboard()
    double pct = CalcATRPercentile(atr[0]);
 
    string L[26];
-   L[0]="=== MITEMSHUB AI v25.1 ===";
+   L[0]=StringFormat("=== MITEMSHUB AI v%s ===", APP_VERSION);
    L[1]=StringFormat("%s | %s -> %s",_Symbol,EnumToString(g_tf_entry),EnumToString(g_tf_regime));
    // v23.1: Show real-time session P&L including unrealized gains
    double realtime_pnl = g_session_pnl;
@@ -1876,18 +1942,19 @@ void UpdateDashboard()
    L[5]=StringFormat("Status: %s%s", g_paused?"PAUSED":(DailyLossHalted()?"DAILY-HALT":"ACTIVE"),
         IsSessionActive()?" | SESSION-ON":" | SESSION-OFF");
    if(InpCrashBoomMode)
-      L[6]=StringFormat("CB: %s | Mode: FADE-ONLY | Grind: %s | DirFilter: %s",
+      L[6]=StringFormat("CB: %s | Mode: FADE-ONLY | Grind: %s | DirFilter: %s | TickFade: %s",
          InpIsCrashIndex?"CRASH":"BOOM", InpCBEnableGrind?"ON":"OFF",
-         InpCBRequireSpikeDirection?"ON":"OFF");
+         InpCBRequireSpikeDirection?"ON":"OFF", InpCBTickFade?"ON":"OFF");
    else
       L[6]=StringFormat("Strats: PB=%s BO=%s MOM=%s MR=%s BF=%s",
          InpUsePullback?"ON":"OFF", InpUseBreakout?"ON":"OFF",
          InpUseMomentum?"ON":"OFF", InpUseMeanRevert?"ON":"OFF", InpUseBandFade?"ON":"OFF");
    L[7]=StringFormat("MinScore: %d | 2+Agree: %s | Cooldown: %d",InpMinScore,InpRequire2Strats?"YES":"NO", g_cooldown);
    L[8]=InpCrashBoomMode
-      ? StringFormat("CB Risk: %.2f%% | Cap: %.0f%% | Fade TP: %.1fx | Hold: %d",
+      ? StringFormat("CB Risk: %.2f%% | Cap: %.0f%% | Fade TP: %.1fx | Hold: %d | Thr: %.1fx%s",
          InpCBBaseRisk, InpMaxEffectiveRiskPct,
-         InpIsCrashIndex ? InpCBFadeTP : InpCBFadeTP, InpMaxHoldBars)
+         InpIsCrashIndex ? InpCBFadeTP : InpCBFadeTP, InpMaxHoldBars,
+         InpCBSpikeThreshold, InpCBMicroFade?" MICRO":"" )
       : StringFormat("Risk: %.2f%% (cap %.0f%%) | TP: %.1fx | Hold: %d",
          InpRiskPerTrade*100,InpMaxEffectiveRiskPct,InpTpMult,InpMaxHoldBars);
    L[9]=StringFormat("Band: z>=%.1f tgt=%.2f sig | Trail: %s (%.1fR/%.1fR) BE: %s",

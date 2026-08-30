@@ -73,7 +73,7 @@ public:
       // Frequency: ~1 spike per 1000 ticks (~16.6 min)
       m_profiles[0].name = "Boom 1000";
       m_profiles[0].is_crash = false;
-      m_profiles[0].spike_threshold = 2.5;    // lowered from 3.0 — catches smaller spikes
+      m_profiles[0].spike_threshold = 2.2;    // v25.3 micro-fade: catches small spikes
       m_profiles[0].avg_spike_size = 30;       // corrected from 75 — median is 28.5pts
       m_profiles[0].fade_depth = 0.50;         // increased from 0.40 — expect 50% retrace
       m_profiles[0].fade_sl_mult = 0.4;        // tightened from 0.5 — tighter stops
@@ -112,7 +112,7 @@ public:
       // Crash 1000 — mirrors Boom 1000 (tick data: median=28.5pts)
       m_profiles[3].name = "Crash 1000";
       m_profiles[3].is_crash = true;
-      m_profiles[3].spike_threshold = 2.5;    // lowered from 3.0
+      m_profiles[3].spike_threshold = 2.2;    // v25.3 micro-fade: catches small spikes
       m_profiles[3].avg_spike_size = 30;       // corrected from 75
       m_profiles[3].fade_depth = 0.50;         // increased from 0.40
       m_profiles[3].fade_sl_mult = 0.4;        // tightened from 0.5

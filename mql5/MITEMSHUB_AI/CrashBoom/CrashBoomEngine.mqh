@@ -54,6 +54,18 @@ private:
    double   m_sig_tp;
    string   m_sig_reason;
    string   m_sig_type;              // "CB-FADE" or "CB-GRIND"
+   
+   //--- v25.4: tick-triggered fast-fade state machine
+   bool     m_tick_fade_enabled;     // fire fades on the tick spike itself
+   double   m_tick_spike_pts;        // min tick jump (points) that counts as a spike
+   int      m_tick_fade_timeout;     // pending spike expiry (seconds)
+   int      m_tf_state;              // 0=idle, 1=spike pending retrace
+   double   m_tf_prev;               // previous tick price
+   double   m_tf_pre;                // pre-spike price (= spike low for Boom)
+   double   m_tf_peak;               // post-spike extreme price
+   double   m_tf_jump;               // spike jump size (abs, price units)
+   datetime m_tf_t0;                 // spike time
+   double   m_tick_fade_ratio;       // spike/body-EMA ratio for risk sizing (consume-once)
 
 public:
    CCrashBoomEngine()
@@ -72,6 +84,16 @@ public:
       m_sig_tp = 0;
       m_sig_reason = "";
       m_sig_type = "";
+      m_tick_fade_enabled = false;
+      m_tick_spike_pts = 3.0;
+      m_tick_fade_timeout = 600;
+      m_tf_state = 0;
+      m_tf_prev = 0;
+      m_tf_pre = 0;
+      m_tf_peak = 0;
+      m_tf_jump = 0;
+      m_tf_t0 = 0;
+      m_tick_fade_ratio = 0;
    }
 
    //--- Initialize
@@ -128,6 +150,129 @@ public:
       if(!m_is_enabled) return;
       m_spike_detector.OnTick();
       m_tick_analyzer.OnTick(bid, ask);  // v24.1: tick pattern analysis
+   }
+   
+   //--- v25.4: tick-triggered fast fade — runs on EVERY tick.
+   //    Tracks tick-level spikes and their retrace; fires the fade as soon as
+   //    the retrace enters the window, instead of waiting for the M5 close.
+   //    can_trade: caller's entry gates (position/session/cooldown) — the spike
+   //    is always tracked, but only fired when gates are open.
+   //    Returns 1=BUY, -1=SELL, 0=nothing; fills entry/sl/tp/reason on fire.
+   int OnTickFade(double bid, double &entry, double &sl, double &tp, string &reason, bool can_trade)
+   {
+      if(!m_is_enabled) { m_tf_prev = bid; return 0; }
+      
+      double prev = (m_tf_prev > 0) ? m_tf_prev : bid;
+      m_tf_prev = bid;
+      double jump = bid - prev;
+      datetime now = TimeCurrent();
+      
+      //--- 1) detect / extend a tick spike (Boom spikes UP, Crash spikes DOWN)
+      bool is_spike = m_is_crash ? (jump <= -m_tick_spike_pts) : (jump >= m_tick_spike_pts);
+      if(is_spike)
+      {
+         if(m_tf_state == 1)
+         {
+            // same spike extended to a new extreme — move the peak, restart clock
+            if(m_is_crash ? (bid < m_tf_peak) : (bid > m_tf_peak))
+            {
+               m_tf_peak = bid;
+               m_tf_jump = MathAbs(m_tf_peak - m_tf_pre);
+               m_tf_t0   = now;
+            }
+         }
+         else
+         {
+            m_tf_state = 1;
+            m_tf_pre   = prev;
+            m_tf_peak  = bid;
+            m_tf_jump  = MathAbs(jump);
+            m_tf_t0    = now;
+            PrintFormat("[CB-TICKSPIKE] %s jump=%+.1fpts", m_is_crash ? "DN" : "UP", jump);
+         }
+      }
+      
+      if(m_tf_state != 1) return 0;
+      
+      //--- 2) pending: measure retrace, fire or expire
+      double retrace = m_is_crash ? (bid - m_tf_peak) / m_tf_jump
+                                  : (m_tf_peak - bid) / m_tf_jump;
+      int age = (int)(now - m_tf_t0);
+      
+      // full retrace back through the pre-spike price — fade window gone
+      if(m_is_crash ? (bid >= m_tf_pre) : (bid <= m_tf_pre))
+      {
+         PrintFormat("[CB-TICKFADE-EXPIRE] full retrace after %ds", age);
+         m_tf_state = 0;
+         return 0;
+      }
+      if(age > m_tick_fade_timeout)
+      {
+         m_tf_state = 0;
+         return 0;   // silent timeout
+      }
+      
+      double r_entry = m_strategy.ScaledFadeEntry(m_tf_jump);   // v25.7 size-scaled
+      double r_max   = m_strategy.GetFadeRetraceMax();
+      if(retrace < r_entry) return 0;             // not deep enough yet (silent)
+      if(retrace > r_max)
+      {
+         PrintFormat("[CB-TICKFADE-EXPIRE] retrace %.0f%% > %.0f%% max after %ds", retrace*100, r_max*100, age);
+         m_tf_state = 0;
+         return 0;
+      }
+      
+      if(!can_trade) return 0;                    // gates closed — keep tracking
+      if(m_tod_awareness.ShouldAvoid())
+      {
+         reason = StringFormat("CB-TICKFADE blocked %s", m_tod_awareness.GetRiskDescription());
+         return 0;
+      }
+      
+      double atr = m_strategy.GetATR();
+      if(atr <= 0) return 0;
+      
+      //--- geometry mirrors the M5 fade (SL/TP in ATR units, R:R gate)
+      entry = bid;
+      if(m_is_crash)
+      {
+         sl = entry - m_strategy.GetFadeSL() * atr;
+         tp = entry + m_strategy.GetFadeTP() * atr;
+         if(tp < m_tf_pre) tp = m_tf_pre + atr * 0.2;   // keep TP above spike high
+         double rr = (tp - entry) / MathMax(entry - sl, _Point);
+         if(rr < m_strategy.GetMinRR())
+         {
+            PrintFormat("[CB-TICKFADE-SKIP] RR %.1f < %.1f (TP clamped @pre-spike)", rr, m_strategy.GetMinRR());
+            m_tf_state = 0;
+            return 0;
+         }
+         reason = StringFormat("CB-TICK-FADE-BUY jump=%.1fpts retrace=%.0f%% t=%ds", m_tf_jump, retrace*100, age);
+         PrintFormat("[CB-TICKFADE] BUY jump=%.1fpts retrace=%.0f%% t=%ds prob=%.2f",
+                     m_tf_jump, retrace*100, age, m_spike_detector.GetSpikeProbability());
+      }
+      else
+      {
+         sl = entry + m_strategy.GetFadeSL() * atr;
+         tp = entry - m_strategy.GetFadeTP() * atr;
+         if(tp > m_tf_pre) tp = m_tf_pre - atr * 0.2;   // keep TP below pre-spike level
+         double rr = (entry - tp) / MathMax(sl - entry, _Point);
+         if(rr < m_strategy.GetMinRR())
+         {
+            PrintFormat("[CB-TICKFADE-SKIP] RR %.1f < %.1f (TP clamped @pre-spike)", rr, m_strategy.GetMinRR());
+            m_tf_state = 0;
+            return 0;
+         }
+         reason = StringFormat("CB-TICK-FADE-SELL jump=%.1fpts retrace=%.0f%% t=%ds", m_tf_jump, retrace*100, age);
+         PrintFormat("[CB-TICKFADE] SELL jump=%.1fpts retrace=%.0f%% t=%ds prob=%.2f",
+                     m_tf_jump, retrace*100, age, m_spike_detector.GetSpikeProbability());
+      }
+      
+      //--- consume the spike: block the M5 fade path for it, size risk by
+      //    tick-jump/body-EMA (same scale as the M5 micro-fade multiplier)
+      m_tf_state = 0;
+      m_spike_cooldown = m_calibration.GetProfile().cooldown_bars;
+      m_tick_fade_ratio = m_tf_jump / MathMax(m_spike_detector.GetBodyEma(), _Point);
+      return m_is_crash ? 1 : -1;
    }
 
    //--- Call on every bar close
@@ -245,14 +390,16 @@ public:
                           double tick_size, double tick_value,
                           double min_lot, double max_lot, double lot_step)
    {
-      if(!m_is_enabled) return 0;
-      
-      double spike_prob = m_spike_detector.GetSpikeProbability();
-      bool spike_just = m_spike_detector.SpikeJustHappened(m_strategy.GetPostSpikeWindow());
-      
-      return m_risk_sizer.CalculateVolume(equity, stop_dist, tick_size, tick_value,
-                                          spike_prob, spike_just,
-                                          min_lot, max_lot, lot_step);
+      if(!m_is_enabled) return 0;       double spike_prob = m_spike_detector.GetSpikeProbability();
+       bool spike_just = m_spike_detector.SpikeJustHappened(m_strategy.GetPostSpikeWindow());
+       // v25.4: tick-fired fades carry their own ratio; M5 fades use detector ratio
+       double body_ratio = (m_tick_fade_ratio > 0) ? m_tick_fade_ratio
+                                                   : m_spike_detector.GetLastSpikeBodyRatio();
+       m_tick_fade_ratio = 0;   // consume-once
+       
+       return m_risk_sizer.CalculateVolume(equity, stop_dist, tick_size, tick_value,
+                                           spike_prob, spike_just,
+                                           min_lot, max_lot, lot_step, body_ratio);
    }
 
    //--- v24.11: Notify engine when a trade closes (for trend-reversal guard)
@@ -323,7 +470,8 @@ public:
    bool IsCrash() const   { return m_is_crash; }
    
    //--- Parameter setters (wrappers — avoid pointer access from main EA)
-   void SetSpikeThreshold(double val)  { m_spike_detector.SetSpikeThreshold(val); m_strategy.SetSpikeThreshold(val); }
+   void SetSpikeThreshold(double val)  { m_spike_detector.SetSpikeThreshold(val); m_strategy.SetSpikeThreshold(val); m_risk_sizer.SetMicroAnchor(val); }
+   void SetMicroFade(bool on)          { m_risk_sizer.SetMicroFade(on); }   // v25.3 micro-fade tier
    void SetMaxSpikeProb(double val)    { m_strategy.SetMaxSpikeProb(val); }
    void SetFadeR(double val)           { m_strategy.SetFadeR(val); }
    void SetFadeSL(double val)          { m_strategy.SetFadeSL(val); }
@@ -334,6 +482,15 @@ public:
    void SetEnableGrind(bool val)       { m_strategy.SetEnableGrind(val); }
    void SetRequireSpikeDirection(bool val) { m_strategy.SetRequireSpikeDirection(val); }
    void SetMinATRPoints(double val)        { m_strategy.SetMinATRPoints(val); }
+   
+   //--- v25.4: tick fast-fade configuration
+   void SetTickFade(bool on, double spike_pts, int timeout_sec)
+   {
+      m_tick_fade_enabled = on;
+      m_tick_spike_pts    = MathMax(0.5, spike_pts);
+      m_tick_fade_timeout = MathMax(60, timeout_sec);
+      if(on) PrintFormat("[CB-TICKFADE] armed: spike>=%.1fpts timeout=%ds", m_tick_spike_pts, m_tick_fade_timeout);
+   }
    
    //--- Get spike detector (for diagnostic access)
    CSpikeDetector *GetSpikeDetectorPtr() { return &m_spike_detector; }

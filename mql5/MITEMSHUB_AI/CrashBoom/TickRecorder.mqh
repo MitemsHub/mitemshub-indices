@@ -12,7 +12,9 @@
 //|  LIGHTWEIGHT BY DESIGN:                                          |
 //|  - No per-tick disk I/O.  Rows accumulate in an in-memory        |
 //|    string buffer that is flushed every N ticks OR every T        |
-//|    seconds, whichever comes first.                               |
+//|    seconds, whichever comes first (v25.5: 100 ticks / 10s).      |
+//|  - v25.5: file opened with FILE_SHARE_READ so the live CSV can   |
+//|    be read/copied by external tools while the EA writes it.      |
 //|  - Daily file rotation keeps each CSV pandas-sized.              |
 //|  - Columns: ts,bid,ask,mid  (server epoch seconds, prices).      |
 //|    Everything else is derivable downstream.                      |
@@ -62,7 +64,11 @@ private:
      {
       m_day = DayTag(now);
       m_day_start = DayStart(now);
-      m_handle = FileOpen(FileName(m_day), FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI);
+      // v25.5: FILE_SHARE_READ lets offline analysis tools read/copy the live
+      // CSV while the EA keeps writing — without it the file is exclusively
+      // locked and external readers get "device or resource busy".
+      m_handle = FileOpen(FileName(m_day),
+                          FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_SHARE_READ);
       if(m_handle == INVALID_HANDLE)
          return(false);
       if(FileSize(m_handle) == 0)
@@ -103,8 +109,8 @@ public:
    CTickRecorder()
      {
       m_enabled          = false;
-      m_flush_every_ticks= 500;
-      m_flush_seconds    = 60;
+      m_flush_every_ticks= 100;   // v25.5: tighter cadence for live analysis
+      m_flush_seconds    = 10;
       m_handle           = INVALID_HANDLE;
       m_symbol           = "";
       m_day              = "";

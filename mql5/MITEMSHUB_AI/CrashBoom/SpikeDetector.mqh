@@ -42,6 +42,7 @@ private:
    datetime m_last_spike_time;        // when last spike occurred
    int      m_last_spike_bar;         // bar index of last spike
    double   m_spike_threshold;        // body size = this x average = spike
+   double   m_last_spike_ratio;       // v25.3: spike body / body EMA at detection (micro-fade risk input)
    
    //--- Grind detection
    int      m_grind_direction;        // 1=UP, -1=DOWN, 0=none
@@ -77,6 +78,7 @@ public:
       m_last_spike_time = 0;
       m_last_spike_bar = 0;
       m_spike_threshold = 3.0;  // default: 3x average body = spike
+      m_last_spike_ratio = 0;
       
       m_grind_direction = 0;
       m_grind_duration = 0;
@@ -166,6 +168,7 @@ public:
          spike_detected = true;
          m_last_spike_time = iTime(_Symbol, tf, 1);
          m_last_spike_bar = 1;  // reset to 1 (this bar)
+         m_last_spike_ratio = body / m_body_ema;  // v25.3: for micro-fade risk scaling
       }
       
       //--- Update grind detection (look at last N bars)
@@ -286,6 +289,9 @@ public:
    void SetSpikeThreshold(double threshold) { m_spike_threshold = threshold; }
    double GetSpikeThreshold() const { return m_spike_threshold; }
    
+   //--- v25.3: spike body ratio at last detection (0 = none since reset)
+   double GetLastSpikeBodyRatio() const { return m_last_spike_ratio; }
+   
    //--- Get combined spike probability (0.0 to 1.0)
    //    Weights: body_ratio 30%, tick_change 20%, grind_length 25%, time_gap 25%
    double GetSpikeProbability() const
@@ -324,6 +330,7 @@ public:
    {
       m_last_spike_time = 0;
       m_last_spike_bar = 0;
+      m_last_spike_ratio = 0;
       m_grind_direction = 0;
       m_grind_duration = 0;
       m_tick_count = 0;

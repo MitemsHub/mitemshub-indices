@@ -90,13 +90,14 @@ public:
       m_bb_deviation = 2.0;
       
       // Default parameters (v25: optimized from 60-day Boom 1000 data)
-      m_spike_threshold = 2.8;       // optimized: 2.8x avg body
+      m_spike_threshold = 2.2;       // v25.3 micro-fade: 2.2x avg body
       m_spike_cooldown_bars = 1;     // optimized: 1 bar cooldown
-      m_fade_r_entry = 0.40;         // optimized: enter at 40% retrace (deeper = cleaner)
+      m_fade_r_entry = 0.30;         // v25.6: aligned with deployed .set (InpCBFadeR=0.3)
       m_fade_sl_atr_mult = 0.4;     // optimized: tighter stop = 0.4x ATR
       m_fade_tp_atr_mult = 3.5;     // optimized: wider target = 3.5x ATR (PF 10.33)
       m_min_rr = 2.0;               // reject plans whose geometry is not asymmetric
-      m_fade_retrace_max = 0.50;    // optimized: max 50% retrace (quality filter)
+      m_fade_retrace_max = 0.60;    // v25.6 tune: 0.50->0.60 — overshoot was the #2 entry blocker;
+                                    // 60d sweep: PF 4.06->4.22, ExpR +1.94->+2.02, +216 trades
       m_grind_sl_mult = 2.0;
       m_max_spike_prob = 0.70;      // optimized: 70% spike prob threshold
       m_post_spike_window = 5;
@@ -189,6 +190,33 @@ public:
    double GetFadeRetraceMax() const              { return m_fade_retrace_max; }
    double GetBreakevenR() const                  { return m_breakeven_r; }
    bool   GetUseTrail() const                    { return m_use_trail; }
+   
+   //--- v25.4: getters for the tick-path fast fade (engine mirrors M5 geometry)
+   double GetFadeR() const                       { return m_fade_r_entry; }
+   
+   //--- v25.7: size-scaled fade entry threshold.
+   //    Big spikes decay slowly — ask a shallower retrace % of them;
+   //    small spikes decay fast — demand a deeper % (junk filter).
+   //    lo = clamp(m_fade_r_entry * sqrt(12/size), 0.18, 0.40)
+   //    60d sweep: +89 trades, expectancy unchanged (+2.00 vs +2.02), PF 4.19.
+   double ScaledFadeEntry(const double size) const
+   {
+      double lo = m_fade_r_entry * MathSqrt(12.0 / MathMax(size, 1.0));
+      return MathMax(0.18, MathMin(0.40, lo));
+   }
+   double GetFadeSL() const                      { return m_fade_sl_atr_mult; }
+   double GetFadeTP() const                      { return m_fade_tp_atr_mult; }
+   double GetMinRR() const                       { return m_min_rr; }
+   
+   //--- v25.4: current M5 ATR for tick-path SL/TP geometry (0 = unavailable)
+   double GetATR()
+   {
+      if(m_atr_handle == INVALID_HANDLE) return 0;
+      double a[];
+      ArraySetAsSeries(a, true);
+      if(CopyBuffer(m_atr_handle, 0, 1, 1, a) < 1) return 0;
+      return a[0];
+   }
    
    //--- v24.11: Track when a trade closes (call from main EA's ClosePosition)
    void OnTradeClosed(int dir, double entry_price)
@@ -289,6 +317,15 @@ public:
    }
 
 private:
+   //--- v25.2: compact skip context appended to every fade-rejection reason
+   //    so the Experts log shows exactly why a detected spike produced no trade.
+   string SkipCtx(const string why)
+   {
+      double body = MathAbs(iClose(_Symbol, PERIOD_M5, 1) - iOpen(_Symbol, PERIOD_M5, 1));
+      return StringFormat("FADE-SKIP %s (body=%.1f prob=%.2f)", why, body,
+                          m_spike_detector_obj.GetSpikeProbability());
+   }
+
    //--- Check for post-spike fade opportunity
    int CheckPostSpikeFade(double &entry, double &sl, double &tp, string &reason)
    {
@@ -299,7 +336,10 @@ private:
       ArraySetAsSeries(atr, true);
       if(m_atr_handle == INVALID_HANDLE) return 0;
       if(CopyBuffer(m_atr_handle, 0, 1, 1, atr) < 1) return 0;
-      if(atr[0] <= 0 || (m_min_atr_points > 0 && atr[0] / _Point < m_min_atr_points)) return 0;
+      if(atr[0] <= 0)
+         { reason = SkipCtx("ATR=0"); return 0; }
+      if(m_min_atr_points > 0 && atr[0] / _Point < m_min_atr_points)
+         { reason = SkipCtx(StringFormat("ATR-LOW %.0fpts<%.0f", atr[0]/_Point, m_min_atr_points)); return 0; }
       
       double current_price = iClose(_Symbol, PERIOD_M5, 0);
       int bars_since_spike = m_spike_detector_obj.GetGrindDuration();  // approximate
@@ -311,28 +351,34 @@ private:
          double spike_low = iLow(_Symbol, PERIOD_M5, 1);
          double spike_body_signed = iClose(_Symbol, PERIOD_M5, 1) - iOpen(_Symbol, PERIOD_M5, 1);
          double spike_body = MathAbs(spike_body_signed);
-         if(m_require_spike_direction && spike_body_signed >= 0) return 0;
+         if(m_require_spike_direction && spike_body_signed >= 0)
+            { reason = SkipCtx(StringFormat("DIR body=%+.1f need<0", spike_body_signed)); return 0; }
          
-         if(spike_body > 0 && current_price > spike_low)
-         {
-            double retrace = (current_price - spike_low) / spike_body;
-            
-            // Enter if retracted in optimized window
-            if(retrace >= m_fade_r_entry && retrace <= m_fade_retrace_max)
-            {
-               entry = current_price;
-               sl = entry - m_fade_sl_atr_mult * atr[0];
-               tp = entry + m_fade_tp_atr_mult * atr[0];
-               
-               // Ensure TP is above spike high and preserves minimum R:R.
-               double spike_high = iHigh(_Symbol, PERIOD_M5, 1);
-               if(tp < spike_high) tp = spike_high + atr[0] * 0.2;
-               if((tp-entry) / MathMax(entry-sl, _Point) < m_min_rr) return 0;
-               
-               reason = StringFormat("CB-FADE-BUY retrace=%.0f%% bars=%d", retrace*100, bars_since_spike);
-               return 1;  // BUY
-            }
-         }
+         if(spike_body <= 0 || current_price <= spike_low)
+            { reason = SkipCtx("NO-RETRACE px<=spikeLow"); return 0; }
+         
+         double retrace = (current_price - spike_low) / spike_body;
+         double r_entry = ScaledFadeEntry(spike_body);   // v25.7 size-scaled
+         
+         // Enter if retracted in optimized window; otherwise say exactly why not
+         if(retrace < r_entry)
+            { reason = SkipCtx(StringFormat("RETRACE-LOW %.0f%%<%.0f%%", MathRound(retrace*20.0)*5.0, r_entry*100.0)); return 0; }
+         if(retrace > m_fade_retrace_max)
+            { reason = SkipCtx(StringFormat("RETRACE-HIGH %.0f%%>%.0f%%", MathRound(retrace*20.0)*5.0, m_fade_retrace_max*100.0)); return 0; }
+         
+         entry = current_price;
+         sl = entry - m_fade_sl_atr_mult * atr[0];
+         tp = entry + m_fade_tp_atr_mult * atr[0];
+         
+         // Ensure TP is above spike high and preserves minimum R:R.
+         double spike_high = iHigh(_Symbol, PERIOD_M5, 1);
+         if(tp < spike_high) tp = spike_high + atr[0] * 0.2;
+         double rr_buy = (tp-entry) / MathMax(entry-sl, _Point);
+         if(rr_buy < m_min_rr)
+            { reason = SkipCtx(StringFormat("RR-LOW %.1f<%.1f (TP clamped @spike high)", rr_buy, m_min_rr)); return 0; }
+         
+         reason = StringFormat("CB-FADE-BUY retrace=%.0f%% bars=%d", retrace*100, bars_since_spike);
+         return 1;  // BUY
       }
       //--- BOOM index: spikes go UP → fade by SELLING
       else
@@ -340,26 +386,32 @@ private:
          double spike_high = iHigh(_Symbol, PERIOD_M5, 1);
          double spike_body_signed = iClose(_Symbol, PERIOD_M5, 1) - iOpen(_Symbol, PERIOD_M5, 1);
          double spike_body = MathAbs(spike_body_signed);
-         if(m_require_spike_direction && spike_body_signed <= 0) return 0;
+         if(m_require_spike_direction && spike_body_signed <= 0)
+            { reason = SkipCtx(StringFormat("DIR body=%+.1f need>0", spike_body_signed)); return 0; }
          
-         if(spike_body > 0 && current_price < spike_high)
-         {
-            double retrace = (spike_high - current_price) / spike_body;
-            
-            if(retrace >= m_fade_r_entry && retrace <= m_fade_retrace_max)
-            {
-               entry = current_price;
-               sl = entry + m_fade_sl_atr_mult * atr[0];
-               tp = entry - m_fade_tp_atr_mult * atr[0];
-               
-               double spike_low = iLow(_Symbol, PERIOD_M5, 1);
-               if(tp > spike_low) tp = spike_low - atr[0] * 0.2;
-               if((entry-tp) / MathMax(sl-entry, _Point) < m_min_rr) return 0;
-               
-               reason = StringFormat("CB-FADE-SELL retrace=%.0f%% bars=%d", retrace*100, bars_since_spike);
-               return -1;  // SELL
-            }
-         }
+         if(spike_body <= 0 || current_price >= spike_high)
+            { reason = SkipCtx("NO-RETRACE px>=spikeHigh"); return 0; }
+         
+         double retrace = (spike_high - current_price) / spike_body;
+         double r_entry = ScaledFadeEntry(spike_body);   // v25.7 size-scaled
+         
+         if(retrace < r_entry)
+            { reason = SkipCtx(StringFormat("RETRACE-LOW %.0f%%<%.0f%%", MathRound(retrace*20.0)*5.0, r_entry*100.0)); return 0; }
+         if(retrace > m_fade_retrace_max)
+            { reason = SkipCtx(StringFormat("RETRACE-HIGH %.0f%%>%.0f%%", MathRound(retrace*20.0)*5.0, m_fade_retrace_max*100.0)); return 0; }
+         
+         entry = current_price;
+         sl = entry + m_fade_sl_atr_mult * atr[0];
+         tp = entry - m_fade_tp_atr_mult * atr[0];
+         
+         double spike_low = iLow(_Symbol, PERIOD_M5, 1);
+         if(tp > spike_low) tp = spike_low - atr[0] * 0.2;
+         double rr_sell = (entry-tp) / MathMax(sl-entry, _Point);
+         if(rr_sell < m_min_rr)
+            { reason = SkipCtx(StringFormat("RR-LOW %.1f<%.1f (TP clamped @spike low)", rr_sell, m_min_rr)); return 0; }
+         
+         reason = StringFormat("CB-FADE-SELL retrace=%.0f%% bars=%d", retrace*100, bars_since_spike);
+         return -1;  // SELL
       }
       
       return 0;
