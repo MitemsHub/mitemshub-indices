@@ -115,10 +115,10 @@ InpAutoBlockTime=false
 InpCrashBoomMode=true
 InpIsCrashIndex=true
 InpCBSpikeThreshold=2.2
-InpCBMicroFade=true     ; v25.8 small-spike fade at reduced risk (0.5x-1.0x)
-InpCBTickFade=true      ; v25.8 fade fires on the tick spike itself
+InpCBMicroFade=true     ; v25.9 small-spike fade at reduced risk (0.5x-1.0x)
+InpCBTickFade=true      ; v25.9 fade fires on the tick spike itself
 InpCBTickSpikePts=3.0   ; min tick jump (points) = spike
-InpCBTickFadeTOSec=900    ; v25.8 big spikes retrace slowly
+InpCBTickFadeTOSec=900    ; v25.9 big spikes retrace slowly
 InpCBMaxSpikeProb=0.70
 InpCBFadeR=0.3
 InpCBFadeSL=0.4
@@ -130,5 +130,5 @@ InpCBRequireSpikeDirection=true
 InpCBMinATRPoints=0       ; DISABLED - fade-only mode (v25)
 
 InpTickRecordEnabled=true
-InpTickFlushTicks=100    ; v25.8 live-analysis cadence
-InpTickFlushSeconds=10    ; v25.8
+InpTickFlushTicks=100    ; v25.9 live-analysis cadence
+InpTickFlushSeconds=10    ; v25.9

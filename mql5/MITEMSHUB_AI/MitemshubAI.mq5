@@ -71,7 +71,7 @@
 //|  - Entry/regime TF overrides, telemetry journal                  |
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
-#define APP_VERSION "25.8"
+#define APP_VERSION "25.9"
 
 //--- v25.2: single source of truth for the version string.
 //--- #property version, every log tag, and every order comment derive from
@@ -403,6 +403,13 @@ int OnInit()
       PrintFormat(VTAG+"Crash/Boom mode: %s | spike_thresh=%.1f | max_prob=%.2f | risk=%.2f%% | grind=%s | micro=%s",
                   InpIsCrashIndex?"CRASH":"BOOM", InpCBSpikeThreshold, InpCBMaxSpikeProb, InpCBBaseRisk,
                   InpCBEnableGrind?"ON":"OFF", InpCBMicroFade?"ON":"OFF");
+      // v25.9: make a stale remembered-parameter attach impossible to miss.
+      if(!InpCBMicroFade)
+         Print(VTAG+"WARNING: micro=OFF on "+_Symbol+
+               " — click Load in the EA dialog and pick MitemshubAI_BOOM1000_CB.set (MQL5\\Presets)");
+      if(!InpCBTickFade)
+         Print(VTAG+"WARNING: TickFade=OFF on "+_Symbol+
+               " — the same Load fixes it (InpCBTickFade=true)");
    }
    else
    {

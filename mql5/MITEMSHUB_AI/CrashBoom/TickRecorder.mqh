@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                    CrashBoom/TickRecorder.mqh    |
-//|  MITEMSHUB AI — ALWAYS-ON TICK RECORDER (v25.8)                  |
+//|  MITEMSHUB AI — ALWAYS-ON TICK RECORDER (v25.9)                  |
 //|                                                                  |
 //|  Persists every Boom/Crash tick to disk for offline              |
 //|  microstructure analysis (tick speed, direction clusters, size   |
@@ -63,6 +63,7 @@ private:
      }
 
    //--- Open (or create) today's file.  Header on first create.
+   //--- v25.9: never clobber a live handle on failure — commit locally.
    bool OpenFile(const datetime now)
      {
       m_day = DayTag(now);
@@ -70,10 +71,11 @@ private:
       // v25.5: FILE_SHARE_READ lets offline analysis tools read/copy the live
       // CSV while the EA keeps writing — without it the file is exclusively
       // locked and external readers get "device or resource busy".
-      m_handle = FileOpen(FileName(m_day),
-                          FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_SHARE_READ);
-      if(m_handle == INVALID_HANDLE)
+      const int h = FileOpen(FileName(m_day),
+                             FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_SHARE_READ);
+      if(h == INVALID_HANDLE)
          return(false);
+      m_handle = h;
       if(FileSize(m_handle) == 0)
         {
          FileSeek(m_handle, 0, SEEK_SET);
@@ -153,8 +155,8 @@ public:
       CloseFile();
      }
 
-   //--- Initialize.  A transient open failure no longer disables the
-   //--- recorder (v25.8): it stays enabled and retries from OnTick.
+   //--- Initialize.  Safe to call again on a persistent object (v25.9):
+   //--- closes any stale handle first, then retries transient open failures.
    bool Init(const string symbol,
              const bool enabled,
              const int flush_every_ticks,
@@ -171,6 +173,8 @@ public:
       if(!m_enabled)
          return(true);
       const datetime now = TimeCurrent();
+      CloseFile();                       // v25.9: re-init (param confirm / TF change) keeps globals
+                                         // alive — closing the stale handle first stops the 5004-forever lock
       m_open_failures  = 0;
       m_next_warn_time = 0;
       if(!TryReopen(now))
