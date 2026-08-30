@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                    CrashBoom/TickRecorder.mqh    |
-//|  MITEMSHUB AI — ALWAYS-ON TICK RECORDER (v25.1)                  |
+//|  MITEMSHUB AI — ALWAYS-ON TICK RECORDER (v25.8)                  |
 //|                                                                  |
 //|  Persists every Boom/Crash tick to disk for offline              |
 //|  microstructure analysis (tick speed, direction clusters, size   |
@@ -38,6 +38,9 @@ private:
    int      m_last_flush_time;      // epoch seconds of last flush
    int      m_total_recorded;       // lifetime rows (this session)
    string   m_pending;              // buffered CSV rows (no per-tick I/O)
+   int      m_open_failures;        // v25.8: consecutive open failures (backoff)
+   int      m_next_retry_time;      // v25.8: epoch of next open attempt
+   int      m_next_warn_time;       // v25.8: throttle repeated warnings
 
    //--- Server-midnight epoch for the given instant
    static datetime DayStart(const datetime now)
@@ -85,6 +88,26 @@ private:
       return(true);
      }
 
+   //--- v25.8: open attempt with retry bookkeeping; false on failure.
+   //--- A transient 5004 (file briefly locked by a reader/AV scan) used to
+   //--- disable the recorder forever; now it retries from later ticks.
+   bool TryReopen(const datetime now)
+     {
+      if(OpenFile(now))
+         return(true);
+      m_open_failures++;
+      int       shift   = MathMin(m_open_failures, 4);   // 15s -> 30 -> 60 -> 120 -> 240s
+      const int backoff = 15 * (1 << shift);
+      m_next_retry_time = (int)now + backoff;
+      if((int)now >= m_next_warn_time)
+        {
+         PrintFormat("[TickRecorder] open failed (error %d) — will retry in %ds (attempt %d)",
+                     GetLastError(), backoff, m_open_failures);
+         m_next_warn_time = (int)now + 300;             // warn at most every 5 minutes
+        }
+      return(false);
+     }
+
    //--- Close the current file, flushing whatever remains
    void CloseFile()
      {
@@ -119,6 +142,9 @@ public:
       m_last_flush_time  = 0;
       m_total_recorded   = 0;
       m_pending          = "";
+      m_open_failures    = 0;
+      m_next_retry_time  = 0;
+      m_next_warn_time   = 0;
      }
 
    ~CTickRecorder()
@@ -127,8 +153,8 @@ public:
       CloseFile();
      }
 
-   //--- Initialize.  Returns false (and disables itself) when the
-   //--- first file cannot be opened; trading is unaffected either way.
+   //--- Initialize.  A transient open failure no longer disables the
+   //--- recorder (v25.8): it stays enabled and retries from OnTick.
    bool Init(const string symbol,
              const bool enabled,
              const int flush_every_ticks,
@@ -145,12 +171,12 @@ public:
       if(!m_enabled)
          return(true);
       const datetime now = TimeCurrent();
-      if(!OpenFile(now))
+      m_open_failures  = 0;
+      m_next_warn_time = 0;
+      if(!TryReopen(now))
         {
-         PrintFormat("[TickRecorder] DISABLED — cannot open %s (error %d)",
-                     FileName(DayTag(now)), GetLastError());
-         m_enabled = false;
-         return(false);
+         // v25.8: keep recording enabled — retry automatically on later ticks.
+         return(true);
         }
       m_last_flush_time = (int)now;
       PrintFormat("[TickRecorder] ON — %s | flush every %d ticks or %ds",
@@ -164,9 +190,23 @@ public:
       if(!m_enabled)
          return;
       const datetime now = TimeCurrent();
+      if(m_handle == INVALID_HANDLE)
+        {
+         // v25.8: transient open failure — retry with backoff, never self-disable.
+         if((int)now < m_next_retry_time)
+            return;                            // ticks are skipped while unavailable
+         if(!TryReopen(now))
+            return;
+         PrintFormat("[TickRecorder] RECOVERED — %s open after %d failed attempt(s)",
+                     FileName(m_day), m_open_failures);
+         m_open_failures = 0;
+        }
       if(!EnsureCurrentFile(now))
         {
-         // Disk hiccup: drop this tick, retry on a later tick.
+         // Disk hiccup (e.g. day-rollover open race): drop this tick,
+         // back off and retry on a later tick.
+         m_open_failures++;
+         m_next_retry_time = (int)now + 30;
          return;
         }
       const double mid = (bid + ask) / 2.0;

@@ -1,4 +1,4 @@
-; MITEMSHUB AI v25.7 — Boom 1000 CRASH/BOOM profile
+; MITEMSHUB AI v25.8 — Boom 1000 CRASH/BOOM profile
 ; Optimized for Boom 1000 Index on M5 timeframe
 ; Generated 2026-08-28 with full intelligence suite
 ;
@@ -13,7 +13,7 @@
 ; Risk: Conservative (0.30% per trade, scales with spike probability)
 ; Magic: 7788100 — fleet exposure guard compliant
 ;
-; v25.7 Intelligence Layers:
+; v25.8 Intelligence Layers:
 ;   1. SpikeDetector — tick speed + candle body analysis
 ;   2. TickPatternAnalyzer — individual tick precursor scoring
 ;   3. MultiTimeframeConfirm — M1+M5+M15 agreement required
@@ -114,10 +114,10 @@ InpAutoBlockTime=false
 InpCrashBoomMode=true
 InpIsCrashIndex=false
 InpCBSpikeThreshold=2.2
-InpCBMicroFade=true     ; v25.7 small-spike fade at reduced risk (0.5x-1.0x)
-InpCBTickFade=true      ; v25.7 fade fires on the tick spike itself
+InpCBMicroFade=true     ; v25.8 small-spike fade at reduced risk (0.5x-1.0x)
+InpCBTickFade=true      ; v25.8 fade fires on the tick spike itself
 InpCBTickSpikePts=3.0   ; min tick jump (points) = spike
-InpCBTickFadeTOSec=900    ; v25.7 big spikes retrace slowly
+InpCBTickFadeTOSec=900    ; v25.8 big spikes retrace slowly
 InpCBMaxSpikeProb=0.70
 InpCBFadeR=0.3
 InpCBFadeSL=0.4
@@ -130,5 +130,5 @@ InpCBRequireSpikeDirection=true
 InpCBMinATRPoints=0       ; DISABLED — fade-only mode (v25)
 
 InpTickRecordEnabled=true
-InpTickFlushTicks=100    ; v25.7 live-analysis cadence
-InpTickFlushSeconds=10    ; v25.7
+InpTickFlushTicks=100    ; v25.8 live-analysis cadence
+InpTickFlushSeconds=10    ; v25.8
