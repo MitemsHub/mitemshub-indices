@@ -172,7 +172,7 @@ input double InpBandZEntry       = 2.0;      // |z_dev| fade trigger (R_75/R_100
 input double InpBandVolExtRatio  = 1.25;     // sigma must exceed this x sigma EMA baseline
 input int    InpBandSigmaEmaLen  = 30;       // sigma baseline EMA length (bars)
 input double InpBandStopSigmaMult  = 0.10;   // stop   = 0.10 x sigma_h (validated)
-input double InpBandTargetSigmaMult= 0.80;   // target = 0.80 x sigma_h (R_100; R_75 use 1.20)
+input double InpBandTargetSigmaMult= 0.60;   // target = 0.60 x sigma_h (Boom/Crash 1000 retune: lower DD than 0.80)
 input int    InpBandHoldSec      = 3600;     // band hold horizon (seconds)
 input double InpBandMinRR        = 2.5;      // min reward:risk for band plans
 input double InpBandMaxStopPct   = 0.015;    // reject band plan if stop > 1.5% of price
@@ -248,7 +248,7 @@ input double InpTpMult           = 2.4;
 input int    InpMaxHoldBars      = 20;       // v23: raised from 14 — give winners room (20 bars = 5hr on M15)
 input double InpMaxDailyLossPct  = 0.0;     // 0 = daily-loss halt DISABLED (was 0.03; user request 2026-08-30). DailyLossHalted() returns false when <= 0.
 input int    InpMaxConsecLoss    = 3;        // v23: lowered from 6 — pause sooner, preserve capital
-input int    InpCoolDownBars     = 3;
+input int    InpCoolDownBars     = 1;
 input bool   InpUseTrailing      = true;
 input double InpTrailStartR      = 1.0;      // trailing starts once trade is +1R
 input double InpTrailDistR       = 0.7;      // v23: tightened from 0.9 — lock profit sooner
@@ -326,7 +326,14 @@ input double InpCBFadeR          = 0.4;      // (CUSTOM) fade entry at 0.4R into
 input ENUM_CB_PARAM_SOURCE InpCBFadeSLMode       = CB_PARAM_AUTO;   // Fade SL source
 input double InpCBFadeSL         = 0.3;      // (CUSTOM) fade stop = 0.3x ATR (v26.8)
 input ENUM_CB_PARAM_SOURCE InpCBFadeTPMode       = CB_PARAM_AUTO;   // Fade TP source
-input double InpCBFadeTP         = 4.0;      // (CUSTOM) fade target = 4.0x ATR (v26.8)
+input double InpCBFadeTP         = 3.2;      // (CUSTOM) fade target = 3.2x ATR (v26.15; robustness gate F2 winner)
+//--- v26.15: QUICK-TP tick-fade exit (EXPERIMENTAL — failed robustness gate F2)
+//--- Opt-in via .set only. ON banks a small fixed target (2.5xATR was the best
+//--- small-TP family in scripts/cb_quick_tp_study.py: +42.9R base) but the
+//--- worst session drops to -2.1R vs +1.8R for the deployed TP 3.2 trail-ON
+//--- geometry. OFF keeps the validated profile.
+input bool   InpCBQuickTP       = false;    // Quick-TP tick-fade exit (small fixed target, no trail)
+input double InpCBQuickTPTPMult = 2.5;      // Quick-TP target = this x ATR
 
 input group "=== Tick Fast-Fade (v25.4) ==="
 input bool   InpCBTickFade      = true;     // Fire fades on the tick spike itself (no M5 wait)
@@ -409,6 +416,7 @@ bool   g_sig_is_band=false;
 int    g_last_band_dir=0;
 double g_sig_sl_atr=0, g_sig_tp_atr=0;
 double g_risk_money=0;
+bool   g_pos_tickfade=false;   // v26.15: open position came from the tick-fade leg (quick-TP management gate)
 int    g_max_hold=14;
 
 // trade performance (v23: persisted to file)
@@ -605,7 +613,7 @@ void PrintStartupSelfCheck()
 #define POLICY_MAX_PROB       0.70     // InpCBMaxSpikeProb
 #define POLICY_FADE_R         0.4      // InpCBFadeR (v26.8 grid-search)
 #define POLICY_FADE_SL        0.3      // InpCBFadeSL xATR (v26.8)
-#define POLICY_FADE_TP        4.0      // InpCBFadeTP xATR (v26.8)
+#define POLICY_FADE_TP        3.2      // InpCBFadeTP xATR (v26.15: only geometry passing robustness gate F2)
 #define POLICY_TICK_FADE      true     // InpCBTickFade
 #define POLICY_TICK_PTS       3.0      // InpCBTickSpikePts
 #define POLICY_TICK_TO_SEC    900      // InpCBTickFadeTOSec
@@ -683,6 +691,8 @@ void RunPolicySelfCheck()
           MathAbs(InpCBTickSpikePts - POLICY_TICK_PTS) < 0.005, "");
    PolRow("tick-TO",       StringFormat("%ds", InpCBTickFadeTOSec), "900s",
           InpCBTickFadeTOSec == POLICY_TICK_TO_SEC, "");
+   PolRow("quick-tp",      InpCBQuickTP ? "ON" : "OFF", "OFF",
+          !InpCBQuickTP, "v26.15 experimental — failed robustness gate F2");
    PolRow("max-hold",      StringFormat("%d bars", InpMaxHoldBars), "6 bars",
           InpMaxHoldBars == POLICY_MAX_HOLD_BARS, "");
    PolRow("base-risk",     StringFormat("%.2f%%", InpCBBaseRisk), "0.30%",
@@ -765,6 +775,7 @@ int OnInit()
    LoadReviewState();  // v23.1: restore persisted trade stats + intelligence
    LoadSlipState();    // v26.2: restore spike-slippage counters
    LoadCbSpikeState(); // v26.5: restore learned CB spike gating
+   ReevaluateCbSpikeGate(); // v26.14: stale persisted verdict may not match current evidence (deadlock fix)
    LoadMetaLabelTable(); // v26.14: restore learned P(win) regime multipliers
    RecoverDetachedClose(); // v26.9: journal closes that happened while the EA was detached
    if(InpDrawDashboard) CreateDashboard();
@@ -814,6 +825,7 @@ int OnInit()
       g_cb.SetMicroFade(InpCBMicroFade);
       g_cb.SetTickFade(InpCBTickFade, InpCBTickSpikePts, InpCBTickFadeTOSec);
       g_cb.SetTickFadeGuard((int)InpCBBurstGuardMode, InpCBBurstWindowSec, InpCBBurstMaxSpikes, InpCBBurstMinGapSec);
+      g_cb.SetTickFadeQuickTP(InpCBQuickTP, InpCBQuickTPTPMult);   // v26.15: experimental quick-TP exit (default OFF)
       PrintFormat(VTAG+"Crash/Boom mode: %s | spike_thresh=%.1f | max_prob=%.2f | fade R=%.2f SL=%.2fxATR TP=%.1fxATR | risk=%.2f%% | grind=%s | micro=%s",
                   InpIsCrashIndex?"CRASH":"BOOM",
                   g_cb.GetSpikeThresholdEff(), g_cb.GetMaxSpikeProbEff(),
@@ -954,6 +966,28 @@ bool CbSpikeFacade()
    return false;
 }
 
+//--- v26.14: re-evaluate the learned gate verdict against the CURRENT EWMA
+//    state. The verdict was previously refreshed only after a completed
+//    trade, so once blocked with an empty exploration budget it stayed
+//    blocked forever — the daily quiet-day decay updated expect/sigma/n
+//    but nothing ever re-ran the verdict (the exact deadlock v26.13
+//    intended to fix). Call after state restore and after daily decay.
+void ReevaluateCbSpikeGate()
+{
+   if(!InpCrashBoomMode) return;
+   bool was = g_cb_spike_blocked;
+   g_cb_spike_blocked = CbSpikeFacade();
+   g_cb_spike_was_blocked = g_cb_spike_blocked;
+   if(g_cb_spike_blocked != was)
+   {
+      PrintFormat(VTAG+"CB-SPIKE GATE re-evaluated: %s (mean=%+.2fR sigma=%.2f n=%d probe=%d) — was %s",
+                  g_cb_spike_blocked ? "BLOCKED" : "OPEN",
+                  g_cb_spike_expect, g_cb_spike_sigma, g_cb_spike_n, g_cb_gate_probe,
+                  was ? "BLOCKED" : "OPEN");
+      SaveCbSpikeState();
+   }
+}
+
 //--- Persist per symbol; survives re-attaches and restarts (v26.5)
 void SaveCbSpikeState()
 {
@@ -1063,6 +1097,7 @@ void HandleTradeClose(double exit_p, string reason, ulong deal_ticket)
       g_cb.OnTradeClosed(g_dir, g_entry);
 
    g_ticket=0; g_dir=0; g_bars_held=0; g_high_water_r=0;
+   g_pos_tickfade = false;           // v26.15: position gone — quick-TP management gate off
    g_pending_close_deal = 0;         // v26.4: consumed (or out-of-order event ignored)
 
    // v23.1: Run intelligence review after every trade
@@ -1148,6 +1183,7 @@ void OnTick()
       if(fd != 0 && can_trade)
       {
          g_last_strategy = "CB-TICKFADE";
+         g_pos_tickfade = false;   // v26.15: set true only if this order ACCEPTS (below)
          // v26.13: consume-on-confirm. The spike stays pending inside the
          // engine until the order's fate is known: accepted → TickFadeConfirm
          // (cooldown + M5-path block, exactly the old consume-on-send);
@@ -1156,6 +1192,7 @@ void OnTick()
          // silently eaten by one invalid-stops rejection).
          if(OpenCBTrade(fd, fe, fs, ftp, tfr))
          {
+            g_pos_tickfade = true;   // v26.15: this position is a tick-fade trade
             g_cb.TickFadeConfirm();
             if(g_cb_gate_probe > 0) g_cb_gate_probe--;   // v26.13: exploration budget consumed by a fired fade
          }
@@ -1177,8 +1214,7 @@ void OnTick()
        g_day_start_eq = g_eq;
        g_session_pnl=0;
        g_consec_loss=0;
-       g_cb_reject_today=0;   // v26.12: rejection counter follows the daily reset
-      if(InpCrashBoomMode) DecayCbSpikeLearning();   // v26.13: deadlock fix — EWMA decays on quiet days
+       g_cb_reject_today=0;   // v26.12: rejection counter follows the daily reset       if(InpCrashBoomMode) { DecayCbSpikeLearning(); ReevaluateCbSpikeGate(); }   // v26.13 decay + v26.14: decay must re-arm the gate
       if(g_paused)
       {
          g_paused=false;
@@ -2582,6 +2618,7 @@ void OpenTrade(int direction, string sig_type)
 //+------------------------------------------------------------------+
 bool OpenCBTrade(int direction, double entry, double sl, double tp, string reason)
 {
+   g_pos_tickfade = false;   // v26.15: default — only the tick-fade call site sets this
    double stop_dist = MathAbs(entry - sl);
    double tp_dist = MathAbs(tp - entry);
    if(stop_dist <= 0 || tp_dist <= 0) return(false);
@@ -2780,6 +2817,13 @@ void ManagePosition()
 
    double r_now = g_orig_risk>0 ? (g_dir>0?(bid-g_entry):(g_entry-ask))/g_orig_risk : 0;
 
+   //--- v26.15: QUICK-TP tick-fade position — exits happen at TP, SL or time
+   //    ONLY (matches the study's trail=False replay: scripts/cb_quick_tp_study.py).
+   //    No trailing, no profit locks, no early cut, no breakeven: banking the
+   //    small fixed target is the whole mode. Spike-prob safety exits below
+   //    stay active.
+   bool qtp = (InpCBQuickTP && g_pos_tickfade);
+
    // v24.1: CRASH/BOOM SPIKE-AWARE EXIT — check spike probability first
    if(InpCrashBoomMode && g_cb.IsEnabled())
    {
@@ -2808,7 +2852,8 @@ void ManagePosition()
       // a spike (price moving fast) was the retcode-10016 "invalid stops"
       // source on the Boom chart (SL landed inside the stops level, or the
       // TP sat on the wrong side of a just-gapped price).
-      if(r_now >= 0.5)
+      // v26.15: skipped for quick-TP tick-fade positions (exit at TP/SL/time only).
+      if(!qtp && r_now >= 0.5)
       {
          double cb_dist = 0.4 * g_orig_risk;  // tighter than standard 0.7R
          if(g_dir>0){ double ns=NormalizeDouble(ValidStopForModify(bid-cb_dist,1,g_tp),_Digits); if(ns>g_sl && ns>g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
@@ -2816,7 +2861,7 @@ void ManagePosition()
       }
       
       // CB-specific profit lock: lock at 0.3R if reached 0.8R (tighter than standard)
-      if(g_high_water_r >= 0.8 && r_now <= 0.3 && r_now > 0)
+      if(!qtp && g_high_water_r >= 0.8 && r_now <= 0.3 && r_now > 0)
       {
          PrintFormat(VTAG+"CB PROFIT LOCK — high-water %.2fR now %.2fR", g_high_water_r, r_now);
          ClosePosition("CB-PLOCK");
@@ -2824,7 +2869,7 @@ void ManagePosition()
       }
       
       // CB-specific early cut: 4 bars instead of 6
-      if(g_bars_held >= 4 && r_now <= -0.3 && g_high_water_r < 0.2)
+      if(!qtp && g_bars_held >= 4 && r_now <= -0.3 && g_high_water_r < 0.2)
       {
          PrintFormat(VTAG+"CB EARLY CUT — %d bars R=%.2f", g_bars_held, r_now);
          ClosePosition("CB-ECUT");
@@ -2836,7 +2881,8 @@ void ManagePosition()
    if(r_now > g_high_water_r) g_high_water_r = r_now;
 
    // v23: PROFIT LOCK — trade reached 1R+ then reversed below InpProfitLockR
-   if(g_high_water_r >= 1.0 && r_now <= InpProfitLockR && r_now > 0)
+   // v26.15: skipped for quick-TP tick-fade positions
+   if(!qtp && g_high_water_r >= 1.0 && r_now <= InpProfitLockR && r_now > 0)
    {
       PrintFormat(VTAG+"PROFIT LOCK — high-water %.2fR now at %.2fR, banking profit", g_high_water_r, r_now);
       ClosePosition("PLOCK");
@@ -2844,7 +2890,8 @@ void ManagePosition()
    }
 
    // v23: GRADUATED TIME EXIT — early cut losers that never got profitable
-   if(InpGraduatedExit && g_bars_held >= InpEarlyCutBars && g_bars_held < g_max_hold)
+   // v26.15: skipped for quick-TP tick-fade positions (SL handles losers)
+   if(!qtp && InpGraduatedExit && g_bars_held >= InpEarlyCutBars && g_bars_held < g_max_hold)
    {
       if(r_now <= InpEarlyCutMaxR && g_high_water_r < 0.3)
       {
@@ -2883,7 +2930,8 @@ void ManagePosition()
    // v26.13: validity guard before every PositionModify — on Boom/Crash the
    // price can gap between bid/ask read and the modify call, so an unguarded
    // SL can land inside the broker's stops level → retcode 10016 spam.
-   if(InpUseBreakeven && r_now >= InpBeTriggerR)
+   // v26.15: skipped for quick-TP tick-fade positions.
+   if(!qtp && InpUseBreakeven && r_now >= InpBeTriggerR)
    {
       double be = g_dir>0 ? g_entry+2*_Point : g_entry-2*_Point;
       if((g_dir>0 && g_sl<be) || (g_dir<0 && g_sl>be))

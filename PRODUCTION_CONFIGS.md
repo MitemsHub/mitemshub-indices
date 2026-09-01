@@ -139,6 +139,7 @@ Built into the main EA, these run on every bar close:
 | `InpCBFadeRMode` / `InpCBFadeR` | 1 (CUSTOM, 0.4R) | 1 (CUSTOM, 0.4R) | v26.8 grid-search (deeper retrace entry, was 0.3) + v26.10 AUTO/CUSTOM: compiled AUTO(0) = profile 0.4; compiled numeric default corrected 0.3→0.4 |
 | `InpCBFadeSLMode` / `InpCBFadeSL` | 1 (CUSTOM, 0.3xATR) | 1 (CUSTOM, 0.3xATR) | v26.8 grid-search (tighter stop, was 0.4) + v26.10: compiled numeric default corrected 0.5→0.3 |
 | `InpCBFadeTPMode` / `InpCBFadeTP` | 1 (CUSTOM, 4.0xATR) | 1 (CUSTOM, 4.0xATR) | v26.8 grid-search (wider target to ride the post-spike drift, was Boom 3.2 / Crash 3.5) + v26.10: compiled numeric default corrected 1.5→4.0 |
+| `InpCBQuickTP` / `InpCBQuickTPTPMult` | false / 2.5 | false / 2.5 | **v26.15 EXPERIMENTAL — default OFF.** Quick-TP tick-fade exit: banks a small fixed target (`InpCBQuickTPTPMult` x ATR) and disables trailing/profit-lock/early-cut/breakeven on tick-fade positions (exits at TP/SL/time only, exactly the trail=False replay in `scripts/cb_quick_tp_study.py`). Study evidence: TP 2.5xATR trail-OFF was the BEST small-TP family (+42.9R base over the 3 recorded sessions) but it **FAILED robustness gate F2** — worst session −2.1R vs +1.8R for the deployed TP 3.2 trail-ON geometry, and every TP ≤ 2.5 lost the +10R runners that pay for the stop-outs. Do not enable without accepting deeper worst-case session drawdowns |
 | `InpEarlyCutBars` | 5 | 4 | Faster exit for CB |
 | `InpEarlyCutMaxR` | -0.35R | -0.30R | Tighter early cut |
 | `InpProfitLockR` | 0.4R | 0.35R | Tighter profit lock |

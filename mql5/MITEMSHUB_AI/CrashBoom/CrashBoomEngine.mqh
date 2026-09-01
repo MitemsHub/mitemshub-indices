@@ -68,6 +68,10 @@ private:
    datetime m_tf_t0;                 // spike time
    double   m_tick_fade_ratio;       // spike/body-EMA ratio for risk sizing (consume-once)
 
+   //--- v26.15: QUICK-TP tick-fade exit mode (opt-in via .set; default OFF)
+   bool     m_tick_fade_quick_tp;    // bank a small fixed target, no trail/lock management
+   double   m_tick_fade_qtp_mult;    // quick-TP target = this x ATR
+
    //--- v26.0: spike-burst guard state (tick-fade throttle)
    bool     m_burst_guard;           // skip tick fades while spikes cluster
    int      m_burst_window_sec;      // rolling window (s) for cluster counting
@@ -164,6 +168,8 @@ public:
       m_tf_jump = 0;
       m_tf_t0 = 0;
       m_tick_fade_ratio = 0;
+      m_tick_fade_quick_tp = false;
+      m_tick_fade_qtp_mult = 2.5;
       m_burst_guard = false;
       m_burst_window_sec = 1800;
       m_burst_max_spikes = 2;
@@ -354,11 +360,15 @@ public:
       if(atr <= 0) return 0;
       
       //--- geometry mirrors the M5 fade (SL/TP in ATR units, R:R gate)
+      //--- v26.15: QUICK-TP mode swaps the fade TP for the small fixed target
+      //    (management changes live on the EA side, gated per open position)
       entry = bid;
+      double tp_mult = m_tick_fade_quick_tp ? m_tick_fade_qtp_mult
+                                            : m_strategy.GetFadeTP();
       if(m_is_crash)
       {
          sl = entry - m_strategy.GetFadeSL() * atr;
-         tp = entry + m_strategy.GetFadeTP() * atr;
+         tp = entry + tp_mult * atr;
          if(tp < m_tf_pre) tp = m_tf_pre + atr * 0.2;   // keep TP above spike high
          double rr = (tp - entry) / MathMax(entry - sl, _Point);
          if(rr < m_strategy.GetMinRR())
@@ -374,7 +384,7 @@ public:
       else
       {
          sl = entry + m_strategy.GetFadeSL() * atr;
-         tp = entry - m_strategy.GetFadeTP() * atr;
+         tp = entry - tp_mult * atr;
          if(tp > m_tf_pre) tp = m_tf_pre - atr * 0.2;   // keep TP below pre-spike level
          double rr = (entry - tp) / MathMax(sl - entry, _Point);
          if(rr < m_strategy.GetMinRR())
@@ -618,6 +628,7 @@ public:
    double GetMaxSpikeProbEff()   const { return m_strategy.GetMaxSpikeProb(); }
    double GetFadeREff()          const { return m_strategy.GetFadeR(); }
    double GetFadeSLEff()         const { return m_strategy.GetFadeSL(); }   double GetFadeTPEff()          const { return m_strategy.GetFadeTP(); }
+   bool   GetTickFadeQuickTP()   const { return m_tick_fade_quick_tp; }   // v26.15
    bool   GetBurstGuardActive()   const { return m_burst_guard; }   // v26.10: post-resolution guard state (policy self-check)
    
    //--- Get risk description
@@ -655,6 +666,25 @@ public:
       m_tick_spike_pts    = MathMax(0.5, spike_pts);
       m_tick_fade_timeout = MathMax(60, timeout_sec);
       if(on) PrintFormat("[CB-TICKFADE] armed: spike>=%.1fpts timeout=%ds", m_tick_spike_pts, m_tick_fade_timeout);
+   }
+
+   //--- v26.15: QUICK-TP exit for the tick-fade leg. OFF (default) keeps the
+   //    validated big-TP + trailing geometry. ON banks a small fixed target
+   //    (InpCBQuickTPTPMult x ATR) and the EA disables trail/profit-lock/
+   //    early-cut management on tick-fade trades — exits happen at TP, SL or
+   //    time only. Study evidence (scripts/cb_quick_tp_study.py, robustness
+   //    gate F1-F4): TP 2.5xATR trail-OFF was the BEST small-TP family
+   //    (+42.9R base over 3 recorded sessions) but it FAILED gate F2
+   //    (worst session -2.1R vs +1.8R for the deployed TP 3.2 trail-ON).
+   //    Experimental: expect more frequent smaller wins, deeper worst-case
+   //    session drawdowns. Do not enable without accepting that trade-off.
+   void SetTickFadeQuickTP(const bool on, const double tp_mult)
+   {
+      m_tick_fade_quick_tp = on;
+      m_tick_fade_qtp_mult = MathMax(0.5, tp_mult);
+      if(on) PrintFormat("[CB-TICKFADE] QUICK-TP mode: target=%.1fxATR — trail/profit-lock "
+                         "management DISABLED on tick-fade trades (experimental, failed F2)",
+                         m_tick_fade_qtp_mult);
    }
    
    //--- v26.0: spike-burst guard configuration

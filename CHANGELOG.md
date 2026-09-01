@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [MITEMSHUB AI EA v26.15] - 2026-09-01
+
+### Added — Quick-TP tick-fade exit mode (v26.15)
+- **`InpCBQuickTP` / `InpCBQuickTPTPMult` (default OFF / 2.5)** — opt-in Quick-TP exit for the tick-fade leg: banks a small fixed target (`N x ATR`) and disables trailing, profit locks, early cut and breakeven on tick-fade positions (exits at TP/SL/time only). The M5 fade path and Volatility-mode management are untouched.
+- Backed by `scripts/cb_quick_tp_study.py` (new): EA-order tick-fade replay with a TP × minRR × trail-mode × cooldown × hold sweep over all recorded Boom/Crash 1000 tick sessions, plus an EA-faithful band-fade target/cooldown sweep on the 104-day M5 caches, plus the F1–F4 robustness gate (≥4 trades, no session < −1.5R, ATR ×0.8/×1.2 ≥ 0R, spread ×1.5 ≥ 0R).
+- **Study verdict (why the mode ships OFF):** only TP ≥ 3.2×ATR geometries survive the gate; the deployed TP 4.0 trail-ON itself fails F2 (worst session −3.8R, ATR ×1.2 stress +0.8R). Quick-TP's best family (TP 2.5×ATR, trail off, +42.9R base) fails F2 at −2.1R — cutting the target truncates the +10R runners that pay for the stop-outs. Both deployed .set files carry the new keys at OFF; policy table logs `quick-tp`.
+
 ## [MITEMSHUB AI EA v25.1] - 2026-08-29
 
 ### Overview
