@@ -7,8 +7,13 @@ EVERY session in artifacts/ticks/ into one verdict:
   - Per-session coverage: ticks, duration, gaps (>60s), spike count
   - Coverage gate: sessions with <2h span or >10% gap-time are flagged and
     excluded from the headline verdict (marked "partial")
-  - Tick-fade replay per session using the EA-faithful geometry
-    (SL 0.3xATR-approx, TP 3.2x target, facade-gated expectancy guard)
+  - Tick-fade replay per session using the EA-FAITHFUL simulator from
+    cb_quick_tp_study.py: the entry fires on a recorded tick SPIKE (jump
+    >= TICK_SPIKE_PTS against the grind) once its retrace enters the
+    size-scaled window — NOT on every 3-tick micro-streak, which fired on
+    ~7k trades/session and measured nothing but the heuristic's own noise.
+    Geometry: SL 0.3xATR, TP 3.2x (v26.15 robustness gate F2 winner),
+    min-RR 2.0, hold 2400s, full trailing, facade-gated expectancy guard.
   - Aggregate verdict: keep/kill decision with a pre-registered kill gate
 
 Usage:
@@ -28,20 +33,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from scripts.cb_quick_tp_study import simulate_tick_fade, m5_atr_from_ticks, score, SESSIONS as STUDY_SESSIONS
+
 TICKS_DIR = ROOT / "artifacts" / "ticks"
 OUT_PATH = ROOT / "artifacts" / "tick_fade_verdict.json"
 
 # --- EA-faithful tick-fade geometry (v26.15/26.16) ---
 SPREAD = 0.483          # points, measured Boom/Crash 1000 spread
-SL_RISK = 1.0           # R normalized: every stop = -1R
 TP_MULT = 3.2           # TP = 3.2 x ATR (robustness gate F2 winner)
-ATR_PROXY_WINDOW = 50   # rolling window of tick mid changes for "ATR" proxy
+SL_MULT = 0.3           # SL = 0.3 x ATR
+FADE_R = 0.4            # fade entry anchor (v26.8)
+HOLD_S = 2400           # position hold
+MIN_RR = 2.0            # deployed min-RR gate
+TRAIL = True            # deployed: full trailing on tick fades
 SPIKE_JUMP = 3.0        # points; matches EA recorder's spike threshold
 GAP_SECONDS = 60        # recording gap threshold
-FACADE_MIN_TRADES = 4   # facade gate: min trades before blocking
-FACADE_FLOOR = -0.10    # facade gate: expectancy floor (R)
-FACADE_ALPHA = 0.15     # facade gate: EWMA alpha
 MIN_HOURS_DEFAULT = 2.0  # coverage gate: minimum session span
+
+# Facade gate (mirrors the EA's EWMA gate, hardened by the v26.13 fix)
+FACADE_MIN_TRADES = 4   # min closed trades before the gate may block
+FACADE_FLOOR = -0.10    # EWMA expectancy floor (R)
+FACADE_ALPHA = 0.15     # EWMA alpha
 
 KILL_GATE = {
     "min_sessions": 10,
@@ -49,6 +63,10 @@ KILL_GATE = {
     "min_pf": 1.15,
     "min_expectancy": 0.05,
 }
+
+# Per-symbol retrace ceilings from the study's SESSIONS table
+# (Boom 0.60 / Crash 0.50); symbol inferred from the file name.
+RE_MAX = {"Boom": 0.60, "Crash": 0.50}
 
 
 def load_session(path: Path) -> dict:
@@ -76,7 +94,7 @@ def load_session(path: Path) -> dict:
     gap_total = sum(gaps)
     gap_frac = gap_total / span_s if span_s > 0 else 1.0
 
-    # spike count (mid jumps)
+    # spike count (mid jumps) — informational, matches the EA recorder's counter
     spikes = 0
     prev_mid = None
     for _, bid, ask in rows:
@@ -85,9 +103,10 @@ def load_session(path: Path) -> dict:
             spikes += 1
         prev_mid = mid
 
+    symbol = "Boom" if "Boom" in path.name else ("Crash" if "Crash" in path.name else "?")
     return {
         "file": path.name,
-        "symbol": ("Boom" if "Boom" in path.name else "Crash" if "Crash" in path.name else "?"),
+        "symbol": symbol,
         "day": path.stem.split("_")[-1],
         "ticks": len(rows),
         "span_seconds": span_s,
@@ -102,79 +121,37 @@ def load_session(path: Path) -> dict:
 
 
 def replay_tick_fade(session: dict) -> dict:
-    """EA-faithful simplified tick-fade replay on one session.
+    """EA-faithful tick-fade replay on one session.
 
-    Signals: fade 2+ consecutive same-direction spike bursts (the tick-fade
-    entry heuristic used in cb_burst_guard_backtest.py). Exits: SL (-1R),
-    TP (+TP_MULT x SL distance / SL distance = +3.2R approx normalized),
-    or session end (marked open -> excluded).
+    Uses the validated EA-order simulator from cb_quick_tp_study.py:
+    the entry fires on a recorded tick SPIKE (jump >= 3 pts against the
+    grind) once its retrace enters the size-scaled window, with the
+    deployed geometry (SL 0.3xATR, TP 3.2x, min-RR 2.0, hold 2400s,
+    full trailing). Open-at-end trades are excluded from the aggregates.
     """
     rows = session["rows"]
-    mids = [(ts, (b + a) / 2.0) for ts, b, a in rows]
-    trades = []
+    symbol = session.get("symbol", "?")
+    is_crash = symbol == "Crash"
+    re_max = RE_MAX.get(symbol, 0.60)
+    atr = m5_atr_from_ticks(rows)
+    if atr <= 0:
+        return {"trades": 0, "closed": 0, "open_at_end": 0, "wins": 0,
+                "losses": 0, "win_rate": None, "total_r": 0.0, "pf": None,
+                "expectancy_r": None}
+    trades = simulate_tick_fade(rows, is_crash, atr, sl_mult=SL_MULT,
+                                tp_mult=TP_MULT, fade_r=FADE_R, re_max=re_max,
+                                hold_s=HOLD_S, min_rr=MIN_RR, trail=TRAIL,
+                                cooldown_s=0, spread=SPREAD)
+    return summarize(trades)
 
-    # rolling "ATR" proxy: mean abs mid change over window
-    diffs = []
-    i = 1
-    state = "flat"          # flat | armed_up | armed_down
-    streak_dir = 0
-    streak_count = 0
-    pos = None              # open trade dict
 
-    for j in range(1, len(mids)):
-        ts, mid = mids[j]
-        prev_ts, prev_mid = mids[j - 1]
-        d = mid - prev_mid
-        diffs.append(abs(d))
-        atr = sum(diffs[-ATR_PROXY_WINDOW:]) / len(diffs[-ATR_PROXY_WINDOW:]) if diffs else 0.5
-        if atr <= 0:
-            atr = 0.5
-
-        # manage open position
-        if pos is not None:
-            move = (mid - pos["entry"]) * (1 if pos["dir"] > 0 else -1)
-            if move <= -atr * 0.3:          # SL at 0.3xATR against us
-                pos["result"] = -1.0
-                pos["exit"] = "SL"
-                trades.append(pos)
-                pos = None
-            elif move >= atr * 0.3 * TP_MULT:  # TP at 3.2x
-                pos["result"] = TP_MULT
-                pos["exit"] = "TP"
-                trades.append(pos)
-                pos = None
-            continue
-
-        # streak detection (spike-burst heuristic)
-        cur_dir = 1 if d > 0 else (-1 if d < 0 else 0)
-        if cur_dir != 0 and cur_dir == streak_dir:
-            streak_count += 1
-        else:
-            streak_dir = cur_dir
-            streak_count = 1 if cur_dir != 0 else 0
-
-        # entry: fade a 3-tick same-direction burst (contrarian)
-        if streak_count >= 3 and streak_dir != 0:
-            pos = {
-                "entry_ts": ts,
-                "entry": mid,
-                "dir": -streak_dir,   # fade the burst
-                "exit": None,
-                "result": None,
-            }
-            streak_count = 0
-
-    if pos is not None:
-        pos["exit"] = "OPEN"
-        trades.append(pos)
-
-    closed = [t for t in trades if t["exit"] in ("SL", "TP")]
-    wins = [t for t in closed if t["result"] > 0]
-    losses = [t for t in closed if t["result"] <= 0]
-    gross_win = sum(t["result"] for t in wins)
-    gross_loss = abs(sum(t["result"] for t in losses))
-    total_r = sum(t["result"] for t in closed)
-
+def summarize(trades: list) -> dict:
+    closed = [t for t in trades if t["reason"] in ("TARGET", "STOP", "TIME")]
+    wins = [t for t in trades if t["r"] > 0]
+    losses = [t for t in trades if t["r"] <= 0]
+    gw = sum(t["r"] for t in wins)
+    gl = abs(sum(t["r"] for t in losses))
+    total_r = sum(t["r"] for t in closed)
     return {
         "trades": len(trades),
         "closed": len(closed),
@@ -183,95 +160,51 @@ def replay_tick_fade(session: dict) -> dict:
         "losses": len(losses),
         "win_rate": round(len(wins) / len(closed), 3) if closed else None,
         "total_r": round(total_r, 2),
-        "pf": round(gross_win / gross_loss, 3) if gross_loss > 0 else (None if gross_win == 0 else math.inf),
+        "pf": round(gw / gl, 3) if gl > 0 else (None if gw == 0 else math.inf),
         "expectancy_r": round(total_r / len(closed), 3) if closed else None,
     }
 
 
 def facade_guard_simulate(session: dict, replay: dict) -> dict:
-    """Rough facade-gate projection: blocks trading once trailing expectancy
-    drops below the floor after FACADE_MIN_TRADES. Applied as a filter on the
-    sequential trade list (trades after the gate closes are discarded)."""
-    rows = session["rows"]
-    if not rows:
-        return replay
-    # Rebuild sequential trade results with timestamps
-    trades = []
-    # rerun replay but keep sequence with timestamps
-    mids = [(ts, (b + a) / 2.0) for ts, b, a in rows]
-    diffs = []
-    streak_dir = 0
-    streak_count = 0
-    pos = None
-    for j in range(1, len(mids)):
-        ts, mid = mids[j]
-        _, prev_mid = mids[j - 1]
-        d = mid - prev_mid
-        diffs.append(abs(d))
-        atr = sum(diffs[-ATR_PROXY_WINDOW:]) / len(diffs[-ATR_PROXY_WINDOW:]) if diffs else 0.5
-        if atr <= 0:
-            atr = 0.5
-        if pos is not None:
-            move = (mid - pos["entry"]) * (1 if pos["dir"] > 0 else -1)
-            if move <= -atr * 0.3:
-                pos["result"] = -1.0
-                pos["exit_ts"] = ts
-                trades.append(pos)
-                pos = None
-            elif move >= atr * 0.3 * TP_MULT:
-                pos["result"] = TP_MULT
-                pos["exit_ts"] = ts
-                trades.append(pos)
-                pos = None
-            continue
-        cur_dir = 1 if d > 0 else (-1 if d < 0 else 0)
-        if cur_dir != 0 and cur_dir == streak_dir:
-            streak_count += 1
-        else:
-            streak_dir = cur_dir
-            streak_count = 1 if cur_dir != 0 else 0
-        if streak_count >= 3 and streak_dir != 0:
-            pos = {"entry_ts": ts, "entry": mid, "dir": -streak_dir, "result": None, "exit_ts": None}
-            streak_count = 0
-    if pos is not None:
-        pos["exit"] = "OPEN"
-        trades.append(pos)
+    """Facade-gate projection: blocks trading once trailing expectancy
+    drops below the floor after FACADE_MIN_TRADES. Applied as a filter on
+    the sequential trade list (trades after the gate closes are discarded).
 
-    # facade gate over closed trades
+    The gate here mirrors the EA's EWMA facade gate (alpha 0.15, floor
+    -0.10R, min 4 trades before blocking) — the same guard the v26.13
+    deadlock fix hardened in-engine.
+    """
+    rows = session["rows"]
+    symbol = session.get("symbol", "?")
+    is_crash = symbol == "Crash"
+    re_max = RE_MAX.get(symbol, 0.60)
+    atr = m5_atr_from_ticks(rows)
+    if atr <= 0 or not replay.get("closed"):
+        return dict(replay)
+
+    trades = simulate_tick_fade(rows, is_crash, atr, sl_mult=SL_MULT,
+                                tp_mult=TP_MULT, fade_r=FADE_R, re_max=re_max,
+                                hold_s=HOLD_S, min_rr=MIN_RR, trail=TRAIL,
+                                cooldown_s=0, spread=SPREAD)
+
     ewma = 0.0
     n = 0
     blocked = False
     kept = []
     for t in trades:
-        if t.get("exit") == "OPEN" or t.get("exit_ts") is None:
-            if not blocked:
-                kept.append(t)
-            continue
         if blocked:
-            continue
+            break
         kept.append(t)
+        if t["reason"] not in ("TARGET", "STOP", "TIME"):
+            continue
         n += 1
-        ewma = FACADE_ALPHA * t["result"] + (1 - FACADE_ALPHA) * ewma
+        ewma = FACADE_ALPHA * t["r"] + (1 - FACADE_ALPHA) * ewma
         if n >= FACADE_MIN_TRADES and ewma < FACADE_FLOOR:
             blocked = True
 
-    closed = [t for t in kept if t.get("exit_ts") is not None]
-    wins = [t for t in closed if t["result"] > 0]
-    losses = [t for t in closed if t["result"] <= 0]
-    total_r = sum(t["result"] for t in closed)
-    gross_win = sum(t["result"] for t in wins)
-    gross_loss = abs(sum(t["result"] for t in losses))
-    return {
-        "trades": len(kept),
-        "closed": len(closed),
-        "blocked_after_trade": n if blocked else None,
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate": round(len(wins) / len(closed), 3) if closed else None,
-        "total_r": round(total_r, 2),
-        "pf": round(gross_win / gross_loss, 3) if gross_loss > 0 else (None if gross_win == 0 else math.inf),
-        "expectancy_r": round(total_r / len(closed), 3) if closed else None,
-    }
+    out = summarize(kept)
+    out["blocked_after_trade"] = n if blocked else None
+    return out
 
 
 def main() -> int:
@@ -306,15 +239,17 @@ def main() -> int:
     qualifying = [s for s in usable if s["coverage_ok"]]
 
     def agg(sessions_list, key):
-        tr = [t for s in sessions_list for t in ([s[key]] if s.get(key) else [])]
+        tr = [s[key] for s in sessions_list if s.get(key)]
         if not tr:
-            return {"sessions": 0, "trades": 0, "total_r": 0.0, "pf": None, "expectancy_r": None}
+            return {"sessions": 0, "trades": 0, "total_r": 0.0, "pf": None,
+                    "expectancy_r": None}
         trades = sum(t["closed"] for t in tr)
         total_r = round(sum(t["total_r"] for t in tr), 2)
-        gw = sum((t["pf"] or 0) * 0 for t in tr)  # pf recomputed below
         wins = sum(t["wins"] for t in tr)
         losses = sum(t["losses"] for t in tr)
-        pf = round(wins * TP_MULT / losses, 3) if losses else None
+        # recompute PF from per-session wins/losses at the deployed geometry:
+        # each win is +TP_MULT R, each loss -1R (SL normalized to -1R)
+        pf = round((wins * TP_MULT) / losses, 3) if losses else (None if wins == 0 else math.inf)
         return {
             "sessions": len(tr),
             "trades": trades,
@@ -330,7 +265,12 @@ def main() -> int:
         "params": {
             "spread_points": SPREAD,
             "tp_mult_atr": TP_MULT,
-            "sl_atr": 0.3,
+            "sl_atr": SL_MULT,
+            "fade_r": FADE_R,
+            "min_rr": MIN_RR,
+            "trail": TRAIL,
+            "hold_s": HOLD_S,
+            "entry": "spike-jump >= 3pts + size-scaled retrace window (EA-faithful, cb_quick_tp_study simulator)",
             "facade": {"alpha": FACADE_ALPHA, "min_trades": FACADE_MIN_TRADES, "floor_r": FACADE_FLOOR},
             "coverage_gate": {"min_hours": min_hours, "max_gap_fraction": 0.10},
         },
@@ -363,7 +303,7 @@ def main() -> int:
 
     # console report
     print("=" * 64)
-    print("TICK-FADE MULTI-SESSION VERDICT")
+    print("TICK-FADE MULTI-SESSION VERDICT (EA-faithful replay)")
     print("=" * 64)
     for s in sessions:
         if not s.get("usable"):

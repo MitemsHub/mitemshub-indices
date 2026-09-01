@@ -53,11 +53,22 @@ SPREAD_PTS = 0.483
 INCUMBENT = dict(sl=0.3, tp=4.0, r=0.4, remax_boom=0.60, remax_crash=0.50,
                  hold=2400, min_rr=2.0, cooldown_bars=1, trail=True)
 
-SESSIONS = [
-    ("BOOM  08-29", "MITEMSHUB_ticks_Boom_1000_Index_20260829.csv", False, 0.60),
-    ("BOOM  08-30", "MITEMSHUB_ticks_Boom_1000_Index_20260830.csv", False, 0.60),
-    ("CRASH 08-30", "MITEMSHUB_ticks_Crash_1000_Index_20260830.csv", True, 0.50),
-]
+def discover_sessions():
+    """Auto-discover every recorded tick session (re-run 2026-09-01).
+
+    Originally hardcoded to the 3 sessions available on 08-30; the verdict
+    tooling now requires the keep/kill evidence to rest on ALL recorded
+    sessions, so the sweep picks up every CSV in artifacts/ticks/.
+    """
+    out = []
+    for f in sorted(TICK_DIR.glob("MITEMSHUB_ticks_*.csv")):
+        is_crash = "Crash" in f.name
+        name = f.stem.replace("MITEMSHUB_ticks_", "").replace("_1000_Index_", " ")
+        out.append((name, f.name, is_crash, 0.50 if is_crash else 0.60))
+    return out
+
+
+SESSIONS = discover_sessions()
 
 
 def load_ticks(glob: str):
