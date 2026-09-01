@@ -104,7 +104,7 @@ InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100,7788300
 ; === Intelligence & Safety (v23) ===
 InpSessionStartHour=0
 InpSessionEndOffsetMin=45
-InpSessionEndHour=23
+InpSessionEndHour=0
 InpSameSymbolMaxPos=1
 InpGraduatedExit=true
 InpEarlyCutBars=5

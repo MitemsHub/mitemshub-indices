@@ -3065,10 +3065,15 @@ void UpdateDashboard()
          InpUsePullback?"ON":"OFF", InpUseBreakout?"ON":"OFF",
          InpUseMomentum?"ON":"OFF", InpUseMeanRevert?"ON":"OFF", InpUseBandFade?"ON":"OFF");
    L[7]=StringFormat("MinScore: %d | 2+Agree: %s | Cooldown: %d",InpMinScore,InpRequire2Strats?"YES":"NO", g_cooldown);
+   //--- v26.16: StartHour == EndHour means the wrap-midnight branch of
+   //--- IsSessionActive() is always true — the EA trades 24/7.
+   string sessTxt = (InpSessionStartHour == InpSessionEndHour)
+      ? "24/7"
+      : StringFormat("%02d:00-%02d:%02d", InpSessionStartHour, InpSessionEndHour - 1,
+                     60 - MathMax(InpSessionEndOffsetMin, 0));
    L[8]=InpCrashBoomMode
-      ? StringFormat("CB Risk: %.2f%% | Cap: %.0f%% | MicroFit: %.1f%% | Sess: %02d:00-%02d:%02d | Fade TP: %.1fx | Hold: %d | Thr: %.1fx%s",
-         InpCBBaseRisk, InpMaxEffectiveRiskPct, InpMicroFitPct,
-         InpSessionStartHour, InpSessionEndHour - 1, 60 - MathMax(InpSessionEndOffsetMin, 0),
+      ? StringFormat("CB Risk: %.2f%% | Cap: %.0f%% | MicroFit: %.1f%% | Sess: %s | Fade TP: %.1fx | Hold: %d | Thr: %.1fx%s",
+         InpCBBaseRisk, InpMaxEffectiveRiskPct, InpMicroFitPct, sessTxt,
          InpIsCrashIndex ? InpCBFadeTP : InpCBFadeTP, InpMaxHoldBars,
          InpCBSpikeThreshold, InpCBMicroFade?" MICRO":"" )
       : StringFormat("Risk: %.2f%% (cap %.0f%%) | TP: %.1fx | Hold: %d",
