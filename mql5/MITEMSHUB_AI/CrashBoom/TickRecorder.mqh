@@ -20,6 +20,18 @@
 //|    Everything else is derivable downstream.                      |
 //|  - When disabled, or when the file cannot be opened, the         |
 //|    recorder degrades to a no-op: trading is never affected.      |
+//|                                                                  |
+//|  v26.16 — MULTI-SESSION VERDICT COLLECTION:                      |
+//|  - The tick-fade verdict must rest on more than 3 days of data.  |
+//|    This version adds per-session statistics (ticks, spikes,      |
+//|    gaps, first/last ts) so the offline verdict script can sum    |
+//|    coverage without re-reading every CSV.                        |
+//|  - Session summary logged at day-rollover AND on Flush() every   |
+//|    ~5 minutes, so partial sessions are visible in the journal    |
+//|    even if the terminal crashes before midnight.                 |
+//|  - Recording gaps (terminal closed, weekend, disconnection) are  |
+//|    counted and reported — the verdict script excludes sessions   |
+//|    whose live coverage falls below a minimum threshold.          |
 //+------------------------------------------------------------------+
 #ifndef MITEMSHUB_TICK_RECORDER_MQH
 #define MITEMSHUB_TICK_RECORDER_MQH
@@ -41,6 +53,15 @@ private:
    int      m_open_failures;        // v25.8: consecutive open failures (backoff)
    int      m_next_retry_time;      // v25.8: epoch of next open attempt
    int      m_next_warn_time;       // v25.8: throttle repeated warnings
+
+   //--- v26.16: per-session statistics (multi-session verdict collection)
+   int      m_session_spikes;       // tick jumps >= spike threshold (approx: |jump| >= 3.0 pts)
+   int      m_session_gaps;         // recording gaps > 60s (terminal closed / disconnect)
+   datetime m_session_first_ts;     // first tick of the session
+   datetime m_session_last_ts;      // last tick of the session
+   datetime m_session_last_tick;    // previous tick ts (gap detection)
+   int      m_last_summary_time;    // epoch of last periodic summary log
+   double   m_last_bid;             // v26.16: previous tick bid (jump computation)
 
    //--- Server-midnight epoch for the given instant
    static datetime DayStart(const datetime now)
@@ -147,6 +168,13 @@ public:
       m_open_failures    = 0;
       m_next_retry_time  = 0;
       m_next_warn_time   = 0;
+      m_session_spikes   = 0;
+      m_session_gaps     = 0;
+      m_session_first_ts = 0;
+      m_session_last_ts  = 0;
+      m_session_last_tick= 0;
+      m_last_summary_time= 0;
+      m_last_bid          = 0.0;
      }
 
    ~CTickRecorder()
@@ -214,9 +242,14 @@ public:
          return;
         }
       const double mid = (bid + ask) / 2.0;
+      // v26.16: compute tick-to-tick jump for spike/gap statistics
+      const double jump = (m_session_last_tick > 0) ? (bid - m_last_bid) : 0.0;
+      m_last_bid = bid;
+      CountSpike(now, jump);
       m_pending += StringFormat("%I64d,%.5f,%.5f,%.5f\r\n",
                                 (long)now, bid, ask, mid);
       m_buffered++;
+      MaybeLogSessionSummary(now);
       if(m_buffered >= m_flush_every_ticks ||
          (int)now - m_last_flush_time >= m_flush_seconds)
          Flush();
@@ -250,6 +283,45 @@ public:
    int TotalRecorded() const { return(m_total_recorded); }
    int Buffered()      const { return(m_buffered); }
    bool IsEnabled()    const { return(m_enabled); }
+
+   //--- v26.16: spike/gap counter fed from OnTick (cheap threshold, matches
+   //    the verdict script's |jump| >= 3.0 pts approximation)
+   void CountSpike(const datetime now, const double jump)
+     {
+      if(MathAbs(jump) >= 3.0)
+         m_session_spikes++;
+      // Gap detection: a gap > 60s means the terminal was closed or the
+      // connection dropped — the verdict script excludes sessions whose
+      // live coverage falls below a minimum threshold.
+      if(m_session_last_tick > 0 && now - m_session_last_tick > 60)
+         m_session_gaps++;
+      m_session_last_tick = now;
+      if(m_session_first_ts == 0)
+         m_session_first_ts = now;
+      m_session_last_ts = now;
+     }
+
+   //--- v26.16: periodic per-session summary in the Experts journal, so a
+   //    partial session is visible even if the terminal crashes before
+   //    midnight.  Logged at most every 5 minutes of recording activity.
+   void MaybeLogSessionSummary(const datetime now)
+     {
+      if(m_last_summary_time == 0)
+         m_last_summary_time = (int)now;
+      if((int)now - m_last_summary_time < 300)
+         return;
+      m_last_summary_time = (int)now;
+      PrintFormat("[TickRecorder] SESSION SUMMARY: %s | ticks %d | spikes %d | "
+                  "gaps %d | span %ds -> %ds | %s",
+                  m_day, m_total_recorded, m_session_spikes, m_session_gaps,
+                  (int)m_session_first_ts, (int)m_session_last_ts, FileName(m_day));
+     }
+
+   //--- v26.16: per-session statistics accessors for the verdict script
+   int      SessionSpikes()   const { return(m_session_spikes); }
+   int      SessionGaps()     const { return(m_session_gaps); }
+   datetime SessionFirstTs()  const { return(m_session_first_ts); }
+   datetime SessionLastTs()   const { return(m_session_last_ts); }
 };
 
 #endif

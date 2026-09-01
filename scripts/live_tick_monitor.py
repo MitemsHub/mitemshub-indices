@@ -194,6 +194,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--replay", metavar="CSV", help="replay a recorded CSV instead of tailing live")
     ap.add_argument("--speed", type=float, default=50.0, help="replay speed multiplier")
+    ap.add_argument("--all-sessions", action="store_true",
+                    help="replay every recorded session in artifacts/ticks sequentially")
     args = ap.parse_args()
 
     atr = current_atr()
@@ -202,7 +204,16 @@ def main():
           f"SL {SL_MULT}xATR({atr:.2f})  TP {TP_MULT}xATR  (observational only)")
     mon = Monitor(atr)
 
-    if args.replay:
+    if args.all_sessions:
+        ticks_dir = ROOT / "artifacts" / "ticks"
+        files = sorted(ticks_dir.glob("MITEMSHUB_ticks_*.csv"))
+        if not files:
+            print("No recorded sessions found.")
+            return 1
+        print(f"[monitor] replaying {len(files)} sessions from {ticks_dir}")
+        for f in files:
+            replay(f, mon, args.speed)
+    elif args.replay:
         replay(Path(args.replay), mon, args.speed)
     else:
         f = newest_file()
