@@ -36,28 +36,26 @@
 | `VOL25_FINAL.set` | Volatility 25 | M15 | 0.50% | Conservative | ✅ Available |
 | `VOL50_FINAL.set` | Volatility 50 | M15 | 0.50% | Conservative | ✅ Available |
 | `V100_H1.set` | Volatility 100 | H1 | 0.50% | Conservative | ✅ Available |
-| `V100_M5.set` | Volatility 100 | M5 | 0.50% | Conservative | ✅ Available |
+| `V100_M5.set` | Volatility 100 | M5 | 0.50% | Conservative | ⚠️ Regenerated 2026-09-01, UNVALIDATED on M5 — run Strategy-Tester Pass-A before sizing up |
 
 ### Crash/Boom Indices (M5) — NEW in v24
 
 | Preset | Symbol | TF | Risk | Strategy | Status |
 |--------|--------|-----|------|----------|--------|
 | `BOOM1000_CB.set` | Boom 1000 | M5 | 0.30% | Post-Spike Fade + Grind | ✅ Available |
-| `CRASH1000_CB.set` | Crash 1000 | M5 | 0.28% | Post-Spike Fade + Grind | ✅ Available |
+| `CRASH1000_CB.set` | Crash 1000 | M5 | 0.30% | Post-Spike Fade + Grind | ✅ Available |
 
 ---
 
-## Legacy Presets (Older EA Versions)
+## Legacy Presets (Older EA Versions) — REMOVED 2026-09-01
 
-These presets were created for earlier EA versions (v16–v19) and may not be compatible with v24.11.
+The presets below were created for EA versions v6–v19 and failed `verify_set_inputs.py`
+against v26.14 (missing critical inputs, silently falling back to code defaults).
+They were deleted from the repo and purged from every MT5 terminal on 2026-09-01.
+Retrieve them from git history if ever needed (`git log --diff-filter=D -- '*V6_OPTIMAL.set'`).
 
-| Preset | Version | Symbol | Notes |
-|--------|---------|--------|-------|
-| `V6_OPTIMAL.set` | v6 | — | Historical reference |
-| `V16_V100.set` | v16 | V100 | Legacy |
-| `V17_V10.set` | v17 | V10 | Legacy |
-| `V18_StepIndex.set` | v18 | Step Index | Legacy |
-| `V19_StepIndex.set` | v19 | Step Index | Legacy |
+Removed: `V6_OPTIMAL.set`, `V16_V100.set`, `V17_V10.set`, `V18_StepIndex.set`,
+`V19_StepIndex.set`, `PAPER_TEST.set`
 
 ---
 
@@ -65,26 +63,17 @@ These presets were created for earlier EA versions (v16–v19) and may not be co
 
 | Preset | Purpose | Notes |
 |--------|---------|-------|
-| `PAPER_TEST.set` | Paper trading mode | No live execution |
 | `TESTER_BFONLY_VOL75.set` | Strategy Tester: BandFade only on V75 | Backtesting |
 | `TESTER_BFONLY_VOL100.set` | Strategy Tester: BandFade only on V100 | Backtesting |
 
 ---
 
-## Synthetic Trader Presets (Legacy — Old EA)
+## Synthetic Trader Presets (Legacy — Old EA) — REMOVED 2026-09-01
 
-These belong to the older Synthetic Trader system and are NOT used by MitemshubAI v24.
-
-| Preset | Symbol | Tier |
-|--------|--------|------|
-| `SYN75_LIVE.set` | SYN75 | Live |
-| `SYN75_TIER1.set` | SYN75 | Tier 1 |
-| `SYN75_TIER2.set` | SYN75 | Tier 2 |
-| `SYN75_TIER3.set` | SYN75 | Tier 3 |
-| `SYN100_LIVE.set` | SYN100 | Live |
-| `SYN100_TIER1.set` | SYN100 | Tier 1 |
-| `SYN100_TIER2.set` | SYN100 | Tier 2 |
-| `SYN100_TIER3.set` | SYN100 | Tier 3 |
+These belonged to the older Synthetic Trader system and were NOT used by MitemshubAI.
+All eight (`SYN75_LIVE`, `SYN75_TIER1–3`, `SYN100_LIVE`, `SYN100_TIER1–3`) failed
+`verify_set_inputs.py` against v26.14 and were deleted from the repo and purged from
+every MT5 terminal on 2026-09-01.
 
 ---
 

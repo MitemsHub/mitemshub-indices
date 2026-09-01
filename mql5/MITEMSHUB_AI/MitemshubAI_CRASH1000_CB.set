@@ -30,7 +30,7 @@ InpUseMomentum=false
 InpUseMeanRevert=false
 InpUseBandFade=false
 InpMinScore=3
-InpRequire2Strat=false
+InpRequire2Strats=false
 InpMomentumStandalone=false
 
 ; === Regime & Volatility (still used for context) ===
