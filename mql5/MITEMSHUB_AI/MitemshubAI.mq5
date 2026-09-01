@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                             MitemshubAI.mq5      |
-//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.14     |
+//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.16     |
 //|   Intelligent • Regime-Aware • Crash/Boom • Spike-Aware • Smart  |
 //|                                                                  |
 //| v26.x SERIES (2026-08-30) — see PRODUCTION_CONFIGS.md for full   |
@@ -93,7 +93,7 @@
 //|  - Entry/regime TF overrides, telemetry journal                  |
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
-#define APP_VERSION "26.14"
+#define APP_VERSION "26.16"
 
 //--- v25.2: single source of truth for the version string.
 //--- #property version, every log tag, and every order comment derive from
