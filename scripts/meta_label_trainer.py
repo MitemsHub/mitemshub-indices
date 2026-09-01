@@ -101,7 +101,7 @@ def join_signals(events: list[dict]) -> list[dict]:
             open_sig = ev
         elif t == "close" and open_sig is not None:
             trades.append({
-                "sym": open_sig.get("sym"),
+                "sym": open_sig.get("sym") or open_sig.get("symbol"),
                 "dir": open_sig.get("dir"),
                 "legs": open_sig.get("legs"),
                 "regime": open_sig.get("regime"),
@@ -175,9 +175,6 @@ class LogisticModel:
             for k in gw:
                 self.w[k] = self.w.get(k, 0.0) - self.lr * (gw[k] / n + self.l2 * self.w.get(k, 0.0))
             self.bias -= self.lr * (gb / n)
-
-    def _sigmoid(self, x: float) -> float:
-        return 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, x))))
 
 
 # ---------------- P(win) -> multiplier table ----------------

@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                             MitemshubAI.mq5      |
-//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.9      |
+//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.14     |
 //|   Intelligent • Regime-Aware • Crash/Boom • Spike-Aware • Smart  |
 //|                                                                  |
 //| v26.x SERIES (2026-08-30) — see PRODUCTION_CONFIGS.md for full   |
@@ -15,7 +15,8 @@
 //|  v26.7 minute-level session cutoff (InpSessionEndOffsetMin) +     |
 //|     tick-recorder flush on close                                  |
 //|  v26.8 grid-searched exit geometry: SL 0.3xATR / TP 4.0xATR /     |
-//|     FADE_R 0.4 / hold 6 bars (both .set files)                    |//| v26.9 constant-λ Poisson spike-rate model replaces the           |
+//|     FADE_R 0.4 / hold 6 bars (both .set files)                    |
+//|  v26.9 constant-λ Poisson spike-rate model replaces the           |
 //|     "time-since-spike / overdue" term (gambler's fallacy removed) |
 //| v26.13 FACADE-GATE DEADLOCK FIX: the learned gate could block all |
 //|     spike fades forever (expect<1.5σ with fat sigma; recovery     |
@@ -35,18 +36,15 @@
 //|  2. Backtest: tick path +17% expectancy on the recorded night;  |
 //|     60d M5: +89 trades, expectancy unchanged, PF 4.19.          |
 //| v25.6 CHANGES (2026-08-30):  filter tuning from evidence tally    |
-//| v25.6 CHANGES (2026-08-30):  filter tuning from evidence tally    |
 //|  1. Fade retrace ceiling 0.50 -> 0.60 (overshoot was the #2      |
 //|     entry blocker; 60d sweep: PF 4.06->4.22, +216 trades).       |
 //|  2. Tick fast-fade timeout 600s -> 900s (big spikes retrace      |
 //|     slowly; live sweep: 5 -> 9 entries on the recorded night).   |
 //|  3. Strategy fade-entry default aligned to deployed 0.30.        |
 //| v25.5 CHANGES (2026-08-30):                                       |
-//| v25.5 CHANGES (2026-08-30):                                       |
 //|  1. Tick recorder opens CSV with FILE_SHARE_READ — external      |
 //|     tools can analyze the live file while the EA writes it.      |
 //|  2. Flush cadence tightened: 100 ticks / 10s (was 500 / 60s).    |
-//| v25.4 CHANGES (2026-08-30):                                       |
 //| v25.4 CHANGES (2026-08-30):                                       |
 //|  1. TICK-TRIGGERED FAST FADE: fades fire on the tick spike       |
 //|     itself (jump >= 3pts) once retrace enters the window —       |
