@@ -218,8 +218,10 @@ enum ENUM_ENGINE_MODE
 #define DEFAULT_MAX_OPEN_POSITIONS        1       // one position at a time per symbol
 #define DEFAULT_MAX_TOTAL_EXPOSURE_PCT    0.25    // 25% max total exposure
 #define DEFAULT_MAX_CONSECUTIVE_LOSSES    4       // halt after 4 consecutive losses
-#define DEFAULT_MAX_TRADES_PER_HOUR       6       // max 6 trades per hour
-#define DEFAULT_MAX_TRADES_PER_DAY        20      // max 20 trades per day
+// v26.14: 0 = DISABLED по подразбиране — без лимит за брой трейдови.
+// Пазарът предлага възможности 24/7; лимитът се активира само с .set стойност > 0.
+#define DEFAULT_MAX_TRADES_PER_HOUR       0       // 0 = disabled (was 6)
+#define DEFAULT_MAX_TRADES_PER_DAY        0       // 0 = disabled (was 20)
 
 //--- Band geometry defaults
 #define DEFAULT_BAND_Z_ENTRY             2.0     // |z_dev| to trigger fade entry

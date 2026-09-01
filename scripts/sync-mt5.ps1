@@ -39,12 +39,17 @@ foreach ($mql5Dir in $mql5Dirs) {
         }
     }
 
+    # Mirror the FULL EA source tree (mq5 + mqh includes + subfolders) into
+    # Experts\MITEMSHUB_AI — compiling root-only *.mq5 against stale/missing
+    # includes produced the v26.13 TickFadeConfirm undeclared-identifier build
+    # failure.
+    Copy-Item -Path (Join-Path $ProjectDir '*') -Destination $mitemDir -Recurse -Force
+
     if (-not $Mq5Only) {
         Get-ChildItem -Path $ProjectDir -Filter "*.set" -File | ForEach-Object {
             Copy-Item $_.FullName $setsDir -Force
             Copy-Item $_.FullName $setsMitem -Force
             Copy-Item $_.FullName $expertsDir -Force
-            Copy-Item $_.FullName $mitemDir -Force
             Copy-Item $_.FullName $presetsDir -Force
             $synced++
         }
@@ -53,7 +58,6 @@ foreach ($mql5Dir in $mql5Dirs) {
     if (-not $SetOnly) {
         Get-ChildItem -Path $ProjectDir -Filter "*.mq5" -File | ForEach-Object {
             Copy-Item $_.FullName $expertsDir -Force
-            Copy-Item $_.FullName $mitemDir -Force
             $synced++
         }
     }

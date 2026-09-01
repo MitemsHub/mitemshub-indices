@@ -71,8 +71,8 @@ input double InpMaxEquityDrawdownPct = DEFAULT_MAX_EQUITY_DRAWDOWN_PCT;     // h
 input int    InpMaxOpenPositions     = DEFAULT_MAX_OPEN_POSITIONS;          // max simultaneous positions
 input double InpMaxTotalExposurePct  = DEFAULT_MAX_TOTAL_EXPOSURE_PCT;      // max % equity in open margin
 input int    InpMaxConsecutiveLosses = DEFAULT_MAX_CONSECUTIVE_LOSSES;      // halt after N losses in a row
-input int    InpMaxTradesPerHour     = DEFAULT_MAX_TRADES_PER_HOUR;
-input int    InpMaxTradesPerDay      = DEFAULT_MAX_TRADES_PER_DAY;
+input int    InpMaxTradesPerHour     = DEFAULT_MAX_TRADES_PER_HOUR;   // 0 = disabled (v26.14)
+input int    InpMaxTradesPerDay      = DEFAULT_MAX_TRADES_PER_DAY;    // 0 = disabled (v26.14)
 
 //+------------------------------------------------------------------+
 //| REGIME & VOLATILITY                                                |

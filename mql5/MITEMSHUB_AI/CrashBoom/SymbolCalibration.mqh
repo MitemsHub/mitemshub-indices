@@ -33,6 +33,7 @@ struct SymbolProfile
    double   risk_mult;         // risk multiplier (smaller for volatile)
    int      cooldown_bars;     // bars to wait after spike
    double   max_spike_prob;    // max spike probability before blocking
+   double   fade_r_entry;      // v26.10: ScaledFadeEntry base anchor (AUTO value for InpCBFadeR)
 };
 
 class CSymbolCalibration
@@ -76,8 +77,9 @@ public:
       m_profiles[0].spike_threshold = 2.2;    // v25.3 micro-fade: catches small spikes
       m_profiles[0].avg_spike_size = 30;       // corrected from 75 — median is 28.5pts
       m_profiles[0].fade_depth = 0.50;         // increased from 0.40 — expect 50% retrace
-      m_profiles[0].fade_sl_mult = 0.4;        // tightened from 0.5 — tighter stops
-      m_profiles[0].fade_tp_mult = 1.8;        // increased from 1.5 — better R:R
+      m_profiles[0].fade_sl_mult = 0.3;        // v26.8 grid-search: tighter stop (was 0.4)
+      m_profiles[0].fade_tp_mult = 4.0;        // v26.8 grid-search: ride the post-spike drift (was 1.8)
+      m_profiles[0].fade_r_entry = 0.4;        // v26.8 grid-search: deeper retrace entry anchor (was 0.3)
       m_profiles[0].optimal_hold = 4;          // reduced from 5 — faster exit
       m_profiles[0].risk_mult = 1.0;
       m_profiles[0].cooldown_bars = 1;         // reduced from 2 — faster recovery
@@ -91,6 +93,7 @@ public:
       m_profiles[1].fade_depth = 0.35;
       m_profiles[1].fade_sl_mult = 0.6;
       m_profiles[1].fade_tp_mult = 1.8;
+      m_profiles[1].fade_r_entry = 0.3;        // v25.6-25.9 legacy anchor (not grid-searched)
       m_profiles[1].optimal_hold = 4;
       m_profiles[1].risk_mult = 0.8;
       m_profiles[1].cooldown_bars = 3;
@@ -104,6 +107,7 @@ public:
       m_profiles[2].fade_depth = 0.30;
       m_profiles[2].fade_sl_mult = 0.7;
       m_profiles[2].fade_tp_mult = 2.0;
+      m_profiles[2].fade_r_entry = 0.3;        // v25.6-25.9 legacy anchor (not grid-searched)
       m_profiles[2].optimal_hold = 3;
       m_profiles[2].risk_mult = 0.6;
       m_profiles[2].cooldown_bars = 4;
@@ -115,8 +119,9 @@ public:
       m_profiles[3].spike_threshold = 2.2;    // v25.3 micro-fade: catches small spikes
       m_profiles[3].avg_spike_size = 30;       // corrected from 75
       m_profiles[3].fade_depth = 0.50;         // increased from 0.40
-      m_profiles[3].fade_sl_mult = 0.4;        // tightened from 0.5
-      m_profiles[3].fade_tp_mult = 1.8;        // increased from 1.5
+      m_profiles[3].fade_sl_mult = 0.3;        // v26.8 grid-search: tighter stop (was 0.4)
+      m_profiles[3].fade_tp_mult = 4.0;        // v26.8 grid-search: ride the post-spike drift (was 1.8)
+      m_profiles[3].fade_r_entry = 0.4;        // v26.8 grid-search: deeper retrace entry anchor (was 0.3)
       m_profiles[3].optimal_hold = 4;          // reduced from 5
       m_profiles[3].risk_mult = 1.0;
       m_profiles[3].cooldown_bars = 1;         // reduced from 2
@@ -130,6 +135,7 @@ public:
       m_profiles[4].fade_depth = 0.35;
       m_profiles[4].fade_sl_mult = 0.6;
       m_profiles[4].fade_tp_mult = 1.8;
+      m_profiles[4].fade_r_entry = 0.3;        // v25.6-25.9 legacy anchor (not grid-searched)
       m_profiles[4].optimal_hold = 4;
       m_profiles[4].risk_mult = 0.8;
       m_profiles[4].cooldown_bars = 3;
@@ -143,6 +149,7 @@ public:
       m_profiles[5].fade_depth = 0.30;
       m_profiles[5].fade_sl_mult = 0.7;
       m_profiles[5].fade_tp_mult = 2.0;
+      m_profiles[5].fade_r_entry = 0.3;        // v25.6-25.9 legacy anchor (not grid-searched)
       m_profiles[5].optimal_hold = 3;
       m_profiles[5].risk_mult = 0.6;
       m_profiles[5].cooldown_bars = 4;

@@ -43,6 +43,10 @@ private:
    int      m_last_spike_bar;         // bar index of last spike
    double   m_spike_threshold;        // body size = this x average = spike
    double   m_last_spike_ratio;       // v25.3: spike body / body EMA at detection (micro-fade risk input)
+   double   m_lambda_per_bar;         // v26.9: learned constant spike rate (spikes/bar, EWMA)
+   int      m_spike_gap_n;            // v26.9: observed inter-spike bar gaps counted
+   int      m_spike_gap_bar;          // v26.9: bars since the last spike (gap accumulator)
+   int      m_bar_sec;                // v26.9: seconds per bar of the λ feed (gap→sec conversion)
    
    //--- Grind detection
    int      m_grind_direction;        // 1=UP, -1=DOWN, 0=none
@@ -53,7 +57,8 @@ private:
    double   m_prob_body_ratio;        // how big is current body vs avg
    double   m_prob_tick_change;       // tick speed change factor
    double   m_prob_grind_length;      // grind duration factor
-   double   m_prob_time_since_spike;  // time gap factor
+   double   m_prob_time_since_spike;  // v26.9: constant-λ Poisson hazard term (replaces the bars-since-spike "overdue" heuristic)
+   double   m_min_gap_obs;            // v26.9: shortest observed inter-spike gap (bars, refractory tail)
 
    double   EMA_update(double current, double prev_ema, double alpha)
    {
@@ -71,6 +76,7 @@ public:
       m_tick_count_buf = 0;
       
       ArrayInitialize(m_body_history, 0);
+      ArrayInitialize(m_tick_speed_history, 0);
       m_body_ema = 0;
       m_body_head = 0;
       m_body_count = 0;
@@ -79,6 +85,13 @@ public:
       m_last_spike_bar = 0;
       m_spike_threshold = 3.0;  // default: 3x average body = spike
       m_last_spike_ratio = 0;
+      m_lambda_per_bar   = 0;
+      m_prob_time_since_spike = 0;
+      m_min_gap_obs      = 0;
+      m_spike_gap_n      = 0;
+      m_spike_gap_bar    = 0;
+      m_min_gap_obs      = 0;
+      m_bar_sec          = 0;
       
       m_grind_direction = 0;
       m_grind_duration = 0;
@@ -88,8 +101,6 @@ public:
       m_prob_tick_change = 0;
       m_prob_grind_length = 0;
       m_prob_time_since_spike = 0;
-      
-      ArrayInitialize(m_tick_speed_history, 0);
    }
 
    //--- Call on every tick
@@ -120,9 +131,17 @@ public:
    void OnBar(const ENUM_TIMEFRAMES tf, int lookback_bars, double spike_body_threshold)
    {
       m_spike_threshold = spike_body_threshold;
+      m_bar_sec         = PeriodSeconds(tf);   // v26.9: λ bar length for gap→sec conversion
       
       //--- Age the last spike bar (so SpikeJustHappened tracks bars-ago correctly)
+      //--- v26.9: also accumulate the inter-spike gap (in bars) for the
+      //    constant-λ spike-rate learning below. The 15.19M-tick deriv study
+      //    (EA_UPGRADE_RESEARCH.md) shows spike arrivals are Poisson — the
+      //    hazard is flat in elapsed time, so "overdue" is a fallacy. We keep
+      //    the elapsed gap only for the refractory tail, then the model
+      //    saturates at the learned constant rate.
       if(m_last_spike_bar > 0) m_last_spike_bar++;
+      if(m_last_spike_bar > 0) m_spike_gap_bar++;
       
       //--- Update body history
       double body = MathAbs(iClose(_Symbol, tf, 1) - iOpen(_Symbol, tf, 1));
@@ -169,6 +188,18 @@ public:
          m_last_spike_time = iTime(_Symbol, tf, 1);
          m_last_spike_bar = 1;  // reset to 1 (this bar)
          m_last_spike_ratio = body / m_body_ema;  // v25.3: for micro-fade risk scaling
+         
+         //--- v26.9: constant-λ spike-rate learning — the observed inter-spike
+         //    gap closes here; EWMA of 1/gap estimates the spike rate λ.
+         if(m_spike_gap_bar > 0)
+         {
+            double gap = (double)m_spike_gap_bar;
+            m_lambda_per_bar = (m_spike_gap_n == 0) ? (1.0 / gap)
+                             : EMA_update(1.0 / gap, m_lambda_per_bar, 0.05);
+            m_spike_gap_n++;
+            if(m_min_gap_obs <= 0 || gap < m_min_gap_obs) m_min_gap_obs = gap;
+         }
+         m_spike_gap_bar = 0;
       }
       
       //--- Update grind detection (look at last N bars)
@@ -271,16 +302,25 @@ private:
       //    Empirical: >10 bars grind = moderate risk, >20 = high risk
       m_prob_grind_length = MathMin(1.0, (double)m_grind_duration / 25.0);
       
-      //--- Component 4: Time since last spike
-      //    Longer gap = higher probability (spikes become overdue)
-      if(m_last_spike_time > 0)
+      //--- Component 4: v26.9 CONSTANT-λ POISSON HAZARD (was "time since spike")
+      //    Old model: longer gap → higher "overdue" score (gambler's fallacy —
+      //    a memoryless process never becomes overdue). New model: P(spike in
+      //    the next bar) is constant at λ once past the refractory tail, so
+      //    the component reports the LEARNED RATE itself, not elapsed time.
+      if(m_lambda_per_bar > 0 && m_spike_gap_n >= 3)
       {
-         int bars_since_spike = iBarShift(_Symbol, tf, m_last_spike_time);
-         m_prob_time_since_spike = MathMin(1.0, (double)bars_since_spike / 50.0);
+         // refractory tail: hazard ramps 0→λ over the first few bars after a
+         // spike (empirically the shortest observed gaps set the tail length),
+         // then stays flat at λ forever — no overdue term.
+         double tail_bars = MathMax(2.0, m_min_gap_obs);
+         m_prob_time_since_spike = (m_spike_gap_bar < tail_bars)
+            ? m_lambda_per_bar * ((double)m_spike_gap_bar / tail_bars)
+            : m_lambda_per_bar;
+         m_prob_time_since_spike = MathMin(1.0, m_prob_time_since_spike);
       }
       else
       {
-         m_prob_time_since_spike = 0.5;  // unknown = moderate
+         m_prob_time_since_spike = m_lambda_per_bar > 0 ? m_lambda_per_bar : 0.05;
       }
    }
 
@@ -292,14 +332,26 @@ public:
    //--- v25.3: spike body ratio at last detection (0 = none since reset)
    double GetLastSpikeBodyRatio() const { return m_last_spike_ratio; }
    
+   //--- v26.9: expose the learned λ (spikes/bar) + mean inter-spike gap
+   double GetLambdaPerBar() const { return m_lambda_per_bar; }
+   double GetMeanGapBars()  const { return m_lambda_per_bar > 0 ? 1.0 / m_lambda_per_bar : 0; }
+   int    GetSpikeGapCount() const { return m_spike_gap_n; }
+   //--- v26.9: mean inter-spike gap in SECONDS (needs the bar length; 0 until learned)
+   double GetMeanGapSec()   const { return (m_bar_sec > 0 && m_lambda_per_bar > 0) ? (1.0 / m_lambda_per_bar) * m_bar_sec : 0; }
+
    //--- Get combined spike probability (0.0 to 1.0)
-   //    Weights: body_ratio 30%, tick_change 20%, grind_length 25%, time_gap 25%
+   //    v26.9 weights: body_ratio 35%, tick_change 25%, grind_length 25%,
+   //    constant-λ hazard 15% (the old 25% "time-since-spike" weight was
+   //    cut because the term no longer grows with elapsed time — it now
+   //    reflects the learned constant rate only, avoiding spurious
+   //    probability inflation on long gaps that misled the live gates on
+   //    2026-08-30, e.g. prob=0.26 printed on a 29.6-min-old spike).
    double GetSpikeProbability() const
    {
-      double prob = m_prob_body_ratio    * 0.30
-                  + m_prob_tick_change   * 0.20
+      double prob = m_prob_body_ratio    * 0.35
+                  + m_prob_tick_change   * 0.25
                   + m_prob_grind_length  * 0.25
-                  + m_prob_time_since_spike * 0.25;
+                  + m_prob_time_since_spike * 0.15;
       return MathMax(0, MathMin(1, prob));
    }
    
@@ -328,10 +380,14 @@ public:
    //--- Reset state (new symbol or new session)
    void Reset()
    {
-      m_last_spike_time = 0;
-      m_last_spike_bar = 0;
-      m_last_spike_ratio = 0;
-      m_grind_direction = 0;
+   m_last_spike_time = 0;
+   m_last_spike_bar = 0;
+   m_last_spike_ratio = 0;
+   m_lambda_per_bar = 0;
+   m_spike_gap_n = 0;
+   m_spike_gap_bar = 0;
+   m_min_gap_obs = 0;
+   m_grind_direction = 0;
       m_grind_duration = 0;
       m_tick_count = 0;
       m_ticks_per_sec = 0;
@@ -351,3 +407,4 @@ public:
 };
 
 #endif
+

@@ -1,7 +1,31 @@
 //+------------------------------------------------------------------+
-//|                                    MitemshubAI_v25_7.mq5        |
-//|                     MITEMSHUB AI MULTI-STRATEGY ENGINE v25.7     |
+//|                                             MitemshubAI.mq5      |
+//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.9      |
 //|   Intelligent • Regime-Aware • Crash/Boom • Spike-Aware • Smart  |
+//|                                                                  |
+//| v26.x SERIES (2026-08-30) — see PRODUCTION_CONFIGS.md for full   |
+//| details. Single fresh-build deploy line for Boom + Crash:        |
+//|  v26.0 tick-fade burst guard (Crash ON / Boom OFF, per-symbol .set)
+//|  v26.1-26.3 per-symbol state/review/telemetry/slip files + DAILY  |
+//|     record — session counters survive re-attaches                 |
+//|  v26.2 gap-through slippage journaling (realized R vs planned -1R)
+//|  v26.4 event-driven close detection (OnTradeTransaction, O(1))    |
+//|  v26.5 EWMA facade gate + CB strategies in the intelligence layer |
+//|  v26.6 micro-balance fit (InpMicroFitPct) + live stop re-anchor   |
+//|  v26.7 minute-level session cutoff (InpSessionEndOffsetMin) +     |
+//|     tick-recorder flush on close                                  |
+//|  v26.8 grid-searched exit geometry: SL 0.3xATR / TP 4.0xATR /     |
+//|     FADE_R 0.4 / hold 6 bars (both .set files)                    |//| v26.9 constant-λ Poisson spike-rate model replaces the           |
+//|     "time-since-spike / overdue" term (gambler's fallacy removed) |
+//| v26.13 FACADE-GATE DEADLOCK FIX: the learned gate could block all |
+//|     spike fades forever (expect<1.5σ with fat sigma; recovery     |
+//|     required trades the gate blocked). Now: positive mean never   |
+//|     blocked; quiet-day EWMA decay re-arms the gate; exploration   |
+//|     budget of 3 signals after each gate close.                    |
+//| v26.13 tick-fade consume-on-confirm: a rejected fade order no     |
+//|     longer eats the spike (TickFadeConfirm/TickFadeRelease);      |
+//|     ValidStopForModify guards every PositionModify against the    |
+//|     broker stops level (retcode-10016 spam fix)                   |
 //|                                                                  |
 //| v25.7 CHANGES (2026-08-30):  size-scaled fade entry               |
 //|  1. Retrace entry threshold scales with spike size on BOTH      |
@@ -71,7 +95,7 @@
 //|  - Entry/regime TF overrides, telemetry journal                  |
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
-#define APP_VERSION "25.9"
+#define APP_VERSION "26.14"
 
 //--- v25.2: single source of truth for the version string.
 //--- #property version, every log tag, and every order comment derive from
@@ -85,11 +109,28 @@ const string VTAG = "[v" + APP_VERSION + "] ";
 #include <Trade\Trade.mqh>
 #include "CrashBoom/CrashBoomEngine.mqh"
 #include "CrashBoom/TickRecorder.mqh"
+// v26.9-phase1: modular market engine — EGARCH conditional-vol forecaster
+// (locked against the Python reference by Tests/Phase10Tests.mq5).
+#include "Market/GarchForecaster.mqh"
 CTrade trade;
 CTickRecorder g_tick_rec;   // v25.1: always-on tick microstructure archive
 
-#define TELEM_FILE "MitemshubAI_v23_telemetry.jsonl"
-#define STATE_FILE "MitemshubAI_state.csv"
+#define TELEM_BASE "MitemshubAI_v23_telemetry"   // v26.1: per-symbol suffix appended
+#define STATE_BASE "MitemshubAI_state"           // v26.1: per-symbol suffix appended
+
+// v26.1: per-INSTANCE file names — Boom and Crash charts must never share
+// learning state. A shared state.csv let each instance overwrite the other's
+// counters, and one merged review.csv mixed unrelated trades (Boom's Aug-28
+// trades appeared on the Crash HUD). Files become e.g.
+//   MitemshubAI_state_Crash_1000_Index.csv
+//   MitemshubAI_review_Boom_1000_Index.csv
+//   MitemshubAI_v23_telemetry_Boom_1000_Index.jsonl
+string SymbolTaggedFile(const string base, const string ext)
+{
+   string tag = _Symbol;
+   StringReplace(tag, " ", "_");
+   return StringFormat("%s_%s%s", base, tag, ext);
+}
 
 //+------------------------------------------------------------------+
 //| ENUMS                                                              |
@@ -138,14 +179,76 @@ input int    InpBandHoldSec      = 3600;     // band hold horizon (seconds)
 input double InpBandMinRR        = 2.5;      // min reward:risk for band plans
 input double InpBandMaxStopPct   = 0.015;    // reject band plan if stop > 1.5% of price
 
+// v26.4: SPIKE SLIPPAGE — realized R vs the planned -1R stop.
+// Boom/Crash spikes gap the price and stops fill at the post-spike quote, so
+// a "protected" -1R can realize -4R..-10R. These counters make the tail
+// explicit in the journal and the HUD instead of hiding it inside g_total_r.
+int    g_gap_loss_n     = 0;      // closes that lost MORE than the planned stop
+double g_gap_loss_r_sum = 0.0;    // realized R summed over gap-loss closes
+int    g_stop_n         = 0;      // closes realized at/beyond the planned stop
+double g_slip_r_sum     = 0.0;    // sum of (realized R - planned R) over all closes
+
+//--- Record slippage for one closed trade (called from BOTH close paths)
+void RecordTradeSlippage(double actual_r, string exit_type)
+{
+   double planned = -1.0;
+   g_slip_r_sum += (actual_r - planned);
+   if(actual_r <= -0.9)          // stop territory (covers trails/BE stops too)
+      g_stop_n++;
+   if(actual_r < planned)
+   {
+      g_gap_loss_n++;
+      g_gap_loss_r_sum += actual_r;
+      PrintFormat(VTAG+"SPIKE SLIPPAGE: realized %+.2fR vs planned -1.00R (%s exit) — gap-through loss",
+                  actual_r, exit_type);
+      Telem("slippage", StringFormat("\"sym\":\"%s\",\"r\":%.3f,\"planned\":-1.0,\"exit\":\"%s\",\"gap\":true",
+                  _Symbol, actual_r, exit_type));
+   }
+   SaveSlipState();              // v26.2: persist after every close (both paths)
+}
+
+//+------------------------------------------------------------------+
+//| v26.2: persist slip counters per symbol (survive restarts)        |
+//+------------------------------------------------------------------+
+void SaveSlipState()
+{
+   int h=FileOpen(SymbolTaggedFile("MitemshubAI_slip", ".csv"), FILE_WRITE|FILE_TXT|FILE_ANSI);
+   if(h==INVALID_HANDLE) return;
+   FileWriteString(h, StringFormat("%d,%.4f,%d,%.4f\n",
+                   g_gap_loss_n, g_gap_loss_r_sum, g_stop_n, g_slip_r_sum));
+   FileClose(h);
+}
+
+void LoadSlipState()
+{
+   int h=FileOpen(SymbolTaggedFile("MitemshubAI_slip", ".csv"), FILE_READ|FILE_TXT|FILE_ANSI);
+   if(h==INVALID_HANDLE) return;
+   string line=FileReadString(h);
+   FileClose(h);
+   if(StringLen(line)==0) return;
+   string p[];
+   if(StringSplit(line, ',', p) >= 4)
+   {
+      g_gap_loss_n     = (int)StringToInteger(p[0]);
+      g_gap_loss_r_sum = StringToDouble(p[1]);
+      g_stop_n         = (int)StringToInteger(p[2]);
+      g_slip_r_sum     = StringToDouble(p[3]);
+      PrintFormat(VTAG+"SPIKE SLIPPAGE restored: gap-through %d (avg %+.2fR) | cum slip %+.2fR",
+                  g_gap_loss_n,
+                  (g_gap_loss_n > 0 ? g_gap_loss_r_sum / g_gap_loss_n : 0.0),
+                  g_slip_r_sum);
+   }
+}
+
 input group "=== Risk & Exits ==="
 input double InpRiskPerTrade     = 0.005;    // TARGET risk fraction (min-lot floor may force more)
 input double InpMaxEffectiveRiskPct = 20.0;  // HARD CAP: skip entry if real min-lot risk > this % of equity
 input double InpMaxTotalRiskPct  = 15.0;     // ACCOUNT GUARD: max SUMMED open risk (all fleet magics) as % of equity
+input double InpMicroFitPct      = 1.5;      // v26.6: if min-lot clamping overshoots risk (micro balance), shrink SL/TP so effective risk <= this % of equity (0=off)
 input string InpFleetMagicsCSV   = "7788010,7788025,7788050,7788075,7788100";
 input double InpTpMult           = 2.4;
 input int    InpMaxHoldBars      = 20;       // v23: raised from 14 — give winners room (20 bars = 5hr on M15)
-input double InpMaxDailyLossPct  = 0.03;
+input double InpMaxDailyLossPct  = 0.0;     // 0 = daily-loss halt DISABLED (was 0.03; user request 2026-08-30). DailyLossHalted() returns false when <= 0.
 input int    InpMaxConsecLoss    = 3;        // v23: lowered from 6 — pause sooner, preserve capital
 input int    InpCoolDownBars     = 3;
 input bool   InpUseTrailing      = true;
@@ -153,6 +256,14 @@ input double InpTrailStartR      = 1.0;      // trailing starts once trade is +1
 input double InpTrailDistR       = 0.7;      // v23: tightened from 0.9 — lock profit sooner
 input bool   InpUseBreakeven     = true;
 input double InpBeTriggerR       = 1.0;      // move SL to entry at +1R
+
+// v26.14: meta-labeling P(win) size multipliers (see scripts/meta_label_trainer.py)
+input bool   InpUseMetaLabel     = false;    // Scale risk by learned P(win) regime table (0=off)
+input string InpMetaLabelCSV     = "meta_label_regime_table.csv"; // File in MQL5\\Files, columns: regime,direction,n,win_rate,avg_r,multiplier,note
+
+input group "=== GARCH Vol Engine (v26.9 phase 1) ==="
+input bool   InpUseGarch         = true;     // EGARCH conditional-vol as the sigma source (fallback: legacy stddev if disabled/fails)
+input int    InpGarchWarmupBars  = 50;       // Observations before the GARCH forecast is trusted (GARCH_BUFFER_OBSERVATIONS)
 
 input group "=== Execution ==="
 input string InpEntryTFOverride  = "CURRENT"; // Entry timeframe: CURRENT,M1,M5,M15,M30,H1,H4,D1
@@ -163,11 +274,12 @@ input int    InpWarmupBars       = 250;
 input bool   InpDrawDashboard    = true;
 input bool   InpDrawSignals      = true;
 input bool   InpLiveExecution    = true;
-input int    InpMaxTradesPerDay  = 9999;
+input int    InpMaxTradesPerDay  = 0;        // 0 = DISABLED (v26.14: boundless opportunities - no daily trade cap)
 
 input group "=== Intelligence & Safety (v23) ==="
 input int    InpSessionStartHour = 6;        // Server hour to start trading (0-23)
 input int    InpSessionEndHour   = 21;       // Server hour to stop trading (0-23)
+input int    InpSessionEndOffsetMin = 45;    // v26.7: entries blocked this many minutes BEFORE the end hour (last entry ≤ 20:15 for end 21)
 input int    InpSameSymbolMaxPos = 1;        // Max open positions on this symbol (all magics)
 input bool   InpGraduatedExit    = true;     // Enable graduated time exit
 input int    InpEarlyCutBars     = 6;        // Bars at which to check for early loss cut
@@ -178,25 +290,72 @@ input double InpScaleFactor      = 0.75;     // Volume multiplier per consecutiv
 input double InpMinVolScale      = 0.30;     // Floor for volume scaling
 input double InpProfitLockR      = 0.5;      // Lock profit if trade reached 1R+ then fell to this R
 
+input group "=== Execution Telemetry (v26.4) ==="
+input bool   InpUseOnTradeTransaction = true; // Event-driven close detection (O(1) deals; polling fallback if off/fails)
+
+// v26.5: CB strategies in the intelligence layer.
+// PostTradeReview's strategy table only knew PB/BO/MOM/MR/BF, so the
+// strategies that do ALL Crash/Boom trading (CB-TICKFADE, CB-FADE, CB-GRIND)
+// were invisible to the self-review system: STRAT rows stayed at zero while
+// trades accumulated, and auto-disable could never judge them (Aug-30 state
+// file: 6 closed CB trades, all STRAT counters 0.0).
+#define CB_STRAT_N 3
+input bool   InpCBLearnStrategies = true;    // Track CB fade/grind expectancy + auto-disable
+input int    InpCBMinTradesToJudge = 20;     // Min CB trades before auto-disable can act
+input double InpCBMinExpectancy   = -0.10;    // Disable a CB mode below this expectancy (R/trade)
+
 input group "=== Crash/Boom Mode (v24) ==="
 input bool   InpCrashBoomMode    = false;    // Enable Crash/Boom trading mode
 input bool   InpIsCrashIndex     = false;    // true = Crash (1000/500/300), false = Boom (1000/500/300)
-input double InpCBSpikeThreshold = 2.2;      // Body ratio to count as spike (v25.3 micro-fade: 2.2x avg)
 input bool   InpCBMicroFade      = true;     // v25.3: reduce risk on small (micro) spikes
+
+// v26.10: AUTO per-symbol resolution for the CB numeric parameters — the same
+// cure as InpCBBurstGuardMode, extended to the exit geometry. AUTO (compiled
+// default) = the symbol calibration profile in CrashBoomCalibration.mqh (the
+// deployed v26.8 grid-search values). CUSTOM = the explicit input below wins
+// on BOTH charts. A stale stored chart input can no longer poison any of
+// these: unknown legacy inputs drop out, the new mode inputs default to AUTO,
+// and the profile ships the policy. Resolution is logged at init as
+// [CB-PARAM] lines — audit at a glance which source decided each value.
+enum ENUM_CB_PARAM_SOURCE { CB_PARAM_AUTO=0,     // Auto: symbol calibration profile
+                            CB_PARAM_CUSTOM=1 }; // Custom: explicit input wins
+input ENUM_CB_PARAM_SOURCE InpCBSpikeThresholdMode = CB_PARAM_AUTO; // Spike threshold source
+input double InpCBSpikeThreshold = 2.2;      // (CUSTOM) body ratio to count as spike (v25.3: 2.2x avg)
+input ENUM_CB_PARAM_SOURCE InpCBMaxSpikeProbMode = CB_PARAM_AUTO;   // Max spike prob source
+input double InpCBMaxSpikeProb   = 0.70;     // (CUSTOM) block entries above this spike probability
+input ENUM_CB_PARAM_SOURCE InpCBFadeRMode        = CB_PARAM_AUTO;   // Fade R source
+input double InpCBFadeR          = 0.4;      // (CUSTOM) fade entry at 0.4R into retrace (v26.8)
+input ENUM_CB_PARAM_SOURCE InpCBFadeSLMode       = CB_PARAM_AUTO;   // Fade SL source
+input double InpCBFadeSL         = 0.3;      // (CUSTOM) fade stop = 0.3x ATR (v26.8)
+input ENUM_CB_PARAM_SOURCE InpCBFadeTPMode       = CB_PARAM_AUTO;   // Fade TP source
+input double InpCBFadeTP         = 4.0;      // (CUSTOM) fade target = 4.0x ATR (v26.8)
 
 input group "=== Tick Fast-Fade (v25.4) ==="
 input bool   InpCBTickFade      = true;     // Fire fades on the tick spike itself (no M5 wait)
 input double InpCBTickSpikePts  = 3.0;      // Min tick jump (points) that counts as a spike
 input int    InpCBTickFadeTOSec = 900;      // Fast-fade pending timeout (v25.6: 900s — big spikes retrace slowly)
-input double InpCBMaxSpikeProb   = 0.65;     // Block entries above this spike probability
-input double InpCBFadeR          = 0.3;      // Fade entry at 0.3R into retrace
-input double InpCBFadeSL         = 0.5;      // Fade stop = 0.5x ATR
-input double InpCBFadeTP         = 1.5;      // Fade target = 1.5x ATR
+// v26.10: spike-threshold / max-spike-prob / fade R / SL / TP moved to the
+// "CB Parameters — AUTO per-symbol resolution" group above (with AUTO/CUSTOM
+// source selectors).
 input double InpCBBaseRisk       = 0.5;      // Base risk % for Crash/Boom trades
+input int    InpCBMaxConsecLoss  = 4;        // v26.5: pause CB mode after N consec losses (day-scoped)
 input double InpCBMinRisk        = 0.15;     // Min risk % during high spike probability
 input bool   InpCBEnableGrind    = false;    // Enable grind continuation leg (default: fade-only)
 input bool   InpCBRequireSpikeDirection = true; // Only fade correctly directed spike candles
 input double InpCBMinATRPoints   = 0.0;     // Optional minimum ATR in points; 0 disables
+// v26.9: smart per-symbol burst-guard default. AUTO is resolved INSIDE the
+// engine (Crash → ON, Boom → OFF — the §7 offline replay verdict in
+// EA_UPGRADE_RESEARCH.md), so a chart that never loads its preset still
+// ships the right policy. This kills the Aug-31 failure mode where the Boom
+// chart ran on stale stored inputs with guard=true while the .set said off.
+// Explicit ON/OFF are hard overrides and always win over AUTO.
+enum ENUM_CB_BURST_GUARD { CB_BURSTGUARD_AUTO=0,  // Auto: smart per-symbol (Crash ON, Boom OFF)
+                           CB_BURSTGUARD_ON=1,    // Force ON (explicit override)
+                           CB_BURSTGUARD_OFF=2 }; // Force OFF (explicit override)
+input ENUM_CB_BURST_GUARD InpCBBurstGuardMode = CB_BURSTGUARD_AUTO; // Burst guard mode (AUTO = Crash ON / Boom OFF; ON/OFF = override)
+input int    InpCBBurstWindowSec = 1800;    // Burst window (s): count spikes inside
+input int    InpCBBurstMaxSpikes = 2;       // Block fades when spikes-in-window >= this
+input int    InpCBBurstMinGapSec = 600;     // Block fades when prev-spike gap < this (s); 0 disables
 
 input group "=== Tick Recorder (v25.1) ==="
 input bool   InpTickRecordEnabled = true;   // Always-on tick recorder (microstructure archive)
@@ -211,6 +370,7 @@ input int    InpMinTradesToJudge = 15;       // Minimum trades before auto-disab
 input double InpMinExpectancy    = 0.0;      // Min expectancy (R/trade) to keep a strategy active
 input bool   InpAutoDisableStrat = true;     // Auto-disable strategies with negative expectancy
 input bool   InpAutoBlockTime    = false;    // Auto-block worst-performing time blocks
+input bool   InpCBPersistLearning= true;     // v26.5: CB fade/grind expectancy survives restarts (learned gating)
 
 //+------------------------------------------------------------------+
 //| GLOBALS                                                            |
@@ -233,6 +393,18 @@ bool   g_sigma_init=false;
 // v22 TELEMETRY
 double g_sigma_now=0, g_z_dev=0, g_exp_ratio=0;
 string g_fired_legs="", g_last_skip="", g_last_cb_skip="";
+
+//--- v26.9 phase 1: GARCH conditional-volatility forecaster (modular Market
+//--- engine, phase-10 locked against the Python reference). Bar-driven only
+//--- (Update once per entry-TF bar); zero per-tick cost. Fallback: if the
+//--- module fails to deliver a valid sigma (bad price data or invalid
+//--- module output), the legacy PerBarSigma stddev keeps running unchanged.
+CGarchForecaster  g_garch;                    // calibrated-fixed mode (default ctor)
+bool              g_garch_ok     = true;      // sticky: false once a persistent failure is seen
+bool              g_garch_init_note = false;   // one-time "GARCH ready" log
+int               g_garch_fail_n = 0;         // consecutive failed updates (diagnostics)
+double            g_garch_sigma  = 0.0;      // last accepted sigma (relative, per-bar)
+double            g_garch_z      = 0.0;      // last standardized shock z_t (telemetry)
 
 // per-signal exit geometry
 bool   g_sig_is_band=false;
@@ -268,23 +440,44 @@ int    g_fleet_n=0;
 double g_session_pnl=0;
 
 // v23.1 INTELLIGENCE LAYER — self-review after every trade
-#define REVIEW_FILE "MitemshubAI_review.csv"
+#define REVIEW_BASE "MitemshubAI_review"         // v26.1: per-symbol suffix appended
 
-// Strategy performance tracking (index 0=PB,1=BO,2=MOM,3=MR,4=BF)
-double g_strat_trades[5];     // total trades per strategy
-double g_strat_wins[5];       // wins per strategy
-double g_strat_total_r[5];    // cumulative R per strategy
-bool   g_strat_enabled[5];    // auto-disable flag
+// v26.5 strategy table: 8 slots — 0=PB,1=BO,2=MOM,3=MR,4=BF (classic)
+// + 5=CB-TICKFADE,6=CB-FADE,7=CB-GRIND (Crash/Boom modes).
+// v26.9-fix (2026-08-31): these arrays stayed [5] when the 8-slot table was
+// introduced — every walker (CheckStrategyPerformance, the LoadReviewState
+// echo, SaveReviewState, the HUD Intel line, PostTradeReview) then crashed
+// with "array out of range" at i=5, aborting OnInit/OnTick on both charts
+// and leaving the HUD labels without text (the "Label" spam). Resized to 8.
+// v26.11-fix (2026-08-31): sizes are now NAMED CONSTANTS shared by every
+// declaration, walker loop, loader guard, and name table — a size-vs-loop
+// drift can no longer be reintroduced silently — and SelfTestFixedArrays()
+// re-verifies all of it at init, fail-closed, BEFORE the first file-indexed
+// write can reach the tables.
+#define STRAT_SLOTS   8   // 5 classic + 3 CB modes
+#define REGIME_SLOTS  5
+#define TIME_SLOTS    5
+
+// v26.11: name tables hoisted to constant globals sized by the same constants
+// (they were duplicated inline in CheckStrategyPerformance/CheckRegime-
+// Performance and AGAIN in the HUD — a third drift hazard).
+const string STRAT_NAMES[STRAT_SLOTS]   = {"PB","BO","MOM","MR","BF","CB-TICKFADE","CB-FADE","CB-GRIND"};
+const string REGIME_NAMES[REGIME_SLOTS] = {"BULLISH","BEARISH","RANGING","HIGH_VOL","NO_TRADE"};
+
+double g_strat_trades[STRAT_SLOTS];     // total trades per strategy
+double g_strat_wins[STRAT_SLOTS];       // wins per strategy
+double g_strat_total_r[STRAT_SLOTS];    // cumulative R per strategy
+bool   g_strat_enabled[STRAT_SLOTS];    // auto-disable flag
 
 // Regime performance tracking (index 0=BULL,1=BEAR,2=RANGE,3=HVOL,4=NOTRADE)
-double g_regime_trades[5];
-double g_regime_wins[5];
-double g_regime_total_r[5];
+double g_regime_trades[REGIME_SLOTS];
+double g_regime_wins[REGIME_SLOTS];
+double g_regime_total_r[REGIME_SLOTS];
 
 // Time-block tracking (index 0=06-10,1=10-14,2=14-18,3=18-21,4=other)
-double g_time_trades[5];
-double g_time_wins[5];
-double g_time_total_r[5];
+double g_time_trades[TIME_SLOTS];
+double g_time_wins[TIME_SLOTS];
+double g_time_total_r[TIME_SLOTS];
 
 // Last review counters
 int g_last_strategy_review=0;
@@ -294,6 +487,24 @@ int g_last_time_review=0;
 // Current signal context (set by GenerateSignal, used by ReviewTrade)
 string g_last_strategy="NONE";
 string g_last_exit_type="NONE";
+
+// v26.12: order-rejection accounting — quantifies lost fade opportunities so
+// the offline loop can value them (Aug-30: 7 rejected Boom fades were invisible
+// to every learning table; the offline replay had to reconstruct them by hand
+// from the Experts log + broker journal).
+int g_cb_reject_total   = 0;   // lifetime: all failed/aborted CB order sends
+int g_cb_reject_today   = 0;   // today: reset with the daily counters
+int g_cb_reject_streak  = 0;   // consecutive rejections without an accepted order
+string g_cb_reject_last = "";  // last rejection: "retcode=10016" / "abort-tp-outran"
+
+// v26.14: meta-labeling P(win) size multipliers — loaded from
+// data/meta_label_regime_table.csv (produced by scripts/meta_label_trainer.py).
+// Keyed by (regime, direction); the multiplier scales base risk for new entries.
+#define META_LABEL_MAX_ROWS 16
+string g_ml_regime[META_LABEL_MAX_ROWS];
+int    g_ml_dir[META_LABEL_MAX_ROWS];
+double g_ml_mult[META_LABEL_MAX_ROWS];
+int    g_ml_rows = 0;
 
 // v24: Crash/Boom engine
 CCrashBoomEngine g_cb;
@@ -310,6 +521,194 @@ ENUM_TIMEFRAMES GetRegimeTF(ENUM_TIMEFRAMES tf)
       case PERIOD_H1:  return PERIOD_H4;
       case PERIOD_H4:  return PERIOD_D1;
       default:         return PERIOD_D1;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| v26.9: STARTUP SELF-CHECK — one glanceable banner of the v26.x    |
+//| switches that drove the Aug-30 stale-chart incidents. Every row   |
+//| carries the deployed expectation, so a chart running stale stored |
+//| inputs is visible in the Experts log without opening the dialog.  |
+//| (The banner itself only exists in fresh builds — its presence is  |
+//| also a binary-freshness marker.)                                  |
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| v26.10: resolve one CB numeric parameter (AUTO = calibration      |
+//| profile, CUSTOM = explicit input wins) and log the decision so    |
+//| the init log shows exactly which source shipped each value.       |
+//+------------------------------------------------------------------+
+//--- v26.10: resolved CB parameter values + source flags (filled by
+//--- ResolveCBParam), consumed by the policy self-check below
+double g_cb_res[5];
+bool   g_cb_custom[5];
+const string g_cb_names[5] = {"spike-thresh", "max-spike-prob", "fade-R", "fade-SL", "fade-TP"};
+
+double ResolveCBParam(ENUM_CB_PARAM_SOURCE mode, double auto_val, double custom_val,
+                      const string label, const int slot)
+{
+   if(mode == CB_PARAM_CUSTOM)
+   {
+      g_cb_res[slot]    = custom_val;
+      g_cb_custom[slot] = true;
+      PrintFormat(VTAG+"[CB-PARAM] %-14s = %.2f (explicit override)", label, custom_val);
+      return custom_val;
+   }
+   g_cb_res[slot]    = auto_val;
+   g_cb_custom[slot] = false;
+   PrintFormat(VTAG+"[CB-PARAM] %-14s = %.2f (AUTO: %s calibration profile)",
+               label, auto_val, InpIsCrashIndex ? "Crash" : "Boom");
+   return auto_val;
+}
+
+void PrintStartupSelfCheck()
+{
+   string halt = (InpMaxDailyLossPct <= 0.0)
+      ? "OFF"
+      : StringFormat("ON %.1f%%", InpMaxDailyLossPct * 100.0);
+   string bg;
+   if(!InpCrashBoomMode)                             bg = "n/a (non-CB chart)";
+   else if(InpCBBurstGuardMode == CB_BURSTGUARD_ON)  bg = "ON (explicit override)";
+   else if(InpCBBurstGuardMode == CB_BURSTGUARD_OFF) bg = "OFF (explicit override)";
+   else if(InpIsCrashIndex)                          bg = "AUTO -> ON (Crash policy)";
+   else                                              bg = "AUTO -> OFF (Boom policy)";
+   string mf = (InpMicroFitPct <= 0.0) ? "OFF" : StringFormat("%.1f%%", InpMicroFitPct);
+
+   Print(VTAG+"SELF-CHECK — key v26.x switches ('<' = deployed expectation):");
+   PrintFormat(VTAG+"  DailyHalt    = %-26s < expect OFF (0%% — user request 2026-08-30)", halt);
+   PrintFormat(VTAG+"  BurstGuard   = %-26s < Crash AUTO->ON / Boom AUTO->OFF (v26.9 policy)", bg);
+   PrintFormat(VTAG+"  MicroFit     = %-26s < expect 1.5%% on CB charts (0 = stale v26.5- inputs)", mf);
+   PrintFormat(VTAG+"  LambdaModel  = %-26s < built-in ON (v26.9; λ trusted at 3 learned gaps)", "ON (built-in)");
+   PrintFormat(VTAG+"  CloseDetect = %-26s < expect ON (v26.4 event-driven closes)",
+               InpUseOnTradeTransaction ? "ON (event-driven)" : "OFF (polling fallback)");
+   PrintFormat(VTAG+"  Rejects      = %-26s < counts lost fade entries (v26.12); today=%d streak=%d",
+               StringFormat("%d total", g_cb_reject_total), g_cb_reject_today, g_cb_reject_streak);
+   int n_custom = (InpCBSpikeThresholdMode==CB_PARAM_CUSTOM ? 1 : 0)
+                + (InpCBMaxSpikeProbMode  ==CB_PARAM_CUSTOM ? 1 : 0)
+                + (InpCBFadeRMode         ==CB_PARAM_CUSTOM ? 1 : 0)
+                + (InpCBFadeSLMode        ==CB_PARAM_CUSTOM ? 1 : 0)
+                + (InpCBFadeTPMode        ==CB_PARAM_CUSTOM ? 1 : 0);
+   PrintFormat(VTAG+"  CB-Params    = %-26s < AUTO=calibration profile (v26.8 geometry), CUSTOM=input wins",
+               n_custom==0 ? "all AUTO (profile)" : StringFormat("%d/5 CUSTOM", n_custom));
+}
+
+//+------------------------------------------------------------------+
+//| v26.10: POLICY SELF-CHECK — compare the RESOLVED config against   |
+//| the .set-declared deployed policy and warn on any mismatch.       |
+//| The POLICY_* constants below are the runtime mirror of            |
+//| MitemshubAI_{BOOM,CRASH}1000_CB.set: whenever the .set policy     |
+//| changes, update these constants in the SAME commit so the check   |
+//| stays meaningful. An intentional one-off override is allowed but  |
+//| is made LOUD here — overrides must never be silent again (the     |
+//| Aug-30/31 stale-input incidents were exactly silent drifts).      |
+//+------------------------------------------------------------------+
+#define POLICY_GUARD_CRASH    true     // Crash 1000: burst guard ON  (v26.0/v26.9 §7 verdict)
+#define POLICY_GUARD_BOOM     false    // Boom 1000: burst guard OFF (v26.0/v26.9 §7 verdict)
+#define POLICY_SPIKE_THRESH   2.2      // InpCBSpikeThreshold
+#define POLICY_MAX_PROB       0.70     // InpCBMaxSpikeProb
+#define POLICY_FADE_R         0.4      // InpCBFadeR (v26.8 grid-search)
+#define POLICY_FADE_SL        0.3      // InpCBFadeSL xATR (v26.8)
+#define POLICY_FADE_TP        4.0      // InpCBFadeTP xATR (v26.8)
+#define POLICY_TICK_FADE      true     // InpCBTickFade
+#define POLICY_TICK_PTS       3.0      // InpCBTickSpikePts
+#define POLICY_TICK_TO_SEC    900      // InpCBTickFadeTOSec
+#define POLICY_MAX_HOLD_BARS  6        // InpMaxHoldBars (1800s hold)
+#define POLICY_BASE_RISK      0.30     // InpCBBaseRisk (both charts)
+#define POLICY_MICRO_FADE     true     // InpCBMicroFade
+#define POLICY_REQ_SPIKE_DIR  true     // InpCBRequireSpikeDirection
+#define POLICY_DAILY_LOSS     0.0      // InpMaxDailyLossPct — halt OFF (user request 2026-08-30)
+#define POLICY_MICRO_FIT      1.5      // InpMicroFitPct (percent units)
+#define POLICY_CLOSE_DETECT   true     // InpUseOnTradeTransaction (v26.4)
+
+int    g_pol_ok = 0, g_pol_total = 0;
+string g_pol_mism = "";
+
+void PolRow(const string name, const string resolved, const string declared,
+            const bool ok, const string fix_hint)
+{
+   g_pol_total++;
+   string line = StringFormat("  %-14s resolved=%-18s declared=%-10s", name, resolved, declared);
+   if(ok) { line += " ok"; g_pol_ok++; }
+   else
+   {
+      line += "  <-- MISMATCH";
+      g_pol_mism += StringFormat("%s: resolved %s vs declared %s%s; ",
+                                 name, resolved, declared,
+                                 fix_hint == "" ? "" : " — " + fix_hint);
+   }
+   Print(VTAG+line);
+}
+
+void RunPolicySelfCheck()
+{
+   if(!InpCrashBoomMode)
+   {
+      Print(VTAG+"[POLICY] self-check n/a (non-CB chart)");
+      return;
+   }
+   string sym = _Symbol;
+   StringToUpper(sym);
+   if(StringFind(sym, "1000") < 0)
+   {
+      PrintFormat(VTAG+"[POLICY] no declared policy table for %s — self-check skipped (Boom/Crash 1000 only)",
+                  _Symbol);
+      return;
+   }
+
+   g_pol_ok = 0; g_pol_total = 0; g_pol_mism = "";
+   const bool   decl_guard = InpIsCrashIndex ? POLICY_GUARD_CRASH : POLICY_GUARD_BOOM;
+   const string set_file   = InpIsCrashIndex ? "MitemshubAI_CRASH1000_CB.set" : "MitemshubAI_BOOM1000_CB.set";
+
+   Print(VTAG+"[POLICY] resolved config vs .set-declared policy:");
+   PolRow("BurstGuard",
+          StringFormat("%s (%s)", g_cb.GetBurstGuardActive() ? "ON" : "OFF",
+                       InpCBBurstGuardMode == CB_BURSTGUARD_AUTO ? "AUTO" : "override"),
+          decl_guard ? "ON" : "OFF",
+          g_cb.GetBurstGuardActive() == decl_guard,
+          "load " + set_file);
+   for(int i = 0; i < 5; i++)
+   {
+      double declv = 0;
+      if(i == 0)      declv = POLICY_SPIKE_THRESH;
+      else if(i == 1) declv = POLICY_MAX_PROB;
+      else if(i == 2) declv = POLICY_FADE_R;
+      else if(i == 3) declv = POLICY_FADE_SL;
+      else            declv = POLICY_FADE_TP;
+      PolRow(g_cb_names[i],
+             StringFormat("%.2f (%s)", g_cb_res[i], g_cb_custom[i] ? "CUSTOM" : "AUTO"),
+             StringFormat("%.2f", declv),
+             MathAbs(g_cb_res[i] - declv) < 0.005,
+             g_cb_custom[i] ? ("verify override is intentional, or load " + set_file) : "");
+   }
+   PolRow("tick-fade",     InpCBTickFade ? "ON" : "OFF", "ON",
+          InpCBTickFade == POLICY_TICK_FADE, "load " + set_file);
+   PolRow("tick-spike",    StringFormat("%.1f pts", InpCBTickSpikePts), "3.0 pts",
+          MathAbs(InpCBTickSpikePts - POLICY_TICK_PTS) < 0.005, "");
+   PolRow("tick-TO",       StringFormat("%ds", InpCBTickFadeTOSec), "900s",
+          InpCBTickFadeTOSec == POLICY_TICK_TO_SEC, "");
+   PolRow("max-hold",      StringFormat("%d bars", InpMaxHoldBars), "6 bars",
+          InpMaxHoldBars == POLICY_MAX_HOLD_BARS, "");
+   PolRow("base-risk",     StringFormat("%.2f%%", InpCBBaseRisk), "0.30%",
+          MathAbs(InpCBBaseRisk - POLICY_BASE_RISK) < 0.005, "");
+   PolRow("micro-fade",    InpCBMicroFade ? "ON" : "OFF", "ON",
+          InpCBMicroFade == POLICY_MICRO_FADE, "load " + set_file);
+   PolRow("req-spike-dir", InpCBRequireSpikeDirection ? "ON" : "OFF", "ON",
+          InpCBRequireSpikeDirection == POLICY_REQ_SPIKE_DIR, "");
+   PolRow("DailyHalt",     InpMaxDailyLossPct <= 0.0 ? "OFF" : StringFormat("%.1f%%", InpMaxDailyLossPct * 100.0), "OFF",
+          InpMaxDailyLossPct <= POLICY_DAILY_LOSS, "set InpMaxDailyLossPct=0 (user request 2026-08-30)");
+   PolRow("MicroFit",      InpMicroFitPct <= 0.0 ? "OFF" : StringFormat("%.1f%%", InpMicroFitPct), "1.5%",
+          MathAbs(InpMicroFitPct - POLICY_MICRO_FIT) < 0.05, "0 = stale v26.5- inputs");
+   PolRow("CloseDetect",  InpUseOnTradeTransaction ? "ON" : "OFF", "ON",
+          InpUseOnTradeTransaction == POLICY_CLOSE_DETECT, "v26.4 event-driven closes");
+
+   if(g_pol_mism == "")
+      PrintFormat(VTAG+"[POLICY] %d/%d rows match the declared policy — config is clean.",
+                  g_pol_ok, g_pol_total);
+   else
+   {
+      PrintFormat(VTAG+"*** POLICY MISMATCH: %d of %d rows deviate from the declared policy ***",
+                  g_pol_total - g_pol_ok, g_pol_total);
+      Print(VTAG+"*** Deviations: " + g_pol_mism + "***");
+      Print(VTAG+"*** Fix: click Load in the EA dialog and pick " + set_file + " (MQL5\\Presets), or correct the flagged inputs. If an override is intentional, update the .set AND the POLICY_* mirrors together. ***");
    }
 }
 
@@ -362,7 +761,14 @@ int OnInit()
    }
 
    RecoverPosition();
+   // v26.11: fail-closed BEFORE the first file-indexed table write
+   if(!SelfTestFixedArrays())
+      return(INIT_FAILED);
    LoadReviewState();  // v23.1: restore persisted trade stats + intelligence
+   LoadSlipState();    // v26.2: restore spike-slippage counters
+   LoadCbSpikeState(); // v26.5: restore learned CB spike gating
+   LoadMetaLabelTable(); // v26.14: restore learned P(win) regime multipliers
+   RecoverDetachedClose(); // v26.9: journal closes that happened while the EA was detached
    if(InpDrawDashboard) CreateDashboard();
    // v25.1: tick recorder — degrades to no-op if the file can't be opened
    g_tick_rec.Init(_Symbol, InpTickRecordEnabled, InpTickFlushTicks, InpTickFlushSeconds);
@@ -377,8 +783,9 @@ int OnInit()
                InpProfitLockR, InpTrailDistR);
    if(InpMaxEffectiveRiskPct > 10.0)
       Print(VTAG+"WARNING: risk cap > 10% — tiny-account mode.");
-   Print(VTAG+"Telemetry -> MQL5\\Files\\", TELEM_FILE);
-   Print(VTAG+"State -> MQL5\\Files\\", STATE_FILE);
+   Print(VTAG+"Telemetry -> MQL5\\Files\\", SymbolTaggedFile(TELEM_BASE, ".jsonl"));
+   Print(VTAG+"State    -> MQL5\\Files\\", SymbolTaggedFile(STATE_BASE, ".csv"));
+   Print(VTAG+"Review   -> MQL5\\Files\\", SymbolTaggedFile(REVIEW_BASE, ".csv"));
    PrintFormat(VTAG+"Intelligence: StrategyReview@%d trades, RegimeReview@%d, TimeReview@%d",
                InpStrategyReviewN, InpRegimeReviewN, InpTimeReviewN);
    PrintFormat(VTAG+"Auto-disable: %s (min %d trades, min expectancy %.2fR)",
@@ -388,11 +795,19 @@ int OnInit()
    if(InpCrashBoomMode)
    {
       g_cb.Init(true, InpIsCrashIndex);
-      g_cb.SetSpikeThreshold(InpCBSpikeThreshold);
-      g_cb.SetMaxSpikeProb(InpCBMaxSpikeProb);
-      g_cb.SetFadeR(InpCBFadeR);
-      g_cb.SetFadeSL(InpCBFadeSL);
-      g_cb.SetFadeTP(InpCBFadeTP);
+      // v26.10: AUTO per-symbol resolution — the calibration profile ships the
+      // deployed v26.8 geometry; CUSTOM mode lets an explicit input win.
+      double pv;
+      pv = ResolveCBParam(InpCBSpikeThresholdMode, g_cb.GetSpikeThresholdEff(), InpCBSpikeThreshold, "spike-thresh", 0);
+      if(InpCBSpikeThresholdMode == CB_PARAM_CUSTOM) g_cb.SetSpikeThreshold(pv);
+      pv = ResolveCBParam(InpCBMaxSpikeProbMode,   g_cb.GetMaxSpikeProbEff(),   InpCBMaxSpikeProb,   "max-spike-prob", 1);
+      if(InpCBMaxSpikeProbMode   == CB_PARAM_CUSTOM) g_cb.SetMaxSpikeProb(pv);
+      pv = ResolveCBParam(InpCBFadeRMode,          g_cb.GetFadeREff(),          InpCBFadeR,          "fade-R", 2);
+      if(InpCBFadeRMode          == CB_PARAM_CUSTOM) g_cb.SetFadeR(pv);
+      pv = ResolveCBParam(InpCBFadeSLMode,         g_cb.GetFadeSLEff(),         InpCBFadeSL,         "fade-SL", 3);
+      if(InpCBFadeSLMode         == CB_PARAM_CUSTOM) g_cb.SetFadeSL(pv);
+      pv = ResolveCBParam(InpCBFadeTPMode,         g_cb.GetFadeTPEff(),         InpCBFadeTP,         "fade-TP", 4);
+      if(InpCBFadeTPMode         == CB_PARAM_CUSTOM) g_cb.SetFadeTP(pv);
       g_cb.SetBaseRisk(InpCBBaseRisk);
       g_cb.SetMinRisk(InpCBMinRisk);
       g_cb.SetEnableGrind(InpCBEnableGrind);
@@ -400,8 +815,12 @@ int OnInit()
       g_cb.SetMinATRPoints(InpCBMinATRPoints);
       g_cb.SetMicroFade(InpCBMicroFade);
       g_cb.SetTickFade(InpCBTickFade, InpCBTickSpikePts, InpCBTickFadeTOSec);
-      PrintFormat(VTAG+"Crash/Boom mode: %s | spike_thresh=%.1f | max_prob=%.2f | risk=%.2f%% | grind=%s | micro=%s",
-                  InpIsCrashIndex?"CRASH":"BOOM", InpCBSpikeThreshold, InpCBMaxSpikeProb, InpCBBaseRisk,
+      g_cb.SetTickFadeGuard((int)InpCBBurstGuardMode, InpCBBurstWindowSec, InpCBBurstMaxSpikes, InpCBBurstMinGapSec);
+      PrintFormat(VTAG+"Crash/Boom mode: %s | spike_thresh=%.1f | max_prob=%.2f | fade R=%.2f SL=%.2fxATR TP=%.1fxATR | risk=%.2f%% | grind=%s | micro=%s",
+                  InpIsCrashIndex?"CRASH":"BOOM",
+                  g_cb.GetSpikeThresholdEff(), g_cb.GetMaxSpikeProbEff(),
+                  g_cb.GetFadeREff(), g_cb.GetFadeSLEff(), g_cb.GetFadeTPEff(),
+                  InpCBBaseRisk,
                   InpCBEnableGrind?"ON":"OFF", InpCBMicroFade?"ON":"OFF");
       // v25.9: make a stale remembered-parameter attach impossible to miss.
       if(!InpCBMicroFade)
@@ -416,6 +835,9 @@ int OnInit()
       g_cb.Init(false, false);
    }
 
+   PrintStartupSelfCheck();   // v26.9: one-glance stale-chart detector in the log
+   RunPolicySelfCheck();      // v26.10: resolved config vs .set-declared policy
+
    return INIT_SUCCEEDED;
 }
 
@@ -428,6 +850,7 @@ void OnDeinit(const int reason)
    for(int i=0;i<26;i++) ObjectDelete(0, dash_names[i]);
 
    SaveReviewState();  // v23.1: persist trade stats + intelligence on shutdown
+   SaveSlipState();    // v26.2: persist spike-slippage counters
    if(InpCrashBoomMode) g_cb.Deinit();  // v24.1: release indicator handles
    g_tick_rec.Flush();  // v25.1: persist buffered ticks (file closed by destructor)
 
@@ -438,15 +861,272 @@ void OnDeinit(const int reason)
 
 //+------------------------------------------------------------------+
 //| v23: Session filter — block entries outside trading hours         |
+//| v26.7: MINUTE-LEVEL cutoff. The hour-only check (`hour < end`)    |
+//| allowed entries in the whole final hour (seen live on Aug-30:     |
+//| a tick-fade fired at 22:50 server — 10 min before a 23:00 end —   |
+//| and every spike-gap loss that day landed inside that last hour).  |
+//| New input InpSessionEndOffsetMin cuts entries N minutes earlier   |
+//| (default 45 → last entry at 20:15 for a 21:00 end). Open trades   |
+//| are still managed to completion; management is never session-     |
+//| gated. A negative offset extends INTO the end hour instead.       |
 //+------------------------------------------------------------------+
 bool IsSessionActive()
 {
    MqlDateTime dt;
    TimeCurrent(dt);
    if(InpSessionStartHour < InpSessionEndHour)
-      return (dt.hour >= InpSessionStartHour && dt.hour < InpSessionEndHour);
+      return (dt.hour >= InpSessionStartHour &&
+              (dt.hour < InpSessionEndHour ||
+               (dt.hour == InpSessionEndHour &&
+                InpSessionEndOffsetMin < 0 && dt.min < -InpSessionEndOffsetMin) ||
+               (dt.hour + 1 == InpSessionEndHour &&
+                dt.min < 60 - MathMax(InpSessionEndOffsetMin, 0))));
    else  // wraps midnight
       return (dt.hour >= InpSessionStartHour || dt.hour < InpSessionEndHour);
+}
+
+//--- v26.5: learned CB gating — spikes (grind+fade) survive restarts
+int    g_cb_spike_n       = 0;   // CB spike trades (fade+grind attempts) accumulated
+double g_cb_spike_r_sum   = 0.0; // realized R summed over CB spike trades
+double g_cb_spike_expect  = 0.0; // EWMA expectancy of CB spike trades (R/trade)
+double g_cb_spike_sigma   = 0.5; // EWMA std of CB spike trade R
+int    g_cb_spike_streak  = 0;   // consec losses on CB spike trades (EWMA lifetime)
+bool   g_cb_spike_blocked = false; // learned gate verdict (persists)
+bool   g_cb_spike_was_blocked = false; // edge-trigger for the facade log line
+int    g_cb_gate_probe    = 0;   // v26.13: exploration budget after a gate close
+int    g_cb_quiet_days    = 0;   // v26.13: days with zero spike trades (EWMA decay)
+
+
+
+//--- EWMA update of CB spike expectancy after each CB spike close
+void UpdateCbSpikeLearning(double r)
+{
+   g_cb_spike_n++;
+   g_cb_spike_r_sum += r;
+   const double a = 0.15;                       // ~7-trade memory (day-scale)
+   g_cb_spike_expect = (g_cb_spike_n <= 2) ? r : (a*r + (1.0-a)*g_cb_spike_expect);
+   double dev = (r - g_cb_spike_expect);
+   g_cb_spike_sigma = (g_cb_spike_n <= 2) ? 0.5 : MathSqrt(a*dev*dev + (1.0-a)*g_cb_spike_sigma*g_cb_spike_sigma);
+   if(r < 0) g_cb_spike_streak++; else g_cb_spike_streak = 0;
+   // v26.13: a completed trade is fresh evidence — close the exploration window
+   if(g_cb_gate_probe > 0)
+   {
+      g_cb_gate_probe = 0;
+      PrintFormat(VTAG+"CB-SPIKE GATE: exploration trade completed (R=%+.2f) — budget closed, gate verdict re-evaluated", r);
+   }
+   g_cb_quiet_days = 0;
+}
+
+//--- v26.13: daily EWMA decay — called once per new session day.
+//    The deadlock fix: the old gate could block ALL spike trades forever
+//    (expect<1.5σ with a fat sigma from one gap-through loss), and expect
+//    could never recover because recovery requires trades — which the gate
+//    blocked. Now a quiet day halves |expect| toward 0 and decays n, so
+//    after ~2 days without trades the gate re-arms on its own.
+void DecayCbSpikeLearning()
+{
+   if(g_cb_spike_n == 0) return;
+   g_cb_quiet_days++;
+   g_cb_spike_expect *= 0.5;          // mean decays toward 0 (re-arms the gate)
+   g_cb_spike_sigma  = MathMax(0.5, g_cb_spike_sigma * 0.7);  // noise shrinks too
+   if(g_cb_spike_n > 2) g_cb_spike_n = (int)(g_cb_spike_n * 0.6);  // evidence ages
+   g_cb_spike_streak = 0;             // day-scoped, matching g_consec_loss
+   PrintFormat(VTAG+"CB-SPIKE LEARNING: quiet day %d — expect decays to %+.2fR, sigma %.2f, n=%d (gate re-arms as mean → 0)",
+               g_cb_quiet_days, g_cb_spike_expect, g_cb_spike_sigma, g_cb_spike_n);
+}
+
+//--- Learned gate: block CB spike entries while the fade thesis trends fake.
+//    A real edge shows mean >> noise; facades show mean <= 0 with fat noise.
+//    v26.13 deadlock fix:
+//      * "noise swamps edge" now requires expect < 0 — a positive mean is
+//        NEVER blocked (the old expect < 1.5σ froze the gate at sigma=0.5
+//        default even for a healthy +0.74R mean).
+//      * exploration budget: after a gate closes, the next g_cb_gate_probe
+//        spike signals still fire (spaced by cooldown) so the EWMA gets
+//        fresh data instead of freezing forever.
+bool CbSpikeFacade()
+{
+   if(!InpCBPersistLearning || g_cb_spike_n < 4) return false;   // not enough evidence
+   if(g_cb_gate_probe > 0) return false;                         // exploration budget open
+   if(g_cb_spike_expect < -0.25)                                 // persistent negative edge
+      return true;
+   if(g_cb_spike_expect < 0.0 &&
+      g_cb_spike_sigma > 0 && g_cb_spike_expect < 1.5*g_cb_spike_sigma)
+      return true;                                               // negative mean swamped by noise
+   return false;
+}
+
+//--- Persist per symbol; survives re-attaches and restarts (v26.5)
+void SaveCbSpikeState()
+{
+   int h=FileOpen(SymbolTaggedFile("MitemshubAI_cblearn", ".csv"), FILE_WRITE|FILE_TXT|FILE_ANSI);
+   if(h==INVALID_HANDLE) return;
+   FileWriteString(h, StringFormat("%d,%.4f,%.4f,%.4f,%d,%d,%d,%d\n",
+                   g_cb_spike_n, g_cb_spike_r_sum, g_cb_spike_expect, g_cb_spike_sigma,
+                   g_cb_spike_streak, g_cb_spike_blocked?1:0,
+                   g_cb_gate_probe, g_cb_quiet_days));   // v26.13: probe + quiet days persist
+   FileClose(h);
+}
+
+void LoadCbSpikeState()
+{
+   int h=FileOpen(SymbolTaggedFile("MitemshubAI_cblearn", ".csv"), FILE_READ|FILE_TXT|FILE_ANSI);
+   if(h==INVALID_HANDLE) return;
+   string line=FileReadString(h);
+   FileClose(h);
+   if(StringLen(line)==0) return;
+   string p[];
+   if(StringSplit(line, ',', p) >= 6)
+   {
+      g_cb_spike_n       = (int)StringToInteger(p[0]);
+      g_cb_spike_r_sum   = StringToDouble(p[1]);
+      g_cb_spike_expect  = StringToDouble(p[2]);
+      g_cb_spike_sigma   = StringToDouble(p[3]);
+      g_cb_spike_streak  = (int)StringToInteger(p[4]);
+      g_cb_spike_blocked = (StringToInteger(p[5]) == 1);
+      if(StringSplit(line, ',', p) >= 8)   // v26.13 fields (tolerate old files)
+      {
+         g_cb_gate_probe  = (int)StringToInteger(p[6]);
+         g_cb_quiet_days  = (int)StringToInteger(p[7]);
+      }
+      PrintFormat(VTAG+"CB-SPIKE LEARNING restored: n=%d mean=%+.3fR sigma=%.3f streak=%d gate=%s probe=%d quiet_days=%d",
+                  g_cb_spike_n, g_cb_spike_expect, g_cb_spike_sigma, g_cb_spike_streak,
+                  g_cb_spike_blocked ? "BLOCKED" : "OPEN", g_cb_gate_probe, g_cb_quiet_days);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| v26.4: EVENT-DRIVEN CLOSE DETECTION                               |
+//| Replaces the polling HistorySelect(0,now) scan (O(all history))   |
+//| with one O(1) HistoryDealSelect on the closing deal reported by   |
+//| TRADE_TRANSACTION_DEAL_ADD. The polling path stays as fallback    |
+//| (InpUseOnTradeTransaction=false, or transactions missed while the |
+//| EA was busy/restarting — DEAL_TIME is checked against entry time).|
+//+------------------------------------------------------------------+
+ulong  g_pending_close_deal = 0;   // closing deal ticket awaiting processing
+
+void HandleTradeClose(double exit_p, string reason, ulong deal_ticket)
+{
+   double r = g_orig_risk>0 ? (g_dir>0?(exit_p-g_entry):(g_entry-exit_p))/g_orig_risk : 0;
+   g_trades++; g_total_r += r;
+   if(r>0) g_wins++; else g_losses++;
+
+   if(reason=="TARGET") g_target_exits++;
+   else if(reason=="TIME") g_time_exits++;
+   else if(reason=="STOP") g_stop_exits++;
+   else if(reason=="ECUT") g_early_cuts++;
+
+   // v24.11: ALWAYS set cooldown after trade closes (not just after losses)
+   // This prevents re-entry while market is still moving against us
+   g_cooldown = InpCoolDownBars;
+   if(r<0){ g_consec_loss++; } else g_consec_loss=0;
+   if(g_consec_loss>=InpMaxConsecLoss)
+   {
+      g_paused=true;
+      PrintFormat(VTAG+"%d consecutive losses — PAUSED", g_consec_loss);
+   }
+   g_daily_pnl += r*g_risk_money;
+   g_session_pnl += r*g_risk_money;
+
+   double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
+   PrintFormat(VTAG+"CLOSE %s R=%+.3f | Trades:%d WR:%.1f%% TotalR:%+.2f SessionPnL=$%+.2f",
+               reason, r, g_trades, wr, g_total_r, g_session_pnl);
+
+   Telem("close", StringFormat(
+      "\"sym\":\"%s\",\"ticket\":%I64u,\"dir\":%d,\"reason\":\"%s\",\"exit\":%.5f,"
+      "\"r\":%.3f,\"pnl\":%.2f,\"consec_loss\":%d,\"paused\":%s,\"daily_halt\":%s",
+      _Symbol, g_ticket, g_dir, reason, exit_p, r, r*g_risk_money,
+      g_consec_loss, (g_paused?"true":"false"), (DailyLossHalted()?"true":"false")));
+
+   RecordTradeSlippage(r, reason);   // v26.2: gap-through vs planned -1R      // v26.5: learned CB spike gating — update the EWMA + persist
+   if(InpCrashBoomMode)
+   {
+      UpdateCbSpikeLearning(r);
+      g_cb_spike_blocked = CbSpikeFacade();
+      if(g_cb_spike_blocked && !g_cb_spike_was_blocked)
+      {
+         // v26.13: grant an exploration budget — the next 3 spike signals fire
+         // even while blocked, so the EWMA can recover from a bad streak.
+         g_cb_gate_probe = 3;
+         PrintFormat(VTAG+"CB-SPIKE GATE: BLOCKED (mean=%+.2fR sigma=%.2f n=%d streak=%d) — exploration budget 3 signals granted to break the deadlock",
+                     g_cb_spike_expect, g_cb_spike_sigma, g_cb_spike_n, g_cb_spike_streak);
+      }
+      else if(!g_cb_spike_blocked && g_cb_spike_was_blocked)
+      {
+         PrintFormat(VTAG+"CB-SPIKE GATE: OPEN (mean=%+.2fR sigma=%.2f n=%d) — spike fades re-enabled",
+                     g_cb_spike_expect, g_cb_spike_sigma, g_cb_spike_n);
+      }
+      g_cb_spike_was_blocked = g_cb_spike_blocked;
+      SaveCbSpikeState();
+   }
+
+   // v24.11: Notify CB engine of trade close (for trend-reversal guard)
+   if(InpCrashBoomMode && g_dir != 0)
+      g_cb.OnTradeClosed(g_dir, g_entry);
+
+   g_ticket=0; g_dir=0; g_bars_held=0; g_high_water_r=0;
+   g_pending_close_deal = 0;         // v26.4: consumed (or out-of-order event ignored)
+
+   // v23.1: Run intelligence review after every trade
+   PostTradeReview(g_last_strategy, r, reason);
+
+   SaveReviewState();  // v23.1: persist after every close
+   g_tick_rec.Flush(); // v26.7: flush now so the tick CSV always contains the
+                       // spikes and retrace ticks that PRODUCED this close
+                       // (previously they waited up to the 10s/100-tick
+                       // flush cadence, so offline replays could miss the
+                       // microstructure context of a just-closed trade).
+}
+
+//+------------------------------------------------------------------+
+//| v26.4: MQL5 trade-event handler — closes via a single deal lookup |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(!InpUseOnTradeTransaction) return;
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+   if(trans.deal == 0 || g_ticket == 0 || g_dir == 0) return;   // nothing to close
+   if(trans.symbol != _Symbol) return;
+
+   // O(1): select exactly this deal — no history sweep.
+   if(!HistoryDealSelect(trans.deal))
+   {
+      PrintFormat(VTAG+"OnTradeTransaction: HistoryDealSelect(%I64u) failed — polling fallback will handle it", trans.deal);
+      return;   // leave g_ticket set; the OnTick poll closes it next tick
+   }
+   if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY) != DEAL_ENTRY_OUT) return;
+   if((long)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagic) return;
+
+   double deal_price = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+   if(deal_price <= 0)
+   {
+      PrintFormat(VTAG+"OnTradeTransaction: deal %I64u has no price — deferring to polling fallback", trans.deal);
+      return;
+   }
+
+   // Out-of-order guard: skip close events that predate the current entry.
+   datetime deal_time = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
+   if(g_entry_time > 0 && deal_time < g_entry_time)
+   {
+      PrintFormat(VTAG+"OnTradeTransaction: stale deal %I64u (%s) predates entry %s — ignored",
+                  trans.deal, TimeToString(deal_time), TimeToString(g_entry_time));
+      return;
+   }
+
+   // Derive exit reason from the deal, so broker-side TP/SL are labeled
+   // correctly instead of "MANUAL".
+   string reason = "MANUAL";
+   ENUM_DEAL_REASON dr = (ENUM_DEAL_REASON)HistoryDealGetInteger(trans.deal, DEAL_REASON);
+   if(dr == DEAL_REASON_TP)      reason = "TARGET";
+   else if(dr == DEAL_REASON_SL) reason = "STOP";
+   else if(dr == DEAL_REASON_SO) reason = "STOP";
+
+   g_pending_close_deal = trans.deal;   // consumed below in HandleTradeClose
+   PrintFormat(VTAG+"OnTradeTransaction: closing deal %I64u price=%.5f reason=%s — O(1) close",
+               trans.deal, deal_price, reason);
+   HandleTradeClose(deal_price, reason, trans.deal);
 }
 
 //+------------------------------------------------------------------+
@@ -463,13 +1143,25 @@ void OnTick()
    if(InpCrashBoomMode && InpCBTickFade)
    {
       bool can_trade = (g_ticket==0 && !g_paused && g_cooldown==0 && !DailyLossHalted()
-                        && IsSessionActive() && !HasOpenPositionOnSymbol(_Symbol));
+                        && IsSessionActive() && !HasOpenPositionOnSymbol(_Symbol)
+                        && (!g_cb_spike_blocked || g_cb_gate_probe > 0));   // v26.13: probe budget overrides the learned gate
       double fe=0, fs=0, ftp=0; string tfr="";
       int fd = g_cb.OnTickFade(bid, fe, fs, ftp, tfr, can_trade);
       if(fd != 0 && can_trade)
       {
          g_last_strategy = "CB-TICKFADE";
-         OpenCBTrade(fd, fe, fs, ftp, tfr);
+         // v26.13: consume-on-confirm. The spike stays pending inside the
+         // engine until the order's fate is known: accepted → TickFadeConfirm
+         // (cooldown + M5-path block, exactly the old consume-on-send);
+         // rejected/aborted → TickFadeRelease (fade can re-fire on the next
+         // tick with FRESH entry/SL/TP instead of the opportunity being
+         // silently eaten by one invalid-stops rejection).
+         if(OpenCBTrade(fd, fe, fs, ftp, tfr))
+         {
+            g_cb.TickFadeConfirm();
+            if(g_cb_gate_probe > 0) g_cb_gate_probe--;   // v26.13: exploration budget consumed by a fired fade
+         }
+         else                                  g_cb.TickFadeRelease();
       }
    }
 
@@ -483,17 +1175,19 @@ void OnTick()
 
    datetime ds = TimeCurrent() - (TimeCurrent()%86400);
    if(ds != g_day_start)
-   {
-      g_day_start=ds; g_daily_pnl=0; g_trades_today=0;
-      g_day_start_eq = g_eq;
-      g_session_pnl=0;
-      g_consec_loss=0;
+   {       g_day_start=ds; g_daily_pnl=0; g_trades_today=0;
+       g_day_start_eq = g_eq;
+       g_session_pnl=0;
+       g_consec_loss=0;
+       g_cb_reject_today=0;   // v26.12: rejection counter follows the daily reset
+      if(InpCrashBoomMode) DecayCbSpikeLearning();   // v26.13: deadlock fix — EWMA decays on quiet days
       if(g_paused)
       {
          g_paused=false;
          Print(VTAG+"New session day — consecutive-loss PAUSE lifted");
       }
       PrintFormat(VTAG+"New day — daily counters reset. Equity: %.2f", g_eq);
+      SaveReviewState();   // v26.3: persist the reset immediately (fresh-day baseline)
    }
 
    if(g_cooldown>0) g_cooldown--;
@@ -503,48 +1197,39 @@ void OnTick()
       if(PositionSelectByTicket(g_ticket)) ManagePosition();
       else
       {
-         // v23.1: Position disappeared — manual close detected
-         // FIX: Use deal history to get ACTUAL close price, not current market price
+         // v26.4: position vanished without a transaction event (EA was busy,
+         // restarted, or InpUseOnTradeTransaction=false). Fallback: find the
+         // position's closing deal with ONE targeted history query (position
+         // id + symbol + time window) instead of scanning all history.
          double exit_p = 0;
-         double actual_r = 0;
-         if(HistorySelect(0, TimeCurrent()))
+         if(HistorySelectByPosition(g_ticket) && HistoryDealsTotal() > 0)
          {
-            for(int d=HistoryDealsTotal()-1; d>=0; d--)
+            for(int d = HistoryDealsTotal()-1; d >= 0; d--)
             {
                ulong dt = HistoryDealGetTicket(d);
-               if(dt==0) continue;
-               if(HistoryDealGetInteger(dt, DEAL_MAGIC) != InpMagic) continue;
+               if(dt == 0) continue;
+               if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(dt, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
                if(HistoryDealGetString(dt, DEAL_SYMBOL) != _Symbol) continue;
-               if(HistoryDealGetInteger(dt, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
-               // Found the closing deal — use its actual price
-               exit_p = HistoryDealGetDouble(dt, DEAL_PRICE);
-               double deal_profit = HistoryDealGetDouble(dt, DEAL_PROFIT);
-               double deal_swap   = HistoryDealGetDouble(dt, DEAL_SWAP);
-               double deal_comm   = HistoryDealGetDouble(dt, DEAL_COMMISSION);
-               // Calculate R from actual deal P&L
-               actual_r = g_orig_risk>0 ? (g_dir>0?(exit_p-g_entry):(g_entry-exit_p))/g_orig_risk : 0;
-               PrintFormat(VTAG+"Found closing deal #%d: price=%.5f profit=%.2f swap=%.2f comm=%.2f",
-                           dt, exit_p, deal_profit, deal_swap, deal_comm);
-               break; // most recent closing deal
+               double deal_price = HistoryDealGetDouble(dt, DEAL_PRICE);
+               if(deal_price <= 0) continue;
+               exit_p = deal_price;
+               ENUM_DEAL_REASON dr = (ENUM_DEAL_REASON)HistoryDealGetInteger(dt, DEAL_REASON);
+               string reason = "MANUAL";
+               if(dr == DEAL_REASON_TP)      reason = "TARGET";
+               else if(dr == DEAL_REASON_SL) reason = "STOP";
+               else if(dr == DEAL_REASON_SO) reason = "STOP";
+               PrintFormat(VTAG+"POLL CLOSE (fallback): position %I64u deal %I64u price=%.5f reason=%s",
+                           g_ticket, dt, exit_p, reason);
+               HandleTradeClose(exit_p, reason, dt);
+               break;
             }
          }
-         // Fallback: if no deal found (shouldn't happen), use current price
-         if(exit_p <= 0)
+         if(g_ticket != 0)   // no deal found at all — approximate with current price
          {
-            exit_p = g_dir>0 ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-            actual_r = g_orig_risk>0 ? (g_dir>0?(exit_p-g_entry):(g_entry-exit_p))/g_orig_risk : 0;
-            PrintFormat(VTAG+"WARNING: No closing deal found, using current price %.5f", exit_p);
+            double px = g_dir>0 ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+            PrintFormat(VTAG+"WARNING: no closing deal for position %I64u — approximating exit at %.5f", g_ticket, px);
+            HandleTradeClose(px, "MANUAL", 0);
          }
-         g_trades++; g_total_r += actual_r;
-         if(actual_r>0) g_wins++; else g_losses++;
-         g_daily_pnl += actual_r*g_risk_money;
-         g_session_pnl += actual_r*g_risk_money;
-         double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
-         PrintFormat(VTAG+"MANUAL CLOSE detected — R=%+.3f (actual close %.5f) | Trades:%d WR:%.1f%% TotalR:%+.2f",
-                     actual_r, exit_p, g_trades, wr, g_total_r);
-         PostTradeReview(g_last_strategy, actual_r, "MANUAL");
-         g_ticket=0; g_dir=0; g_bars_held=0; g_high_water_r=0;
-         SaveReviewState();
       }
    }
 
@@ -644,6 +1329,27 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
+//| v26.12: ORDER-REJECTION ACCOUNTING                                |
+//| A rejected/aborted CB entry is a LOST fade opportunity: it never  |
+//| reaches the review journal (no position → no close → no review),  |
+//| so the offline loop was blind to it (Aug-30: 7 rejected Boom      |
+//| fades had to be reconstructed by hand from the broker journal).   |
+//| Counters + one telemetry event per rejection fix that blindness.  |
+//+------------------------------------------------------------------+
+void CBRecordReject(string why, string reason)
+{
+   g_cb_reject_total++;
+   g_cb_reject_today++;
+   g_cb_reject_streak++;
+   g_cb_reject_last = why;
+   PrintFormat(VTAG+"CB-REJECT #%d (today %d, streak %d): %s | %s",
+               g_cb_reject_total, g_cb_reject_today, g_cb_reject_streak, why, reason);
+   Telem("reject", StringFormat(
+      "\"sym\":\"%s\",\"why\":\"%s\",\"reason\":\"%s\",\"total\":%d,\"today\":%d,\"streak\":%d",
+      _Symbol, why, reason, g_cb_reject_total, g_cb_reject_today, g_cb_reject_streak));
+}
+
+//+------------------------------------------------------------------+
 //| v23: Check if ANY fleet magic has an open position on this symbol |
 //+------------------------------------------------------------------+
 bool HasOpenPositionOnSymbol(const string sym)
@@ -736,9 +1442,67 @@ double PerBarSigma(const int lookback)
 }
 
 //+------------------------------------------------------------------+
+//| v26.9 phase 1: GARCH bar feed — one Update per entry-TF bar.     |
+//| Module failure handling: bad price data or an invalid module     |
+//| output degrades to the legacy PerBarSigma stddev after a short   |
+//| tolerance window (sticky kill for the session, logged once).     |
+//+------------------------------------------------------------------+
+bool GarchFeedBar()
+{
+   if(!InpUseGarch || !g_garch_ok)
+      return(false);                           // disabled or permanently failed
+   if(Bars(_Symbol, g_tf_entry) < InpGarchWarmupBars + 2)
+      return(false);
+   //--- log return of the last closed bar (same convention as the Python
+   //--- reference: log(c_t / c_{t-1}); no indicator handles involved)
+   double c1 = iClose(_Symbol, g_tf_entry, 1);
+   double c2 = iClose(_Symbol, g_tf_entry, 2);
+   if(c1 <= 0 || c2 <= 0)
+   {
+      if(++g_garch_fail_n >= 50)
+      {
+         g_garch_ok = false;
+         Print(VTAG+"GARCH disabled: persistent bad price data — legacy sigma path active");
+      }
+      return(false);
+   }
+   double sigma = 0.0;
+   bool   ready = g_garch.Update(MathLog(c1 / c2), sigma);
+   if(sigma <= 0 || !MathIsValidNumber(sigma))
+   {
+      if(++g_garch_fail_n >= 50)
+      {
+         g_garch_ok = false;
+         Print(VTAG+"GARCH disabled: invalid sigma from module — legacy sigma path active");
+      }
+      return(false);
+   }
+   g_garch_fail_n = 0;
+   g_garch_sigma  = sigma;
+   g_garch_z      = g_garch.LastZ();
+   if(ready && !g_garch_init_note)
+   {
+      g_garch_init_note = true;
+      PrintFormat(VTAG+"GARCH ready: %d observations, sigma=%.5f (EGARCH calibrated-fixed)",
+                  g_garch.Observations(), g_garch_sigma);
+   }
+   return(ready);
+}
+
+//--- Sigma source selection with fallback (v26.9 phase 1):
+//--- GARCH when enabled+healthy+warm, else the legacy stddev path.
+double ActiveBarSigma(const int lookback)
+{
+   if(InpUseGarch && g_garch_ok && g_garch.Observations() >= InpGarchWarmupBars && g_garch_sigma > 0)
+      return(g_garch_sigma);
+   return(PerBarSigma(lookback));
+}
+
+//+------------------------------------------------------------------+
 void UpdateSigmaBaseline()
 {
-   double sig = PerBarSigma(20);
+   GarchFeedBar();                            // v26.9: feed module once per bar
+   double sig = ActiveBarSigma(20);
    if(sig <= 0) return;
    if(!g_sigma_init){ g_sigma_ema=sig; g_sigma_init=true; return; }
    double a = 2.0/(InpBandSigmaEmaLen+1.0);
@@ -748,7 +1512,7 @@ void UpdateSigmaBaseline()
 //+------------------------------------------------------------------+
 void UpdateBandTelemetry()
 {
-   g_sigma_now=PerBarSigma(20);
+   g_sigma_now=ActiveBarSigma(20);
    g_z_dev=0.0; g_exp_ratio=0.0;
    if(g_sigma_now<=0) return;
 
@@ -760,12 +1524,16 @@ void UpdateBandTelemetry()
 
    g_z_dev = MathLog(price/sma)/g_sigma_now;
    if(g_sigma_init && g_sigma_ema>0) g_exp_ratio = g_sigma_now/g_sigma_ema;
+   // v26.9: under GARCH the standardized shock z_t is the module's own
+   // quantity; keep the telemetry z on the SAME scale as the sigma source.
+   if(InpUseGarch && g_garch_ok && g_garch.Observations() >= InpGarchWarmupBars)
+      g_z_dev = g_garch_z;
 }
 
 //+------------------------------------------------------------------+
 void Telem(const string type, const string kv)
 {
-   int h=FileOpen(TELEM_FILE, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+   int h=FileOpen(SymbolTaggedFile(TELEM_BASE, ".jsonl"), FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
    if(h==INVALID_HANDLE)
    { Print(VTAG+"telem write failed err=",GetLastError()); return; }
    FileSeek(h,0,SEEK_END);
@@ -778,9 +1546,44 @@ void Telem(const string type, const string kv)
 //+------------------------------------------------------------------+
 //| STATE PERSISTENCE — v23: trade stats survive restarts             |
 //+------------------------------------------------------------------+
+// v26.14: load data/meta_label_regime_table.csv (from scripts/meta_label_
+// trainer.py). CSV rows: regime,direction,n,win_rate,avg_r,multiplier,note
+// Multiplier = relative expectancy of that (regime, dir) context; 0 = skip.
+void LoadMetaLabelTable()
+{
+   g_ml_rows = 0;
+   string path = SymbolTaggedFile("meta_label_regime_table", ".csv");
+   int h=FileOpen(path, FILE_READ|FILE_TXT|FILE_ANSI);
+   if(h==INVALID_HANDLE) { Print(VTAG+"meta-label table not found — sizing at 1.0x base risk"); return; }
+   FileReadString(h);   // skip header
+   while(!FileIsEnding(h) && g_ml_rows < META_LABEL_MAX_ROWS)
+   {
+      string line = FileReadString(h);
+      if(StringLen(line)==0) continue;
+      string cols[];
+      if(StringSplit(line, ',', cols) < 7) continue;
+      g_ml_regime[g_ml_rows] = cols[0];
+      g_ml_dir[g_ml_rows]    = (cols[1]=="long") ? 1 : -1;
+      g_ml_mult[g_ml_rows]   = StringToDouble(cols[5]);
+      g_ml_rows++;
+   }
+   FileClose(h);
+   PrintFormat(VTAG+"meta-label table: %d (regime,dir) rows loaded from %s", g_ml_rows, path);
+}
+
+// v26.14: risk multiplier for the current context; 1.0 when disabled/unknown.
+double MetaLabelMultiplier(int direction)
+{
+   if(!InpUseMetaLabel || g_ml_rows == 0) return 1.0;
+   for(int i=0;i<g_ml_rows;i++)
+      if(g_ml_dir[i]==direction && g_ml_regime[i]==RegimeToStr(g_regime))
+         return g_ml_mult[i];
+   return 1.0;   // unknown context: default base risk
+}
+
 void SaveState()
 {
-   int h=FileOpen(STATE_FILE, FILE_WRITE|FILE_TXT|FILE_ANSI);
+   int h=FileOpen(SymbolTaggedFile(STATE_BASE, ".csv"), FILE_WRITE|FILE_TXT|FILE_ANSI);
    if(h==INVALID_HANDLE) { Print(VTAG+"state save failed"); return; }
    FileWriteString(h, StringFormat("%d,%d,%d,%d,%d,%.4f,%d,%d,%d\n",
                    g_trades, g_wins, g_losses,
@@ -791,7 +1594,7 @@ void SaveState()
 
 void LoadState()
 {
-   int h=FileOpen(STATE_FILE, FILE_READ|FILE_TXT|FILE_ANSI);
+   int h=FileOpen(SymbolTaggedFile(STATE_BASE, ".csv"), FILE_READ|FILE_TXT|FILE_ANSI);
    if(h==INVALID_HANDLE) { Print(VTAG+"no prior state found — starting fresh"); return; }
    string line = FileReadString(h);
    FileClose(h);
@@ -837,6 +1640,10 @@ int GetStrategyIndex(string strat)
    if(strat=="MOM") return 2;
    if(strat=="MR") return 3;
    if(strat=="BF") return 4;
+   // v26.5: CB modes — indexes 5..7 (arrays sized 8)
+   if(strat=="CB-TICKFADE") return 5;
+   if(strat=="CB-FADE")     return 6;
+   if(strat=="CB-GRIND")    return 7;
    return -1;
 }
 
@@ -867,6 +1674,61 @@ string TimeBlockStr(int idx)
    if(idx==2) return "14-18";
    if(idx==3) return "18-21";
    return "OFF";
+}
+
+//+------------------------------------------------------------------+
+//| v26.11 INIT-TIME FIXED-ARRAY SELF-TEST                            |
+//| Walks every fixed-size strategy/regime/time table array once and  |
+//| verifies each size against its slot constant. Any size-vs-loop    |
+//| mismatch aborts init HERE — fail-closed — instead of crashing on  |
+//| a live chart (the v26.9 "[5] arrays under 8-slot walkers" class). |
+//| MUST run before LoadReviewState: the loader writes file-indexed   |
+//| slots straight into these arrays.                                 |
+//+------------------------------------------------------------------+
+bool SelfTestFixedArrays()
+{
+   int st=ArraySize(g_strat_trades), sw=ArraySize(g_strat_wins),
+       sr=ArraySize(g_strat_total_r), se=ArraySize(g_strat_enabled);
+   int rt=ArraySize(g_regime_trades), rw=ArraySize(g_regime_wins), rr=ArraySize(g_regime_total_r);
+   int tt=ArraySize(g_time_trades),  tw=ArraySize(g_time_wins),  tr=ArraySize(g_time_total_r);
+   int ns=ArraySize(STRAT_NAMES), nr=ArraySize(REGIME_NAMES);
+
+   if(st!=STRAT_SLOTS || sw!=STRAT_SLOTS || sr!=STRAT_SLOTS || se!=STRAT_SLOTS ||
+      rt!=REGIME_SLOTS || rw!=REGIME_SLOTS || rr!=REGIME_SLOTS ||
+      tt!=TIME_SLOTS   || tw!=TIME_SLOTS   || tr!=TIME_SLOTS   ||
+      ns!=STRAT_SLOTS  || nr!=REGIME_SLOTS)
+   {
+      PrintFormat(VTAG+"[SELFTEST] FIXED-ARRAY MISMATCH — refusing to init: "
+                  "strat[t=%d w=%d r=%d en=%d names=%d] regime[t=%d w=%d r=%d names=%d] "
+                  "time[t=%d w=%d r=%d] vs STRAT_SLOTS=%d REGIME_SLOTS=%d TIME_SLOTS=%d. "
+                  "Fix the declarations (or the constants) and recompile.",
+                  st,sw,sr,se,ns, rt,rw,rr,nr, tt,tw,tr,
+                  STRAT_SLOTS,REGIME_SLOTS,TIME_SLOTS);
+      return(false);
+   }
+
+   // Full walk: read every slot (the probe sums keep the reads observable in
+   // the log) and identity write-touch the LAST slot of each array — the exact
+   // index every loop bound reaches — proving read AND write addressability
+   // up front, before anything else can touch the tables.
+   double p1=0, p2=0, p3=0;
+   for(int i=0;i<STRAT_SLOTS;i++)   p1 += g_strat_trades[i]+g_strat_wins[i]+g_strat_total_r[i];
+   for(int i=0;i<REGIME_SLOTS;i++)  p2 += g_regime_trades[i]+g_regime_wins[i]+g_regime_total_r[i];
+   for(int i=0;i<TIME_SLOTS;i++)    p3 += g_time_trades[i]+g_time_wins[i]+g_time_total_r[i];
+   double v1=g_strat_trades[STRAT_SLOTS-1];    g_strat_trades[STRAT_SLOTS-1]=v1;
+   double v2=g_strat_wins[STRAT_SLOTS-1];      g_strat_wins[STRAT_SLOTS-1]=v2;
+   double v3=g_strat_total_r[STRAT_SLOTS-1];   g_strat_total_r[STRAT_SLOTS-1]=v3;
+   bool   v4=g_strat_enabled[STRAT_SLOTS-1];   g_strat_enabled[STRAT_SLOTS-1]=v4;
+   double v5=g_regime_trades[REGIME_SLOTS-1];  g_regime_trades[REGIME_SLOTS-1]=v5;
+   double v6=g_regime_wins[REGIME_SLOTS-1];    g_regime_wins[REGIME_SLOTS-1]=v6;
+   double v7=g_regime_total_r[REGIME_SLOTS-1]; g_regime_total_r[REGIME_SLOTS-1]=v7;
+   double v8=g_time_trades[TIME_SLOTS-1];      g_time_trades[TIME_SLOTS-1]=v8;
+   double v9=g_time_wins[TIME_SLOTS-1];        g_time_wins[TIME_SLOTS-1]=v9;
+   double vA=g_time_total_r[TIME_SLOTS-1];     g_time_total_r[TIME_SLOTS-1]=vA;
+
+   PrintFormat(VTAG+"[SELFTEST] fixed arrays OK: strat %d/%d p=%+.1f | regime %d/%d p=%+.1f | time %d/%d p=%+.1f (walk+write proof, pre-load)",
+               STRAT_SLOTS,p1, REGIME_SLOTS,p2, TIME_SLOTS,p3);
+   return(true);
 }
 
 // Main post-trade review — called from ClosePosition after every trade
@@ -925,28 +1787,29 @@ void PostTradeReview(string strategy, double rMultiple, string exitType)
 // Check if any strategy should be auto-disabled
 void CheckStrategyPerformance()
 {
-   const string names[] = {"PB","BO","MOM","MR","BF"};
-
-   Print(VTAG+"=== STRATEGY PERFORMANCE REVIEW ===");
-   for(int i=0; i<5; i++)
+   Print(VTAG+"=== STRATEGY PERFORMANCE REVIEW ===");   // v26.11: shared STRAT_NAMES
+   for(int i=0; i<STRAT_SLOTS; i++)
    {
-      if(g_strat_trades[i] < InpMinTradesToJudge) continue;
+      int need = (i >= 5) ? InpCBMinTradesToJudge : InpMinTradesToJudge;
+      if(g_strat_trades[i] < need) continue;
       double wr = g_strat_wins[i] / g_strat_trades[i];
       double expectancy = g_strat_total_r[i] / g_strat_trades[i];
+      double floor_r   = (i >= 5) ? InpCBMinExpectancy   : InpMinExpectancy;
+      bool   may_kill  = (i >= 5) ? true                 : InpAutoDisableStrat;
       string status = "KEEP";
 
-      if(InpAutoDisableStrat && expectancy < InpMinExpectancy && g_strat_trades[i] >= InpMinTradesToJudge)
+      if(may_kill && expectancy < floor_r && g_strat_trades[i] >= need)
       {
          g_strat_enabled[i] = false;
          status = "DISABLED";
-         PrintFormat(VTAG+"STRATEGY %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f → %s (negative expectancy)",
-                     names[i], g_strat_trades[i], wr*100, expectancy, status);
+         PrintFormat(VTAG+"STRATEGY %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f → %s (below %.2f R/trade)",
+                     STRAT_NAMES[i], g_strat_trades[i], wr*100, expectancy, status, floor_r);
       }
       else
       {
          g_strat_enabled[i] = true;
          PrintFormat(VTAG+"STRATEGY %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f → %s",
-                     names[i], g_strat_trades[i], wr*100, expectancy, status);
+                     STRAT_NAMES[i], g_strat_trades[i], wr*100, expectancy, status);
       }
    }
 }
@@ -954,15 +1817,14 @@ void CheckStrategyPerformance()
 // Log regime performance
 void CheckRegimePerformance()
 {
-   const string names[] = {"BULLISH","BEARISH","RANGING","HIGH_VOL","NO_TRADE"};
-   Print(VTAG+"=== REGIME PERFORMANCE REVIEW ===");
-   for(int i=0; i<5; i++)
+   Print(VTAG+"=== REGIME PERFORMANCE REVIEW ===");   // v26.11: shared REGIME_NAMES
+   for(int i=0; i<REGIME_SLOTS; i++)
    {
       if(g_regime_trades[i] < 3) continue;
       double wr = g_regime_wins[i] / g_regime_trades[i];
       double expectancy = g_regime_total_r[i] / g_regime_trades[i];
       PrintFormat(VTAG+"REGIME %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f",
-                  names[i], g_regime_trades[i], wr*100, expectancy);
+                  REGIME_NAMES[i], g_regime_trades[i], wr*100, expectancy);
    }
 }
 
@@ -970,7 +1832,7 @@ void CheckRegimePerformance()
 void CheckTimeBlockPerformance()
 {
    Print(VTAG+"=== TIME-BLOCK PERFORMANCE REVIEW ===");
-   for(int i=0; i<5; i++)
+   for(int i=0; i<TIME_SLOTS; i++)
    {
       if(g_time_trades[i] < 3) continue;
       double wr = g_time_wins[i] / g_time_trades[i];
@@ -985,8 +1847,8 @@ void AnalyzeLosingStreak()
 {
    PrintFormat(VTAG+"LOSING STREAK ANALYSIS — %d consecutive losses, TotalR=%+.2f", g_consec_loss, g_total_r);
 
-   // Check if losses are concentrated in one strategy
-   for(int i=0; i<5; i++)
+   // Check if losses are concentrated in one strategy (v26.5: 8 slots)
+   for(int i=0; i<STRAT_SLOTS; i++)
    {
       if(g_strat_trades[i] == 0) continue;
       double recent_r = g_strat_total_r[i];
@@ -995,7 +1857,7 @@ void AnalyzeLosingStreak()
    }
 
    // Check if losses are concentrated in one regime
-   for(int i=0; i<5; i++)
+   for(int i=0; i<REGIME_SLOTS; i++)
    {
       if(g_regime_trades[i] == 0) continue;
       if(g_regime_total_r[i] < -1.0 && g_regime_trades[i] >= 5)
@@ -1006,7 +1868,7 @@ void AnalyzeLosingStreak()
 // Write one review log line
 void WriteReviewLog(string strategy, string regime, double rMultiple, string exitType, int hour)
 {
-   int h=FileOpen(REVIEW_FILE, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+   int h=FileOpen(SymbolTaggedFile(REVIEW_BASE, ".csv"), FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
    if(h==INVALID_HANDLE) return;
    FileSeek(h,0,SEEK_END);
    FileWriteString(h, StringFormat("%s,%s,%.3f,%s,%d,%.2f,%d\n",
@@ -1018,34 +1880,48 @@ void WriteReviewLog(string strategy, string regime, double rMultiple, string exi
 // Save review state
 void SaveReviewState()
 {
-   int h=FileOpen(STATE_FILE, FILE_WRITE|FILE_TXT|FILE_ANSI);
+   int h=FileOpen(SymbolTaggedFile(STATE_BASE, ".csv"), FILE_WRITE|FILE_TXT|FILE_ANSI);
    if(h==INVALID_HANDLE) return;
    FileWriteString(h, StringFormat("%d,%d,%d,%d,%d,%.4f,%d,%d,%d\n",
                    g_trades, g_wins, g_losses,
                    g_target_exits, g_time_exits, g_total_r,
                    g_stop_exits, g_early_cuts, g_consec_loss));
-   // Strategy performance
-   for(int i=0;i<5;i++)
-      FileWriteString(h, StringFormat("STRAT,%d,%.0f,%.0f,%.4f,%d\n",
+   // Strategy performance (v26.5: 8 slots — 5 classic + 3 CB modes)
+   for(int i=0;i<STRAT_SLOTS;i++)
+       FileWriteString(h, StringFormat("STRAT,%d,%.0f,%.0f,%.4f,%d\n",
                       i, g_strat_trades[i], g_strat_wins[i], g_strat_total_r[i], g_strat_enabled[i]?1:0));
    // Regime performance
-   for(int i=0;i<5;i++)
-      FileWriteString(h, StringFormat("REGIME,%d,%.0f,%.0f,%.4f\n",
+   for(int i=0;i<REGIME_SLOTS;i++)
+       FileWriteString(h, StringFormat("REGIME,%d,%.0f,%.0f,%.4f\n",
                       i, g_regime_trades[i], g_regime_wins[i], g_regime_total_r[i]));
    // Time-block performance
-   for(int i=0;i<5;i++)
-      FileWriteString(h, StringFormat("TIME,%d,%.0f,%.0f,%.4f\n",
+   for(int i=0;i<TIME_SLOTS;i++)
+       FileWriteString(h, StringFormat("TIME,%d,%.0f,%.0f,%.4f\n",
                       i, g_time_trades[i], g_time_wins[i], g_time_total_r[i]));
    // Review counters
    FileWriteString(h, StringFormat("REVIEW,%d,%d,%d\n",
                    g_last_strategy_review, g_last_regime_review, g_last_time_review));
+   // v26.3: daily/session counters — a mid-day re-attach must NOT reset these.
+   // (Aug-30: ~9 re-attaches printed "New day" and wiped daily P&L, the
+   // consec-loss pause and cooldown on the Boom instance.)
+   FileWriteString(h, StringFormat("DAILY,%I64d,%.2f,%.2f,%d,%.2f,%d,%d,%d\n",
+                   (long)g_day_start, g_daily_pnl, g_session_pnl, g_trades_today,
+                   g_day_start_eq, g_consec_loss, g_paused?1:0, g_cooldown));
+   // v26.9: persist the OPEN-position context so a close that happens while
+   // the EA is detached (recompile/restart — the Aug-30 disease) can be
+   // recovered and journaled at the next init. Cleared automatically once the
+   // position closes (HandleTradeClose zeroes g_ticket before any save).
+   if(g_ticket > 0 && g_dir != 0)
+      FileWriteString(h, StringFormat("POSITION,%I64u,%I64d,%.5f,%.5f,%d,%.2f,%s\n",
+                      g_ticket, (long)g_entry_time, g_entry, g_sl, g_dir,
+                      g_position_volume, g_last_strategy));
    FileClose(h);
 }
 
 // Load review state
 void LoadReviewState()
 {
-   int h=FileOpen(STATE_FILE, FILE_READ|FILE_TXT|FILE_ANSI);
+   int h=FileOpen(SymbolTaggedFile(STATE_BASE, ".csv"), FILE_READ|FILE_TXT|FILE_ANSI);
    if(h==INVALID_HANDLE) return;
    
    // Read base state (first line)
@@ -1077,8 +1953,7 @@ void LoadReviewState()
 
       if(rp[0]=="STRAT" && rn >= 6)
       {
-         int idx = (int)StringToInteger(rp[1]);
-         if(idx >= 0 && idx < 5)
+         int idx = (int)StringToInteger(rp[1]);          if(idx >= 0 && idx < STRAT_SLOTS)   // v26.5: 8 slots (5 classic + 3 CB)
          {
             g_strat_trades[idx]  = StringToDouble(rp[2]);
             g_strat_wins[idx]    = StringToDouble(rp[3]);
@@ -1088,8 +1963,7 @@ void LoadReviewState()
       }
       else if(rp[0]=="REGIME" && rn >= 5)
       {
-         int idx = (int)StringToInteger(rp[1]);
-         if(idx >= 0 && idx < 5)
+         int idx = (int)StringToInteger(rp[1]);          if(idx >= 0 && idx < REGIME_SLOTS)
          {
             g_regime_trades[idx]  = StringToDouble(rp[2]);
             g_regime_wins[idx]    = StringToDouble(rp[3]);
@@ -1098,8 +1972,7 @@ void LoadReviewState()
       }
       else if(rp[0]=="TIME" && rn >= 5)
       {
-         int idx = (int)StringToInteger(rp[1]);
-         if(idx >= 0 && idx < 5)
+         int idx = (int)StringToInteger(rp[1]);          if(idx >= 0 && idx < TIME_SLOTS)
          {
             g_time_trades[idx]  = StringToDouble(rp[2]);
             g_time_wins[idx]    = StringToDouble(rp[3]);
@@ -1112,17 +1985,108 @@ void LoadReviewState()
          g_last_regime_review   = (int)StringToInteger(rp[2]);
          g_last_time_review     = (int)StringToInteger(rp[3]);
       }
+      else if(rp[0]=="DAILY" && rn >= 9)
+      {
+         // v26.3: restore the day-scoped counters. g_day_start comes back with
+         // them, so the daily-reset check in OnTick sees "same day" and does
+         // not wipe anything on a mid-day re-attach. A stale day (server
+         // midnight rollover) still resets normally on the first tick.
+         g_day_start     = (datetime)StringToInteger(rp[1]);
+         g_daily_pnl     = StringToDouble(rp[2]);
+         g_session_pnl   = StringToDouble(rp[3]);
+         g_trades_today  = (int)StringToInteger(rp[4]);
+         g_day_start_eq  = StringToDouble(rp[5]);
+         g_consec_loss   = (int)StringToInteger(rp[6]);
+         g_paused        = (StringToInteger(rp[7]) == 1);
+         g_cooldown      = (int)StringToInteger(rp[8]);
+         datetime today  = TimeCurrent() - (TimeCurrent()%86400);
+         if(g_day_start == today && (g_daily_pnl != 0 || g_session_pnl != 0 || g_trades_today > 0 || g_paused))
+            PrintFormat(VTAG+"Restored today's session state: dailyPnL=%+.2f sessionPnL=%+.2f tradesToday=%d consec=%d paused=%s cooldown=%d",
+                        g_daily_pnl, g_session_pnl, g_trades_today, g_consec_loss,
+                        g_paused?"YES":"NO", g_cooldown);
+      }
+      else if(rp[0]=="POSITION" && rn >= 8 && g_ticket == 0)
+      {
+         // v26.9: restore the OPEN-position context — but ONLY when
+         // RecoverPosition found no live position (a live position is the
+         // authoritative truth and has already set the full context). If the
+         // tracked position no longer exists, RecoverDetachedClose() journals
+         // the close that happened while the EA was detached.
+         g_ticket          = (ulong)StringToInteger(rp[1]);
+         g_entry_time      = (datetime)StringToInteger(rp[2]);
+         g_entry           = StringToDouble(rp[3]);
+         g_sl              = StringToDouble(rp[4]);
+         g_dir             = (int)StringToInteger(rp[5]);
+         g_position_volume = StringToDouble(rp[6]);
+         g_last_strategy   = rp[7];
+         g_orig_risk       = MathAbs(g_entry - g_sl);
+      }
    }
    FileClose(h);
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
    PrintFormat(VTAG+"Loaded intelligence: Trades=%d WR=%.1f%% R=%+.2f", g_trades, wr, g_total_r);
-   for(int i=0;i<5;i++)
+   for(int i=0;i<STRAT_SLOTS;i++)
    {
       if(g_strat_trades[i] >= 5)
          PrintFormat(VTAG+"Strategy %d: %.0f trades, R=%+.2f, enabled=%s",
                      i, g_strat_trades[i], g_strat_total_r[i], g_strat_enabled[i]?'1':'0');
    }
+}
+
+//+------------------------------------------------------------------+
+//| v26.9: RESTART-GAP CLOSE RECOVERY                                 |
+//| Three-layer close coverage: (1) OnTradeTransaction fires on the   |
+//| closing deal while the EA runs (O(1)); (2) the OnTick poll catches |
+//| a position vanishing during runtime; (3) THIS — a broker-side     |
+//| close (SL/TP/stop-out/manual) that happened while the EA was      |
+//| DETACHED (recompile/restart) left no live position for            |
+//| RecoverPosition and was silently lost from every learning table.  |
+//| If the state file carried an open position that is now gone,      |
+//| recover its closing deal with ONE targeted history query and      |
+//| route it through the shared handler — counters, review, EWMA      |
+//| facade gate, slippage and telemetry all see it.                   |
+//+------------------------------------------------------------------+
+void RecoverDetachedClose()
+{
+   if(g_ticket == 0 || g_dir == 0 || g_orig_risk <= 0) return;
+   if(PositionSelectByTicket(g_ticket)) return;   // still live — nothing to recover
+
+   if(!HistorySelectByPosition(g_ticket) || HistoryDealsTotal() == 0)
+   {
+      PrintFormat(VTAG+"RESTART RECOVERY: tracked position %I64u gone and no deals found — clearing", g_ticket);
+      g_ticket=0; g_dir=0; g_orig_risk=0; return;
+   }
+   ulong out_deal = 0;
+   for(int d = HistoryDealsTotal()-1; d >= 0; d--)
+   {
+      ulong dt = HistoryDealGetTicket(d);
+      if(dt == 0) continue;
+      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(dt, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+      if(HistoryDealGetString(dt, DEAL_SYMBOL) != _Symbol) continue;
+      out_deal = dt;                              // latest OUT deal on this position
+      break;
+   }
+   if(out_deal == 0)
+   {
+      PrintFormat(VTAG+"RESTART RECOVERY: no OUT deal for position %I64u — clearing", g_ticket);
+      g_ticket=0; g_dir=0; g_orig_risk=0; return;
+   }
+   double exit_p = HistoryDealGetDouble(out_deal, DEAL_PRICE);
+   ENUM_DEAL_REASON dr = (ENUM_DEAL_REASON)HistoryDealGetInteger(out_deal, DEAL_REASON);
+   string reason = "MANUAL";
+   if(dr == DEAL_REASON_TP)      reason = "TARGET";
+   else if(dr == DEAL_REASON_SL) reason = "STOP";
+   else if(dr == DEAL_REASON_SO) reason = "STOP";
+   // Recompute the $ risk from the restored context — the same formula the
+   // entry path used, so daily/session P&L stays exact without persisting it.
+   double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   double tick_value = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   if(tick_size > 0 && tick_value > 0 && g_position_volume > 0)
+      g_risk_money = g_position_volume * (g_orig_risk / tick_size) * tick_value;
+   PrintFormat(VTAG+"RESTART RECOVERY: position %I64u closed while detached — deal %I64u @%.5f reason=%s — journaling now",
+               g_ticket, out_deal, exit_p, reason);
+   HandleTradeClose(exit_p, reason, out_deal);
 }
 
 //+------------------------------------------------------------------+
@@ -1509,7 +2473,16 @@ void OpenTrade(int direction, string sig_type)
    double tp = direction>0 ? entry+tp_dist : entry-tp_dist;
 
    // Risk volume (with v23 consecutive-loss scaling)
-   double risk_money = g_eq * InpRiskPerTrade;
+   // v26.14: meta-labeling P(win) multiplier scales the target risk before sizing
+   double ml_mult = MetaLabelMultiplier(direction);
+   if(ml_mult <= 0.0)
+   {
+      PrintFormat(VTAG+"SKIP %s — meta-label gate: P(win) too low for this context (%s/%s)",
+                  direction>0?"BUY":"SELL", RegimeToStr(g_regime), direction>0?"long":"short");
+      g_cooldown=1;
+      return;
+   }
+   double risk_money = g_eq * InpRiskPerTrade * ml_mult;
    double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
    double tick_value = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
    if(tick_size<=0 || tick_value<=0) return;
@@ -1550,7 +2523,7 @@ void OpenTrade(int direction, string sig_type)
          "\"sym\":\"%s\",\"fleet_risk\":%.2f,\"new_risk\":%.2f,\"ceiling\":%.2f,\"eq\":%.2f",
          _Symbol, fleet_risk, eff_risk, total_cap, acct_eq));
       g_cooldown=1;
-      return;
+      return;   // v26.14 fix: OpenTrade is void — no value return
    }
 
    bool ok=false;
@@ -1566,9 +2539,7 @@ void OpenTrade(int direction, string sig_type)
          PrintFormat(VTAG+"ORDER FAILED retcode=%d desc=%s", retcode, desc);
       }
    }
-   else { g_ticket=(ulong)TimeCurrent(); ok=true; Print(VTAG+"PAPER MODE"); }
-
-   if(!ok){ g_cooldown=InpCoolDownBars; return; }
+   else { g_ticket=(ulong)TimeCurrent(); ok=true; Print(VTAG+"PAPER MODE"); }   if(!ok) { g_cooldown = InpCoolDownBars; return; }
 
    g_ticket=0;
    for(int a=0;a<6;a++)
@@ -1607,24 +2578,95 @@ void OpenTrade(int direction, string sig_type)
 
 //+------------------------------------------------------------------+
 //| v24: Crash/Boom trade opener — uses CB-specific risk sizing      |
+//| v26.13: returns bool — true = order accepted (or paper mode).    |
+//| The tick-fade caller uses it to confirm/release the pending      |
+//| spike; the M5 path ignores the return as before.                 |
 //+------------------------------------------------------------------+
-void OpenCBTrade(int direction, double entry, double sl, double tp, string reason)
+bool OpenCBTrade(int direction, double entry, double sl, double tp, string reason)
 {
    double stop_dist = MathAbs(entry - sl);
    double tp_dist = MathAbs(tp - entry);
-   if(stop_dist <= 0 || tp_dist <= 0) return;
+   if(stop_dist <= 0 || tp_dist <= 0) return(false);
 
    double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
    double tick_value = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
    double min_lot    = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
    double max_lot    = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
    double lot_step   = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
-   if(tick_size<=0 || tick_value<=0) return;
+   if(tick_size<=0 || tick_value<=0) return(false);
 
    // v24: Use dynamic risk sizing from Crash/Boom engine
    double vol = g_cb.CalculateVolume(g_eq, stop_dist, tick_size, tick_value,
                                      min_lot, max_lot, lot_step);
-   if(vol <= 0) return;
+   if(vol <= 0) return(false);
+
+   //--- v26.6: RE-ANCHOR stops to the live price before sending.
+   //    During fast spike retraces the signal-time entry is stale by the time
+   //    the order reaches the broker (2026-08-30 Boom log: two fade orders
+   //    rejected retcode 10016 "invalid stops" because the retrace outran
+   //    the pre-computed SL). Delta-shift keeps the geometry intact;
+   //    boundary clamps fix residual invalidity; abort if price already
+   //    reached the target — the fade thesis is dead at that point.
+   {
+      double bid_now  = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      double ask_now  = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      double fill     = (direction > 0) ? ask_now : bid_now;
+      double delta    = fill - entry;
+      if(MathAbs(delta) > 0) { entry += delta; sl += delta; tp += delta; }
+      double st       = (double)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+      if(direction > 0)
+      {
+         if(sl >= bid_now - st) sl = bid_now - st - tick_size;   // tighten only (risk-reducing)
+         if(tp <= ask_now + st + tick_size)
+          {         PrintFormat(VTAG+"ENTRY ABORT %s — price outran target during send (tp %.5f vs ask %.5f)",
+                     direction>0?"BUY":"SELL", tp, ask_now);
+             CBRecordReject("abort-tp-outran", reason);   // v26.12
+             return(false);
+          }
+      }
+      else
+      {
+         if(sl <= ask_now + st) sl = ask_now + st + tick_size;   // tiny widening for validity; micro-fit re-tightens below
+         if(tp >= bid_now - st - tick_size)
+          {         PrintFormat(VTAG+"ENTRY ABORT %s — price outran target during send (tp %.5f vs bid %.5f)",
+                     direction>0?"BUY":"SELL", tp, bid_now);
+             CBRecordReject("abort-tp-outran", reason);   // v26.12
+             return(false);
+          }
+      }
+      entry = fill;
+      stop_dist = MathAbs(entry - sl);
+      tp_dist   = MathAbs(tp - entry);
+   }
+
+   //--- v26.6: MICRO-BALANCE FIT — on a micro account the risk budget buys
+   //    less than one minimum lot, so the min-lot clamp silently multiplies
+   //    planned risk (2026-08-30: $14 equity, 0.20 lots x 4.1-unit stop =
+   //    5.7% per trade and 20-48% per spike gap-through). Rescale SL/TP to
+   //    fit the balance instead of oversizing or freezing the EA.
+   if(InpMicroFitPct > 0)
+   {
+      double eff0    = vol * ((stop_dist / tick_size) * tick_value);
+      double fit_cap = g_eq * InpMicroFitPct / 100.0;
+      if(eff0 > fit_cap)
+      {
+         double old_stop  = stop_dist;
+         double per_unit  = tick_value / tick_size;                // $ per price-unit per 1.0 lot
+         double max_stop  = fit_cap / (vol * per_unit);
+         double sprd      = SymbolInfoDouble(_Symbol,SYMBOL_ASK) - SymbolInfoDouble(_Symbol,SYMBOL_BID);
+         double stp_level = (double)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+         double floor_stop= MathMax(sprd*1.2 + stp_level + 3.0 * tick_size, 2.0 * tick_size);
+         double new_stop  = MathMax(max_stop, floor_stop);
+         double scale     = new_stop / stop_dist;
+         if(direction > 0) { sl = entry - new_stop; tp = entry + tp_dist * scale; }
+         else              { sl = entry + new_stop; tp = entry - tp_dist * scale; }
+         stop_dist = new_stop;
+         double eff1 = vol * ((stop_dist / tick_size) * tick_value);
+         PrintFormat(VTAG+"MICRO-FIT stop %.2f->%.2f (eff risk $%.2f->$%.2f = %.2f%% eq)%s",
+                     old_stop, new_stop, eff0, eff1, eff1 / MathMax(g_eq,0.01) * 100.0,
+                     (max_stop < floor_stop) ? " [floor: spread-bound]" : "");
+      }
+   }
 
    // EFFECTIVE-RISK GUARDRAIL
    double eff_risk = vol * ((stop_dist/tick_size)*tick_value);
@@ -1637,14 +2679,14 @@ void OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
       PrintFormat(VTAG+"SKIP %s — fleet risk $%.2f + new $%.2f exceeds cap $%.2f",
                   direction>0?"BUY":"SELL", fleet_risk, eff_risk, fleet_cap);
       g_cooldown = 1;
-      return;
+      return(false);
    }
    if(eff_risk > cap_money)
    {
       PrintFormat(VTAG+"SKIP %s — min-lot risk $%.2f exceeds cap $%.2f",
                   direction>0?"BUY":"SELL", eff_risk, cap_money);
       g_cooldown = 1;
-      return;
+      return(false);
    }
    g_risk_money = eff_risk;
 
@@ -1660,11 +2702,13 @@ void OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
          uint retcode = trade.ResultRetcode();
          string desc = trade.ResultRetcodeDescription();
          PrintFormat(VTAG+"ORDER FAILED retcode=%d desc=%s", retcode, desc);
+         // v26.12: quantify the lost fade opportunity for the offline loop
+         CBRecordReject(StringFormat("retcode=%u %s", retcode, desc), reason);
       }
    }
    else { g_ticket = (ulong)TimeCurrent(); ok = true; Print(VTAG+"PAPER MODE"); }
 
-   if(!ok) { g_cooldown = InpCoolDownBars; return; }
+   if(!ok) { g_cooldown = InpCoolDownBars; return(false); }
 
    g_ticket = 0;
    for(int a=0; a<6; a++)
@@ -1683,7 +2727,7 @@ void OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
    {
       Print(VTAG+"ORDER accepted but position ticket was not found; waiting for recovery");
       g_cooldown = InpCoolDownBars;
-      return;
+      return(false);
    }
 
    g_dir = direction; g_entry = entry; g_sl = sl; g_tp = tp;
@@ -1706,6 +2750,7 @@ void OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
       _Symbol, g_ticket, direction, entry, sl, tp, vol, g_risk_money,
       reason, RegimeToStr(g_regime),
       EnumToString(g_tf_entry), g_z_dev, g_exp_ratio));
+   return(true);
 }
 
 //+------------------------------------------------------------------+
@@ -1761,11 +2806,15 @@ void ManagePosition()
       }
       
       // CB-specific tighter trailing: start at 0.5R instead of 1.0R
+      // v26.13: routed through ValidStopForModify — an unguarded modify during
+      // a spike (price moving fast) was the retcode-10016 "invalid stops"
+      // source on the Boom chart (SL landed inside the stops level, or the
+      // TP sat on the wrong side of a just-gapped price).
       if(r_now >= 0.5)
       {
          double cb_dist = 0.4 * g_orig_risk;  // tighter than standard 0.7R
-         if(g_dir>0){ double ns=NormalizeDouble(bid-cb_dist,_Digits); if(ns>g_sl && ns>g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
-         else       { double ns=NormalizeDouble(ask+cb_dist,_Digits); if(ns<g_sl && ns<g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
+         if(g_dir>0){ double ns=NormalizeDouble(ValidStopForModify(bid-cb_dist,1,g_tp),_Digits); if(ns>g_sl && ns>g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
+         else       { double ns=NormalizeDouble(ValidStopForModify(ask+cb_dist,-1,g_tp),_Digits); if(ns<g_sl && ns<g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
       }
       
       // CB-specific profit lock: lock at 0.3R if reached 0.8R (tighter than standard)
@@ -1833,20 +2882,65 @@ void ManagePosition()
    }
 
    // breakeven: move SL to entry + 2 points at +1R
+   // v26.13: validity guard before every PositionModify — on Boom/Crash the
+   // price can gap between bid/ask read and the modify call, so an unguarded
+   // SL can land inside the broker's stops level → retcode 10016 spam.
    if(InpUseBreakeven && r_now >= InpBeTriggerR)
    {
       double be = g_dir>0 ? g_entry+2*_Point : g_entry-2*_Point;
       if((g_dir>0 && g_sl<be) || (g_dir<0 && g_sl>be))
-         if(trade.PositionModify(g_ticket,NormalizeDouble(be,_Digits),g_tp)) g_sl=be;
+      {
+         double be_sl = NormalizeDouble(ValidStopForModify(be, g_dir, g_tp), _Digits);
+         if(be_sl != 0 && ((g_dir>0 && be_sl>g_sl) || (g_dir<0 && be_sl<g_sl)))
+            if(trade.PositionModify(g_ticket,be_sl,g_tp)) g_sl=be_sl;
+      }
    }
 
    // trailing stop (standard mode — CB mode handled above)
    if(!InpCrashBoomMode && InpUseTrailing && r_now >= InpTrailStartR)
    {
       double dist = InpTrailDistR * g_orig_risk;
-      if(g_dir>0){ double ns=NormalizeDouble(bid-dist,_Digits); if(ns>g_sl && ns>g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
-      else       { double ns=NormalizeDouble(ask+dist,_Digits); if(ns<g_sl && ns<g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
+      if(g_dir>0){ double ns=NormalizeDouble(ValidStopForModify(bid-dist,1,g_tp),_Digits); if(ns>g_sl && ns>g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
+      else       { double ns=NormalizeDouble(ValidStopForModify(ask+dist,-1,g_tp),_Digits); if(ns<g_sl && ns<g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
    }
+}
+
+//+------------------------------------------------------------------+
+//| v26.13: stop validity guard for PositionModify                    |
+//| Clamps a desired SL to the broker's SYMBOL_TRADE_STOPS_LEVEL       |
+//| against the CURRENT bid/ask and rejects impossible stops (returns  |
+//| 0 → caller skips the modify) instead of spamming retcode 10016.    |
+//| Tightening-only semantics are preserved by the caller's compare.   |
+//+------------------------------------------------------------------+
+double ValidStopForModify(double desired_sl, int dir, double tp)
+{
+   double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double st  = (double)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double ts  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   if(ts<=0) ts=_Point;
+   if(dir>0)
+   {
+      // long: SL must be < bid - stopsLevel; TP must be > bid + stopsLevel
+      double max_sl = bid - st - ts;
+      if(desired_sl >= max_sl)
+      {
+         if(max_sl <= 0) return 0;                       // nothing valid
+         desired_sl = max_sl;                            // clamp tighter-bound
+      }
+      if(tp > 0 && tp <= bid + st + ts) return 0;        // TP invalid vs current price → skip
+   }
+   else
+   {
+      // short: SL must be > ask + stopsLevel; TP must be < ask - stopsLevel
+      double min_sl = ask + st + ts;
+      if(desired_sl <= min_sl)
+      {
+         desired_sl = min_sl;
+      }
+      if(tp > 0 && tp >= ask - st - ts) return 0;
+   }
+   return NormalizeDouble(desired_sl, _Digits);
 }
 
 //+------------------------------------------------------------------+
@@ -1857,56 +2951,24 @@ void ClosePosition(string reason)
    double exit_p = g_dir>0 ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    if(!trade.PositionClose(g_ticket)) return;
 
-   double r = g_orig_risk>0 ? (g_dir>0?(exit_p-g_entry):(g_entry-exit_p))/g_orig_risk : 0;
-   g_trades++; g_total_r += r;
-   if(r>0) g_wins++; else g_losses++;
-
-   if(reason=="TARGET") g_target_exits++;
-   else if(reason=="TIME") g_time_exits++;
-   else if(reason=="STOP") g_stop_exits++;
-   else if(reason=="ECUT") g_early_cuts++;
-
-   // v24.11: ALWAYS set cooldown after trade closes (not just after losses)
-   // This prevents re-entry while market is still moving against us
-   g_cooldown = InpCoolDownBars;
-   if(r<0){ g_consec_loss++; } else g_consec_loss=0;
-   if(g_consec_loss>=InpMaxConsecLoss)
-   {
-      g_paused=true;
-      PrintFormat(VTAG+"%d consecutive losses — PAUSED", g_consec_loss);
-   }
-   g_daily_pnl += r*g_risk_money;
-   g_session_pnl += r*g_risk_money;
-
-   double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
-   PrintFormat(VTAG+"CLOSE %s R=%+.3f | Trades:%d WR:%.1f%% TotalR:%+.2f SessionPnL=$%+.2f",
-               reason, r, g_trades, wr, g_total_r, g_session_pnl);
-
-   Telem("close", StringFormat(
-      "\"sym\":\"%s\",\"ticket\":%I64u,\"dir\":%d,\"reason\":\"%s\",\"exit\":%.5f,"
-      "\"r\":%.3f,\"pnl\":%.2f,\"consec_loss\":%d,\"paused\":%s,\"daily_halt\":%s",
-      _Symbol, closed_ticket, g_dir, reason, exit_p, r, r*g_risk_money,
-      g_consec_loss, (g_paused?"true":"false"), (DailyLossHalted()?"true":"false")));
-
-   // v24.11: Notify CB engine of trade close (for trend-reversal guard)
-   if(InpCrashBoomMode && g_dir != 0)
-      g_cb.OnTradeClosed(g_dir, g_entry);
-   
-   g_ticket=0; g_dir=0; g_bars_held=0; g_high_water_r=0;
-
-   // v23.1: Run intelligence review after every trade
-   PostTradeReview(g_last_strategy, r, reason);
-
-   SaveReviewState();  // v23.1: persist after every close
+   HandleTradeClose(exit_p, reason, 0);   // v26.4: shared close handler
 }
 
 //+------------------------------------------------------------------+
 void CreateDashboard()
 {
+   // v26.9-fix: a crashed session leaves its HUD labels on the chart forever
+   // (OnDeinit never ran, so the delete loop in OnDeinit was skipped), and a
+   // bare OBJ_LABEL renders as the terminal's default "Label" text — the
+   // Aug-31 spam on both charts. Sweep stale M230_* objects first, and give
+   // every fresh label text immediately so a mid-run crash can never leave
+   // mystery labels behind again.
+   ObjectsDeleteAll(0, "M230_");
    for(int i=0;i<26;i++)
    {
       dash_names[i]="M230_"+IntegerToString(i);
       ObjectCreate(0,dash_names[i],OBJ_LABEL,0,0,0);
+      ObjectSetString(0,dash_names[i],OBJPROP_TEXT,"...");   // replaced on first tick
       ObjectSetInteger(0,dash_names[i],OBJPROP_CORNER,CORNER_LEFT_UPPER);
       ObjectSetInteger(0,dash_names[i],OBJPROP_XDISTANCE,10);
       ObjectSetInteger(0,dash_names[i],OBJPROP_YDISTANCE,15+i*15);
@@ -1958,8 +3020,9 @@ void UpdateDashboard()
          InpUseMomentum?"ON":"OFF", InpUseMeanRevert?"ON":"OFF", InpUseBandFade?"ON":"OFF");
    L[7]=StringFormat("MinScore: %d | 2+Agree: %s | Cooldown: %d",InpMinScore,InpRequire2Strats?"YES":"NO", g_cooldown);
    L[8]=InpCrashBoomMode
-      ? StringFormat("CB Risk: %.2f%% | Cap: %.0f%% | Fade TP: %.1fx | Hold: %d | Thr: %.1fx%s",
-         InpCBBaseRisk, InpMaxEffectiveRiskPct,
+      ? StringFormat("CB Risk: %.2f%% | Cap: %.0f%% | MicroFit: %.1f%% | Sess: %02d:00-%02d:%02d | Fade TP: %.1fx | Hold: %d | Thr: %.1fx%s",
+         InpCBBaseRisk, InpMaxEffectiveRiskPct, InpMicroFitPct,
+         InpSessionStartHour, InpSessionEndHour - 1, 60 - MathMax(InpSessionEndOffsetMin, 0),
          InpIsCrashIndex ? InpCBFadeTP : InpCBFadeTP, InpMaxHoldBars,
          InpCBSpikeThreshold, InpCBMicroFade?" MICRO":"" )
       : StringFormat("Risk: %.2f%% (cap %.0f%%) | TP: %.1fx | Hold: %d",
@@ -1969,7 +3032,9 @@ void UpdateDashboard()
         InpUseTrailing?"ON":"OFF",InpTrailStartR,InpTrailDistR,
         InpUseBreakeven?"ON":"OFF");
    L[10]=(g_sigma_init && g_sigma_now>0)
-        ? StringFormat("Telem: z=%+.2f exp=%.2fx sig=%.5f",g_z_dev,g_exp_ratio,g_sigma_now)
+        ? StringFormat("Telem: z=%+.2f exp=%.2fx sig=%.5f %s",
+            g_z_dev,g_exp_ratio,g_sigma_now,
+            (InpUseGarch && g_garch_ok ? (g_garch.Observations() >= InpGarchWarmupBars ? "[GARCH]" : "[GARCH warmup]") : "[legacy sigma]"))
         : "Telem: warming up...";
    {
       int nsl=0;
@@ -1982,8 +3047,18 @@ void UpdateDashboard()
         InpGraduatedExit?"ON":"OFF", InpEarlyCutMaxR, InpEarlyCutBars, InpProfitLockR);
    L[13]=StringFormat("ScaleLoss: %s (%.0f%% per loss, floor %.0f%%) | ConsecLoss: %d",
         InpScaleAfterLoss?"ON":"OFF", InpScaleFactor*100, InpMinVolScale*100, g_consec_loss);
+   // v26.2: spike slippage — the real cost of gap-through stops
+   L[14]=StringFormat("SpikeSlip: stops hit %d | gap-through %d (avg %+.2fR) | cum slip %+.2fR",
+        g_stop_n, g_gap_loss_n,
+        (g_gap_loss_n>0 ? g_gap_loss_r_sum/g_gap_loss_n : 0.0),
+        g_slip_r_sum);
+   // v26.14: meta-labeling status
+   L[15]=InpUseMetaLabel
+        ? StringFormat("MetaLabel: %s | rows=%d | next mult=%+.2fx",
+                       InpMetaLabelCSV, g_ml_rows, MetaLabelMultiplier(1))
+        : "MetaLabel: OFF";
 
-   int line=14;
+   int line=16;   // v26.14: L[15] is the MetaLabel line now
    // v23.1: Always scan for open positions (not just g_ticket)
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
@@ -2004,12 +3079,11 @@ void UpdateDashboard()
       if(line>=25) break;
    }
 
-   // v23.1: Intelligence layer status
+   // v23.1: Intelligence layer status (v26.5: includes CB modes; v26.11: shared STRAT_NAMES)
    {
-      const string snames[] = {"PB","BO","MOM","MR","BF"};
       double best_r = -999; int best_i = -1;
       double worst_r = 999; int worst_i = -1;
-      for(int i=0; i<5; i++)
+      for(int i=0; i<STRAT_SLOTS; i++)
       {
          if(g_strat_trades[i] < 3) continue;
          if(g_strat_total_r[i] > best_r) { best_r = g_strat_total_r[i]; best_i = i; }
@@ -2017,10 +3091,20 @@ void UpdateDashboard()
       }
       if(best_i >= 0)
          L[line++]=StringFormat("Intel: Best=%s(%+.1fR) Worst=%s(%+.1fR) Reviews:%d",
-                                snames[best_i], best_r, snames[worst_i], worst_r,
+                                STRAT_NAMES[best_i], best_r, STRAT_NAMES[worst_i], worst_r,
                                 g_last_strategy_review);
       else
          L[line++]="Intel: Collecting data... (need 15+ trades)";
+      // v26.12: lost fade opportunities (rejected/aborted entries) — visible at a glance
+      if(g_cb_reject_total > 0)
+         L[line++]=StringFormat("Rejects: %d total / %d today (streak %d) last: %s",
+                                g_cb_reject_total, g_cb_reject_today,
+                                g_cb_reject_streak, g_cb_reject_last);
+      // v26.12: lost fade opportunities (rejected/aborted entries) — visible at a glance
+      if(g_cb_reject_total > 0)
+         L[line++]=StringFormat("Rejects: %d total / %d today (streak %d) last: %s",
+                                g_cb_reject_total, g_cb_reject_today,
+                                g_cb_reject_streak, g_cb_reject_last);
    }
 
    // v25.1: tick recorder status (CB mode only)

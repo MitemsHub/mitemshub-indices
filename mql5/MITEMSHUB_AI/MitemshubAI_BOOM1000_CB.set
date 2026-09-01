@@ -1,6 +1,5 @@
-; MITEMSHUB AI v25.9 — Boom 1000 CRASH/BOOM profile
-; Optimized for Boom 1000 Index on M5 timeframe
-; Generated 2026-08-28 with full intelligence suite
+; MITEMSHUB AI v26.7 — Boom 1000 CRASH/BOOM profile
+; Deployed 2026-08-30 (fresh-build rollout of all pending v26.x upgrades)
 ;
 ; Boom 1000 characteristics:
 ;   - Frequent small spikes (median 28.5pts, mode 24pts)
@@ -63,8 +62,19 @@ InpBandMaxStopPct=0.015
 InpRiskPerTrade=0.003
 InpMaxEffectiveRiskPct=15.0
 InpTpMult=1.5
-InpMaxHoldBars=8
-InpMaxDailyLossPct=0.04
+InpMaxHoldBars=6
+InpMaxDailyLossPct=0.0
+InpMaxConsecLoss=3
+InpUseOnTradeTransaction=true
+InpMicroFitPct=1.5
+InpCBMaxConsecLoss=2
+InpCBLearnStrategies=true
+InpCBMinTradesToJudge=20
+InpCBMinExpectancy=-0.1
+InpCBBurstGuardMode=2
+InpCBBurstWindowSec=1800
+InpCBBurstMaxSpikes=2
+InpCBBurstMinGapSec=600
 InpMaxConsecLoss=3
 InpCoolDownBars=3
 InpUseTrailing=true
@@ -82,7 +92,7 @@ InpWarmupBars=100
 InpDrawDashboard=true
 InpDrawSignals=true
 InpLiveExecution=true
-InpMaxTradesPerDay=10
+InpMaxTradesPerDay=0
 
 ; === Account-wide exposure guard ===
 InpMaxTotalRiskPct=13.0
@@ -90,6 +100,7 @@ InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100,7788300
 
 ; === Intelligence & Safety (v23) ===
 InpSessionStartHour=0
+InpSessionEndOffsetMin=45
 InpSessionEndHour=23
 InpSameSymbolMaxPos=1
 InpGraduatedExit=true
@@ -113,15 +124,20 @@ InpAutoBlockTime=false
 ; === Crash/Boom Mode (v24) — ENABLED ===
 InpCrashBoomMode=true
 InpIsCrashIndex=false
+InpCBSpikeThresholdMode=1
 InpCBSpikeThreshold=2.2
 InpCBMicroFade=true
 InpCBTickFade=true
 InpCBTickSpikePts=3.0
 InpCBTickFadeTOSec=900
+InpCBMaxSpikeProbMode=1
 InpCBMaxSpikeProb=0.70
-InpCBFadeR=0.3
-InpCBFadeSL=0.4
-InpCBFadeTP=3.2
+InpCBFadeRMode=1
+InpCBFadeR=0.4
+InpCBFadeSLMode=1
+InpCBFadeSL=0.3
+InpCBFadeTPMode=1
+InpCBFadeTP=4.0
 InpCBBaseRisk=0.30
 InpCBMinRisk=0.10
 

@@ -62,8 +62,12 @@ public:
       m_max_open_positions     = DEFAULT_MAX_OPEN_POSITIONS;
       m_max_total_exposure_pct = DEFAULT_MAX_TOTAL_EXPOSURE_PCT / 100.0;
       m_max_consecutive_losses = DEFAULT_MAX_CONSECUTIVE_LOSSES;
-      m_max_trades_per_hour    = DEFAULT_MAX_TRADES_PER_HOUR;
-      m_max_trades_per_day     = DEFAULT_MAX_TRADES_PER_DAY;
+      // v26.14: дневните/часовите лимити за брой трейдови са ИЗКЛЮЧЕНИ по
+      // подразбиране (0 = disabled) — пазарът предлага възможности 24/7 и
+      // лимитът пречеше на системата да ги използва. Активира се само с
+      // изрична стойност > 0 (SetMaxTradesPerDay / .set файл).
+      m_max_trades_per_hour    = 0;
+      m_max_trades_per_day     = 0;
       m_emergency_stop         = false;
       m_equity = 0.0;
       m_peak_equity = 0.0;

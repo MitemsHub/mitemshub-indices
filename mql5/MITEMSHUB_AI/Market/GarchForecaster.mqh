@@ -25,7 +25,11 @@
 #ifndef MITEMSHUB_MARKET_GARCHFORECASTER_MQH
 #define MITEMSHUB_MARKET_GARCHFORECASTER_MQH
 
-#include "../Core/Constants.mqh"
+// NOTE: Constants.mqh (shared enum type system) is deliberately NOT included
+// here. The production EA defines its own ENUM_REGIME; including Constants
+// would collide (v26.10 integration: the forecaster needs no enums — it is
+// pure numeric recursion). If another module later needs the shared enums,
+// migrate the EA to Constants.mqh wholesale instead of re-including here.
 
 #define GARCH_WARMUP_OBSERVATIONS 30   // Python min_observations: sigma = sqrt(long_run_variance) below this
 #define GARCH_BUFFER_OBSERVATIONS 50   // log-variance initialized from the first 50 returns
