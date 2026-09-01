@@ -40,6 +40,7 @@ foreach ($mql5Dir in $mql5Dirs) {
     $expertsDir = Join-Path $mql5Dir "Experts"
     $mitemDir   = Join-Path $mql5Dir "Experts\MITEMSHUB_AI"
     $presetsDir = Join-Path $mql5Dir "Presets"
+    $tag        = Split-Path (Split-Path $mql5Dir) -Leaf
 
     foreach ($dir in @($setsDir, $setsMitem, $expertsDir, $mitemDir, $presetsDir)) {
         if (-not (Test-Path $dir)) {
@@ -60,6 +61,45 @@ foreach ($mql5Dir in $mql5Dirs) {
             Copy-Item $_.FullName $setsMitem -Force
             Copy-Item $_.FullName $presetsDir -Force
             $synced++
+        }
+    }
+
+    # --------------------------------------------------------
+    # Compile pass — the CLI build must happen here, inside the
+    # terminal tree, because MetaEditor only emits a fresh .ex5
+    # when the source it compiles lives under a terminal MQL5
+    # folder. Compiling the repo copy produced the "0 errors but
+    # no binary" trap. After the mirror above, the deployed tree
+    # is byte-identical to the repo, so compiling it is the same
+    # as compiling the repo.
+    # --------------------------------------------------------
+    if (-not $SetOnly) {
+        $metaEditor = "C:\Program Files\MetaTrader 5 Terminal\metaeditor64.exe"
+        if (Test-Path $metaEditor) {
+            $compileTarget = Join-Path $mitemDir "MitemshubAI.mq5"
+            $compileLog = Join-Path $env:TEMP "mitemshub_compile_$pid.log"
+            $compileArgs = "/compile:`"$compileTarget`" /log:`"$compileLog`""
+            $proc = Start-Process -FilePath $metaEditor -ArgumentList $compileArgs -Wait -PassThru
+            # metaeditor64.exe returns 1 even when the log says
+            # "Result: 0 errors" — the exit code is not a reliable
+            # failure signal. Trust the log and the resulting binary:
+            # a fresh .ex5 (or a 0-error log) means success; the build
+            # gate below still catches any missing/stale binary.
+            $compileOk = $false
+            if (Test-Path $compileLog) {
+                $logTail = Get-Content $compileLog -Tail 3 | Out-String
+                if ($logTail -match "Result: 0 errors") { $compileOk = $true }
+            } elseif ($proc.ExitCode -eq 0) { $compileOk = $true }
+            if (-not $compileOk) {
+                $deployFailures += "[$tag] COMPILE FAILED: metaeditor64.exe exited $($proc.ExitCode) for MitemshubAI.mq5"
+                if (Test-Path $compileLog) {
+                    Get-Content $compileLog | Select-Object -Last 5 | ForEach-Object {
+                        $deployFailures += "  log: $_"
+                    }
+                }
+            }
+        } else {
+            $deployFailures += "[$tag] MetaEditor not found at $metaEditor - cannot auto-compile"
         }
     }
 
@@ -124,7 +164,6 @@ foreach ($mql5Dir in $mql5Dirs) {
     # --------------------------------------------------------
     $liveMq5 = Join-Path $mitemDir "MitemshubAI.mq5"
     $liveEx5 = Join-Path $mitemDir "MitemshubAI.ex5"
-    $tag     = Split-Path (Split-Path $mql5Dir) -Leaf
     if (-not (Test-Path $liveMq5)) {
         $deployFailures += "[$tag] live source missing: Experts\MITEMSHUB_AI\MitemshubAI.mq5"
     } elseif (-not (Test-Path $liveEx5)) {

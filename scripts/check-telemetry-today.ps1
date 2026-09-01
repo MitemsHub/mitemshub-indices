@@ -1,5 +1,5 @@
 # check-telemetry-today.ps1 — today's telemetry event counts per instance
-$today = (Get-Date).ToString("yyyy-MM-dd")
+$today = (Get-Date).ToString("yyyy.MM.dd")
 Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal\*\MQL5\Files\MitemshubAI_v23_telemetry_*.jsonl" |
     Sort-Object LastWriteTime -Descending | Select-Object -First 2 | ForEach-Object {
         Write-Host ("=== " + $_.Name + " ===")
