@@ -16,11 +16,11 @@
 ;   5. Graduated exit, profit lock, session filter, volume scaling ON
 ;
 ; Magic 7788100 — fleet exposure guard compliant.
-InpUsePullback=true
+InpUsePullback=false
 InpUseBreakout=false
-InpUseMomentum=true
-InpUseMeanRevert=true
-InpUseBandFade=true
+InpUseMomentum=false
+InpUseMeanRevert=false
+InpUseBandFade=false
 InpMinScore=3
 InpRequire2Strats=false
 InpMomentumStandalone=false
@@ -66,7 +66,7 @@ InpMaxSlippagePts=40
 InpWarmupBars=150
 InpDrawDashboard=true
 InpDrawSignals=true
-InpLiveExecution=true
+InpLiveExecution=false
 InpMaxTradesPerDay=9999
 ; Account-wide exposure guard
 InpMaxTotalRiskPct=15.0
@@ -83,3 +83,6 @@ InpScaleAfterLoss=true
 InpScaleFactor=0.75
 InpMinVolScale=0.30
 InpProfitLockR=0.5
+
+; v26.17: burst-fade leg stays OFF until replay-validated on recorded Vol ticks
+InpVolBurstFade=false

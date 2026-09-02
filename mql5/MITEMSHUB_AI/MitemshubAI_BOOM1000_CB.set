@@ -1,4 +1,4 @@
-; MITEMSHUB AI v26.16 — Boom 1000 CRASH/BOOM profile
+; MITEMSHUB AI v26.19 — Boom 1000 CRASH/BOOM profile
 ; Values current as of v26.15/26.16 (fade TP 3.2xATR, Quick-TP off); header refreshed 2026-09-01
 ; Deployed 2026-08-30 (fresh-build rollout of all pending v26.x upgrades)
 ;
@@ -148,6 +148,6 @@ InpCBEnableGrind=false
 InpCBRequireSpikeDirection=true
 InpCBMinATRPoints=0
 
-InpTickRecordEnabled=true
+InpTickRecordEnabled=false
 InpTickFlushTicks=100
 InpTickFlushSeconds=10

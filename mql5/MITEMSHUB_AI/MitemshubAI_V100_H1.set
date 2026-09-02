@@ -66,3 +66,6 @@ InpDrawDashboard=true
 InpDrawSignals=true
 InpLiveExecution=true
 InpMaxTradesPerDay=9999
+
+; v26.17: burst-fade leg stays OFF until replay-validated on recorded Vol ticks
+InpVolBurstFade=false

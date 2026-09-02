@@ -76,3 +76,6 @@ InpScaleAfterLoss=true
 InpScaleFactor=0.75
 InpMinVolScale=0.30
 InpProfitLockR=0.5
+
+; v26.17: burst-fade leg stays OFF until replay-validated on recorded Vol ticks
+InpVolBurstFade=false

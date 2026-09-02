@@ -1,4 +1,4 @@
-; MITEMSHUB AI v26.16 — Crash 1000 CRASH/BOOM profile (FADE-ONLY)
+; MITEMSHUB AI v26.19 — Crash 1000 CRASH/BOOM profile (FADE-ONLY)
 ; Values current as of v26.15/26.16 (fade TP 3.2xATR, Quick-TP off); header refreshed 2026-09-01
 ; Optimized for Crash 1000 Index on M5 timeframe
 ; Generated 2026-08-28 from 60-day optimization sweep
@@ -149,6 +149,6 @@ InpCBEnableGrind=false
 InpCBRequireSpikeDirection=true
 InpCBMinATRPoints=0
 
-InpTickRecordEnabled=true
+InpTickRecordEnabled=false
 InpTickFlushTicks=100
 InpTickFlushSeconds=10

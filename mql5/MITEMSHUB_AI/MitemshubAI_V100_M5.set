@@ -67,3 +67,9 @@ InpWarmupBars=250
 InpDrawDashboard=true
 InpDrawSignals=true
 InpLiveExecution=true
+
+; v26.17: burst-fade leg stays OFF until replay-validated on recorded Vol ticks
+InpVolBurstFade=false
+InpWinRearm=true
+InpMaxSpreadATRFrac=0.18
+InpAdaptiveConviction=true

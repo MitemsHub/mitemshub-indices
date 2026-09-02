@@ -1,10 +1,52 @@
 //+------------------------------------------------------------------+
 //|                                             MitemshubAI.mq5      |
-//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.16     |
+//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.23     |
 //|   Intelligent • Regime-Aware • Crash/Boom • Spike-Aware • Smart  |
 //|                                                                  |
 //| v26.x SERIES (2026-08-30) — see PRODUCTION_CONFIGS.md for full   |
 //| details. Single fresh-build deploy line for Boom + Crash:        |
+//|  v26.19 RECORDER RETIRED: InpTickRecordEnabled default OFF        |
+//|     (broker tick history covers research); the two CB presets     |
+//|     stop recording too. The CTickRecorder code stays for          |
+//|     opt-in microstructure studies.                                |
+//|  v26.23 GOVERNOR v3.1 — QUALITY GATES: (1) SPREAD GATE: entries   |
+//|     are refused when the live spread exceeds 18% of the planned   |
+//|     stop distance (scalp-sweep forensics: spread was ~44% of the  |
+//|     OOS loss; wide-spread moments are where the engine bleeds).   |
+//|     (2) CONVICTION THROTTLE: on a net-negative day the minimum    |
+//|     entry score rises by one — the governor stops digging when    |
+//|     the day is red, restores full access on green days. Both are  |
+//|     governor inputs, geometry untouched (sweep-validated).        |
+//|  v26.22 GOVERNOR v3 — COORDINATION: (1) WIN-REARM: cooldown is    |
+//|     no longer paid after winning trades — the governor re-arms    |
+//|     instantly once a winner closes (cooldown=0) and organises the |
+//|     next entry, while losses keep the full breather. Evidence:    |
+//|     the 63-cell scalp sweep (artifacts/                           |
+//|     scalp_sweep_volatility_75_index.json) rejected scalp TPs —    |
+//|     every tighter-target cell lost OOS; legacy geometry stays.    |
+//|  v26.20 GOVERNOR v2: (1) the auto-disable flag is now ENFORCED —  |
+//|     every trade path (classic legs, CB bar, CB tick-fade, VB      |
+//|     burst) gates on it; before, DISABLED strategies kept trading. |
+//|     (2) No permanent freeze — a suppressed strategy PROBES every  |
+//|     InpProbeEveryN-th signal so its statistics keep updating and  |
+//|     a recovered edge earns reinstatement. (3) Reviews and the     |
+//|     dashboard report the Wilson 95% lower bound of the win rate   |
+//|     for honest small-sample reads. State file grows one field,    |
+//|     backward-compatible both ways.                                |
+//|  v26.18 TRADE-JOURNAL HYGIENE: (1) full per-symbol trade ledger    |
+//|     MitemshubAI_history_<Symbol>.csv — one append-only row per     |
+//|     close with prices/volume/PnL/R/hold — a trustworthy $ equity   |
+//|     curve at last; (2) slippage counters redefined on EXIT PRICE:  |
+//|     broker STOP/TARGET fills measured vs the planned g_sl/g_tp on  |
+//|     the ticket (adverse R, worst-fill tracked); MANUAL/TIME closes |
+//|     excluded as decisions, not execution. Slip file grows to 7     |
+//|     fields, backward-compatible both ways.                        |
+//|  v26.17 VOLATILITY BURST FADE (EXPERIMENTAL, default OFF): the    |
+//|     tick-fade state machine ported to Volatility indices — a     |
+//|     momentum BURST (net move >= InpVBVelPts over N ticks) arms   |
+//|     a fade, the same retrace-window/confirm-release lifecycle    |
+//|     as CB-TICKFADE. Slot 8 (VB-BURST) in the strategy tables.    |
+//|     OFF everywhere until replayed against recorded Vol ticks.     |
 //|  v26.0 tick-fade burst guard (Crash ON / Boom OFF, per-symbol .set)
 //|  v26.1-26.3 per-symbol state/review/telemetry/slip files + DAILY  |
 //|     record — session counters survive re-attaches                 |
@@ -93,7 +135,7 @@
 //|  - Entry/regime TF overrides, telemetry journal                  |
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
-#define APP_VERSION "26.16"
+#define APP_VERSION "26.23"
 
 //--- v25.2: single source of truth for the version string.
 //--- #property version, every log tag, and every order comment derive from
@@ -107,11 +149,13 @@ const string VTAG = "[v" + APP_VERSION + "] ";
 #include <Trade\Trade.mqh>
 #include "CrashBoom/CrashBoomEngine.mqh"
 #include "CrashBoom/TickRecorder.mqh"
+#include "Strategies/VolBurstFade.mqh"   // v26.17: Volatility momentum-burst fade (EXPERIMENTAL, default OFF)
 // v26.9-phase1: modular market engine — EGARCH conditional-vol forecaster
 // (locked against the Python reference by Tests/Phase10Tests.mq5).
 #include "Market/GarchForecaster.mqh"
 CTrade trade;
 CTickRecorder g_tick_rec;   // v25.1: always-on tick microstructure archive
+CVolBurstFade g_vb;         // v26.17: Volatility momentum-burst fade (EXPERIMENTAL)
 
 #define TELEM_BASE "MitemshubAI_v23_telemetry"   // v26.1: per-symbol suffix appended
 #define STATE_BASE "MitemshubAI_state"           // v26.1: per-symbol suffix appended
@@ -181,28 +225,82 @@ input double InpBandMaxStopPct   = 0.015;    // reject band plan if stop > 1.5% 
 // Boom/Crash spikes gap the price and stops fill at the post-spike quote, so
 // a "protected" -1R can realize -4R..-10R. These counters make the tail
 // explicit in the journal and the HUD instead of hiding it inside g_total_r.
-int    g_gap_loss_n     = 0;      // closes that lost MORE than the planned stop
+int    g_gap_loss_n     = 0;      // v26.18: STOP exits filled beyond the planned -1R
 double g_gap_loss_r_sum = 0.0;    // realized R summed over gap-loss closes
-int    g_stop_n         = 0;      // closes realized at/beyond the planned stop
-double g_slip_r_sum     = 0.0;    // sum of (realized R - planned R) over all closes
+int    g_stop_n         = 0;      // broker-triggered STOP exits measured
+double g_slip_r_sum     = 0.0;    // v26.18: sum of adverse exit-price slippage (R)
+int    g_tp_n           = 0;      // v26.18: broker-triggered TARGET exits measured
+double g_tp_slip_r_sum  = 0.0;    // v26.18: adverse slippage on TARGET fills (R)
+double g_slip_worst_r   = 0.0;    // v26.18: worst single-fill adverse slippage (R)
 
-//--- Record slippage for one closed trade (called from BOTH close paths)
-void RecordTradeSlippage(double actual_r, string exit_type)
+//--- v26.18: EXECUTION-QUALITY slippage, measured at the exit price.
+//    Replaces the v26.2 P/L-derived counters, which were polluted by design:
+//    manual closes fed their full P/L into "slippage", TIME exits counted as
+//    gap-throughs, and trail/BE stops blurred into the planned-stop figure.
+//    Now: only broker-triggered STOP and TARGET exits are measured, and each
+//    is compared against the PLANNED price on the ticket (g_sl / g_tp):
+//      adverse_slip = (planned - exit) * dir   (positive = filled worse)
+//    MANUAL and TIME closes are decisions, not execution — excluded.
+void RecordTradeSlippage(double actual_r, double exit_p, string exit_type)
 {
-   double planned = -1.0;
-   g_slip_r_sum += (actual_r - planned);
-   if(actual_r <= -0.9)          // stop territory (covers trails/BE stops too)
-      g_stop_n++;
-   if(actual_r < planned)
+   double planned_p = 0;
+   if(exit_type == "STOP")        planned_p = g_sl;
+   else if(exit_type == "TARGET") planned_p = g_tp;
+   if(planned_p > 0 && g_dir != 0 && g_orig_risk > 0)
    {
-      g_gap_loss_n++;
-      g_gap_loss_r_sum += actual_r;
-      PrintFormat(VTAG+"SPIKE SLIPPAGE: realized %+.2fR vs planned -1.00R (%s exit) — gap-through loss",
-                  actual_r, exit_type);
-      Telem("slippage", StringFormat("\"sym\":\"%s\",\"r\":%.3f,\"planned\":-1.0,\"exit\":\"%s\",\"gap\":true",
-                  _Symbol, actual_r, exit_type));
+      double adverse_r  = ((planned_p - exit_p) * g_dir) / g_orig_risk;   // + = worse fill
+      g_slip_r_sum     += adverse_r;
+      if(adverse_r > g_slip_worst_r) g_slip_worst_r = adverse_r;
+      if(exit_type == "STOP")
+      {
+         g_stop_n++;
+         if(actual_r <= -1.02)          // filled BEYOND the planned -1R stop
+         {
+            g_gap_loss_n++;
+            g_gap_loss_r_sum += actual_r;
+            PrintFormat(VTAG+"SPIKE SLIPPAGE: STOP fill %+.2fR (exit %.5f vs planned %.5f, %+.1f pts) — gap-through",
+                        actual_r, exit_p, g_sl, (exit_p - g_sl) / _Point * (g_dir > 0 ? -1 : 1));
+            Telem("slippage", StringFormat("\"sym\":\"%s\",\"r\":%.3f,\"exit\":%.5f,\"planned\":%.5f,\"gap\":true",
+                        _Symbol, actual_r, exit_p, g_sl));
+         }
+      }
+      else // TARGET
+      {
+         g_tp_n++;
+         g_tp_slip_r_sum += adverse_r;
+      }
    }
-   SaveSlipState();              // v26.2: persist after every close (both paths)
+   SaveSlipState();              // persist after every close (both paths)
+}
+
+//+------------------------------------------------------------------+
+//| v26.18: FULL TRADE HISTORY — one append-only row per closed trade |
+//| The old MitemshubAI_trades.csv declared this schema but no writer |
+//| was ever wired, so the only live ledger (review CSV) lacked       |
+//| prices/volume/PnL — not enough to reconstruct a $ equity curve.   |
+//| Append-only, per symbol, never rotated or rewritten.              |
+//+------------------------------------------------------------------+
+#define HISTORY_BASE "MitemshubAI_history"
+void AppendTradeRow(string reason, double exit_p, double r)
+{
+   int h = FileOpen(SymbolTaggedFile(HISTORY_BASE, ".csv"),
+                    FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+   if(h == INVALID_HANDLE)
+   {
+      PrintFormat(VTAG+"WARNING: cannot open trade-history file — row for ticket %I64u lost", g_ticket);
+      return;
+   }
+   if(FileSize(h) == 0)   // first row ever: column header
+      FileWriteString(h, "closed_at,ticket,strategy,dir,volume,entry,sl,tp,exit,exit_reason,r,pnl_money,risk_money,hold_sec,magic\n");
+   FileSeek(h, 0, SEEK_END);
+   FileWriteString(h, StringFormat("%s,%I64u,%s,%d,%.2f,%.5f,%.5f,%.5f,%.5f,%s,%.3f,%.2f,%.2f,%d,%I64d\n",
+                   TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS),
+                   g_ticket, g_last_strategy, g_dir, g_position_volume,
+                   g_entry, g_sl, g_tp, exit_p, reason, r,
+                   r * g_risk_money, g_risk_money,
+                   g_entry_time > 0 ? (int)(TimeCurrent() - g_entry_time) : 0,
+                   (long)InpMagic));
+   FileClose(h);
 }
 
 //+------------------------------------------------------------------+
@@ -212,8 +310,12 @@ void SaveSlipState()
 {
    int h=FileOpen(SymbolTaggedFile("MitemshubAI_slip", ".csv"), FILE_WRITE|FILE_TXT|FILE_ANSI);
    if(h==INVALID_HANDLE) return;
-   FileWriteString(h, StringFormat("%d,%.4f,%d,%.4f\n",
-                   g_gap_loss_n, g_gap_loss_r_sum, g_stop_n, g_slip_r_sum));
+   // v26.18: 7 fields. Field order is append-only — old 4-field files load
+   // fine (LoadSlipState bounds-checks), and old EA builds simply ignore the
+   // 3 extra trailing fields of new files.
+   FileWriteString(h, StringFormat("%d,%.4f,%d,%.4f,%d,%.4f,%.4f\n",
+                   g_gap_loss_n, g_gap_loss_r_sum, g_stop_n, g_slip_r_sum,
+                   g_tp_n, g_tp_slip_r_sum, g_slip_worst_r));
    FileClose(h);
 }
 
@@ -225,16 +327,25 @@ void LoadSlipState()
    FileClose(h);
    if(StringLen(line)==0) return;
    string p[];
-   if(StringSplit(line, ',', p) >= 4)
+   int n_p = StringSplit(line, ',', p);
+   if(n_p >= 4)
    {
       g_gap_loss_n     = (int)StringToInteger(p[0]);
       g_gap_loss_r_sum = StringToDouble(p[1]);
       g_stop_n         = (int)StringToInteger(p[2]);
       g_slip_r_sum     = StringToDouble(p[3]);
-      PrintFormat(VTAG+"SPIKE SLIPPAGE restored: gap-through %d (avg %+.2fR) | cum slip %+.2fR",
-                  g_gap_loss_n,
+      // v26.18: extended fields (old 4-field files keep code defaults)
+      if(n_p >= 7)
+      {
+         g_tp_n          = (int)StringToInteger(p[4]);
+         g_tp_slip_r_sum = StringToDouble(p[5]);
+         g_slip_worst_r  = StringToDouble(p[6]);
+      }
+      PrintFormat(VTAG+"SLIPPAGE restored (v26.18 exit-price basis): STOPs=%d gap-through=%d (avg %+.2fR) | adverse slip %+.3fR worst %+.3fR | TPs=%d (slip %+.3fR)",
+                  g_stop_n, g_gap_loss_n,
                   (g_gap_loss_n > 0 ? g_gap_loss_r_sum / g_gap_loss_n : 0.0),
-                  g_slip_r_sum);
+                  (g_stop_n + g_tp_n > 0 ? g_slip_r_sum / (g_stop_n + g_tp_n) : 0.0),
+                  g_slip_worst_r, g_tp_n, g_tp_slip_r_sum);
    }
 }
 
@@ -244,7 +355,10 @@ input double InpMaxEffectiveRiskPct = 20.0;  // HARD CAP: skip entry if real min
 input double InpMaxTotalRiskPct  = 15.0;     // ACCOUNT GUARD: max SUMMED open risk (all fleet magics) as % of equity
 input double InpMicroFitPct      = 1.5;      // v26.6: if min-lot clamping overshoots risk (micro balance), shrink SL/TP so effective risk <= this % of equity (0=off)
 input string InpFleetMagicsCSV   = "7788010,7788025,7788050,7788075,7788100";
-input double InpTpMult           = 2.4;
+input double InpTpMult           = 2.4;   // v26.22: unchanged — 63-cell scalp sweep rejected tighter TPs (all cells OOS-negative on V75; artifacts/scalp_sweep_volatility_75_index.json)
+input bool   InpWinRearm         = true;  // v26.22: governor coordination — instant re-arm after a winning close (losses keep the cooldown breather)
+input double InpMaxSpreadATRFrac = 0.18;   // v26.23: governor spread gate — skip entries when live spread > this fraction of the stop distance (0 = off)
+input bool   InpAdaptiveConviction= true;  // v26.23: governor conviction throttle — MinScore +1 while the day is net-negative
 input int    InpMaxHoldBars      = 20;       // v23: raised from 14 — give winners room (20 bars = 5hr on M15)
 input double InpMaxDailyLossPct  = 0.0;     // 0 = daily-loss halt DISABLED (was 0.03; user request 2026-08-30). DailyLossHalted() returns false when <= 0.
 input int    InpMaxConsecLoss    = 3;        // v23: lowered from 6 — pause sooner, preserve capital
@@ -335,6 +449,22 @@ input double InpCBFadeTP         = 3.2;      // (CUSTOM) fade target = 3.2x ATR 
 input bool   InpCBQuickTP       = false;    // Quick-TP tick-fade exit (small fixed target, no trail)
 input double InpCBQuickTPTPMult = 2.5;      // Quick-TP target = this x ATR
 
+input group "=== Volatility Burst Fade (v26.17, EXPERIMENTAL) ==="
+// v26.17: momentum-burst fade for Volatility indices — the CB tick-fade state
+// machine ported to the Vol analogue of a spike (fast net move over N ticks).
+// Every threshold is unvalidated until replayed against recorded Vol ticks;
+// the master switch defaults OFF and stays off in every shipped preset.
+input bool   InpVolBurstFade     = false;    // Master: enable the Vol burst-fade leg
+input int    InpVBLookTicks      = 8;        // Velocity lookback (ticks) for burst detection
+input double InpVBVelPts         = 4.0;      // Net move (points) over lookback that arms a burst
+input double InpVBRetrMin        = 0.30;     // Fire when retrace enters the window (min)
+input double InpVBRetrMax        = 0.60;     // Window closes beyond this retrace (max)
+input int    InpVBTimeoutSec     = 600;      // Pending burst expiry (s)
+input double InpVBSL_ATR         = 0.3;      // Burst-fade stop = this x entry-TF ATR
+input double InpVBTP_ATR         = 3.2;      // Burst-fade target = this x entry-TF ATR
+input double InpVBMinRR          = 2.0;      // R:R gate at signal time
+input int    InpVBCooldownSec    = 300;      // Quiet period after a confirmed burst fade (s)
+
 input group "=== Tick Fast-Fade (v25.4) ==="
 input bool   InpCBTickFade      = true;     // Fire fades on the tick spike itself (no M5 wait)
 input double InpCBTickSpikePts  = 3.0;      // Min tick jump (points) that counts as a spike
@@ -363,7 +493,7 @@ input int    InpCBBurstMaxSpikes = 2;       // Block fades when spikes-in-window
 input int    InpCBBurstMinGapSec = 600;     // Block fades when prev-spike gap < this (s); 0 disables
 
 input group "=== Tick Recorder (v25.1) ==="
-input bool   InpTickRecordEnabled = true;   // Always-on tick recorder (microstructure archive)
+input bool   InpTickRecordEnabled = false;  // Tick recorder (OFF by default: broker tick history covers research; enable per-preset only for microstructure studies)
 input int    InpTickFlushTicks    = 100;     // Flush buffer every N ticks (v25.5: live-analysis cadence)
 input int    InpTickFlushSeconds  = 10;      // Max seconds between flushes (v25.5)
 
@@ -374,6 +504,8 @@ input int    InpTimeReviewN      = 30;       // Check time-block performance eve
 input int    InpMinTradesToJudge = 15;       // Minimum trades before auto-disabling a strategy
 input double InpMinExpectancy    = 0.0;      // Min expectancy (R/trade) to keep a strategy active
 input bool   InpAutoDisableStrat = true;     // Auto-disable strategies with negative expectancy
+input bool   InpProbeDisabled    = true;     // v26.20: suppressed strategies probe every Nth signal (no permanent freeze)
+input int    InpProbeEveryN      = 10;       // v26.20: probe every Nth blocked signal (0 = full freeze)
 input bool   InpAutoBlockTime    = false;    // Auto-block worst-performing time blocks
 input bool   InpCBPersistLearning= true;     // v26.5: CB fade/grind expectancy survives restarts (learned gating)
 
@@ -460,20 +592,22 @@ double g_session_pnl=0;
 // drift can no longer be reintroduced silently — and SelfTestFixedArrays()
 // re-verifies all of it at init, fail-closed, BEFORE the first file-indexed
 // write can reach the tables.
-#define STRAT_SLOTS   8   // 5 classic + 3 CB modes
+// v26.5: CB modes — slots 5..7; v26.17: slot 8 = VB-BURST (Volatility burst fade)
+#define STRAT_SLOTS   9   // 5 classic + 3 CB modes + 1 Vol burst
 #define REGIME_SLOTS  5
 #define TIME_SLOTS    5
 
 // v26.11: name tables hoisted to constant globals sized by the same constants
 // (they were duplicated inline in CheckStrategyPerformance/CheckRegime-
 // Performance and AGAIN in the HUD — a third drift hazard).
-const string STRAT_NAMES[STRAT_SLOTS]   = {"PB","BO","MOM","MR","BF","CB-TICKFADE","CB-FADE","CB-GRIND"};
+const string STRAT_NAMES[STRAT_SLOTS]   = {"PB","BO","MOM","MR","BF","CB-TICKFADE","CB-FADE","CB-GRIND","VB-BURST"};
 const string REGIME_NAMES[REGIME_SLOTS] = {"BULLISH","BEARISH","RANGING","HIGH_VOL","NO_TRADE"};
 
 double g_strat_trades[STRAT_SLOTS];     // total trades per strategy
 double g_strat_wins[STRAT_SLOTS];       // wins per strategy
 double g_strat_total_r[STRAT_SLOTS];    // cumulative R per strategy
 bool   g_strat_enabled[STRAT_SLOTS];    // auto-disable flag
+int    g_strat_probe_n[STRAT_SLOTS];    // v26.20: blocked-signal counter per strategy (drives probing)
 
 // Regime performance tracking (index 0=BULL,1=BEAR,2=RANGE,3=HVOL,4=NOTRADE)
 double g_regime_trades[REGIME_SLOTS];
@@ -782,7 +916,8 @@ int OnInit()
    // v25.1: tick recorder — degrades to no-op if the file can't be opened
    g_tick_rec.Init(_Symbol, InpTickRecordEnabled, InpTickFlushTicks, InpTickFlushSeconds);
 
-   Print(VTAG+"MITEMSHUB AI v"+APP_VERSION+" started | 5 Strategies | Regime-Aware | Crash/Boom Mode");
+   Print(VTAG+"MITEMSHUB AI v"+APP_VERSION+" started | 5 Strategies | Regime-Aware | " +
+         (InpCrashBoomMode ? "Crash/Boom Mode" : "Standard Mode"));
    PrintFormat(VTAG+"Entry TF=%s | Regime TF=%s | Band=%s | MinScore=%d | RiskCap=%.0f%%",
                EnumToString(g_tf_entry), EnumToString(g_tf_regime),
                InpUseBandFade?"ON":"OFF", InpMinScore, InpMaxEffectiveRiskPct);
@@ -799,6 +934,11 @@ int OnInit()
                InpStrategyReviewN, InpRegimeReviewN, InpTimeReviewN);
    PrintFormat(VTAG+"Auto-disable: %s (min %d trades, min expectancy %.2fR)",
                InpAutoDisableStrat?"ON":"OFF", InpMinTradesToJudge, InpMinExpectancy);
+   PrintFormat(VTAG+"Governor v2: enforcement ON; suppressed strategies probe every %d-th signal (%s)",
+               InpProbeEveryN, InpProbeDisabled?"probing enabled":"full freeze");
+   PrintFormat(VTAG+"Governor v3 coordination: spread-gate %s (max %.0f%% of stop), conviction throttle %s, win-rearm %s",
+               InpMaxSpreadATRFrac>0?"ON":"OFF", InpMaxSpreadATRFrac*100.0,
+               InpAdaptiveConviction?"ON":"OFF", InpWinRearm?"ON":"OFF");
 
    // v24: Initialize Crash/Boom engine
    if(InpCrashBoomMode)
@@ -844,6 +984,15 @@ int OnInit()
    {
       g_cb.Init(false, false);
    }
+
+   //--- v26.17: Volatility burst-fade leg (EXPERIMENTAL, default OFF).
+   //    Active only when the master input is on AND we're NOT in Crash/Boom
+   //    mode — on Boom/Crash the spike fades already own the microstructure;
+   //    this leg is built for symbols that tick without spikes.
+   g_vb.Init(InpVolBurstFade && !InpCrashBoomMode,
+             InpVBLookTicks, InpVBVelPts, InpVBRetrMin, InpVBRetrMax,
+             InpVBTimeoutSec, InpVBSL_ATR, InpVBTP_ATR, InpVBMinRR,
+             InpVBCooldownSec);
 
    PrintStartupSelfCheck();   // v26.9: one-glance stale-chart detector in the log
    RunPolicySelfCheck();      // v26.10: resolved config vs .set-declared policy
@@ -1048,9 +1197,15 @@ void HandleTradeClose(double exit_p, string reason, ulong deal_ticket)
    else if(reason=="STOP") g_stop_exits++;
    else if(reason=="ECUT") g_early_cuts++;
 
-   // v24.11: ALWAYS set cooldown after trade closes (not just after losses)
-   // This prevents re-entry while market is still moving against us
-   g_cooldown = InpCoolDownBars;
+   // v24.11: cooldown after every close — v26.22: WIN-REARM — after a
+   // WINNER the governor re-arms instantly (cooldown=0): momentum is live,
+   // the next signal is already organised, waiting serves no purpose. After
+   // a LOSS the full breather still applies (re-entry into the move that
+   // just stopped us out is how accounts die).
+   if(r > 0 && InpWinRearm)
+      g_cooldown = 0;                 // v26.22: instant re-arm after wins
+   else
+      g_cooldown = InpCoolDownBars;   // losses keep the full breather
    if(r<0){ g_consec_loss++; } else g_consec_loss=0;
    if(g_consec_loss>=InpMaxConsecLoss)
    {
@@ -1070,7 +1225,9 @@ void HandleTradeClose(double exit_p, string reason, ulong deal_ticket)
       _Symbol, g_ticket, g_dir, reason, exit_p, r, r*g_risk_money,
       g_consec_loss, (g_paused?"true":"false"), (DailyLossHalted()?"true":"false")));
 
-   RecordTradeSlippage(r, reason);   // v26.2: gap-through vs planned -1R      // v26.5: learned CB spike gating — update the EWMA + persist
+   RecordTradeSlippage(r, exit_p, reason);   // v26.18: exit-price-based execution quality
+   AppendTradeRow(reason, exit_p, r);        // v26.18: full per-symbol trade ledger
+   // v26.5: learned CB spike gating — update the EWMA + persist
    if(InpCrashBoomMode)
    {
       UpdateCbSpikeLearning(r);
@@ -1172,6 +1329,22 @@ void OnTick()
    if(InpTickRecordEnabled) g_tick_rec.OnTick(bid, ask);
    // v24: Crash/Boom tick handler (tick-pattern analyzer + detector tick speed)
    if(InpCrashBoomMode) g_cb.OnTick(bid, ask);
+   // v26.17: Volatility momentum-burst fade — track every tick, fire only when
+   // gates open. Mirrors the CB tick-fade call site incl. consume-on-confirm.
+   if(g_vb.Enabled())
+   {
+      bool can_trade = (g_ticket==0 && !g_paused && g_cooldown==0 && !DailyLossHalted()
+                        && IsSessionActive() && !HasOpenPositionOnSymbol(_Symbol));
+      double ve=0, vs=0, vtp=0; string vr="";
+      int vd = g_vb.OnTick(bid, ve, vs, vtp, vr, can_trade);
+      if(vd != 0 && can_trade && StratEnabledOrProbe(8))   // v26.20 governor gate (probe counts only when a burst actually fires)
+      {
+         g_last_strategy = "VB-BURST";
+         if(OpenCBTrade(vd, ve, vs, vtp, vr))   // same re-anchor + micro-fit + guardrail path as the CB fades
+            g_vb.Confirm();                     // accepted: consume burst + cooldown
+         else                                   g_vb.Release();   // rejected: burst stays pending
+      }
+   }
    // v25.4: tick-triggered fast fade — track every tick, fire only when gates open
    if(InpCrashBoomMode && InpCBTickFade)
    {
@@ -1180,7 +1353,7 @@ void OnTick()
                         && (!g_cb_spike_blocked || g_cb_gate_probe > 0));   // v26.13: probe budget overrides the learned gate
       double fe=0, fs=0, ftp=0; string tfr="";
       int fd = g_cb.OnTickFade(bid, fe, fs, ftp, tfr, can_trade);
-      if(fd != 0 && can_trade)
+      if(fd != 0 && can_trade && StratEnabledOrProbe(5))   // v26.20 governor gate (declined fades stay pending and count)
       {
          g_last_strategy = "CB-TICKFADE";
          g_pos_tickfade = false;   // v26.15: set true only if this order ACCEPTS (below)
@@ -1299,6 +1472,14 @@ void OnTick()
    UpdateSigmaBaseline();
    UpdateBandTelemetry();
 
+   // v26.17: feed the burst-fade module the entry-TF ATR (last closed bar,
+   // same series the classic strategies read) so its geometry stays current
+   if(g_vb.Enabled())
+   {
+      double vb_atr[1];
+      if(CopyBuffer(hATR_E, 0, 1, 1, vb_atr) == 1) g_vb.SetATR(vb_atr[0]);
+   }
+
    // v23: entry gate — session filter + stacking guard + all existing gates
    if(g_ticket==0 && !g_paused && g_cooldown==0 && !DailyLossHalted() &&
       IsSessionActive() &&
@@ -1320,9 +1501,17 @@ void OnTick()
             int cb_dir = g_cb.OnBar(cb_entry, cb_sl, cb_tp, cb_reason, cb_type);
             if(cb_dir != 0)
             {
-               g_last_strategy = cb_type;
-               // Use CB entry/SL/TP directly via OpenCBTrade
-               OpenCBTrade(cb_dir, cb_entry, cb_sl, cb_tp, cb_reason);
+               if(StratEnabledOrProbe(GetStrategyIndex(cb_type)))   // v26.20 governor gate
+               {
+                  g_last_strategy = cb_type;
+                  // Use CB entry/SL/TP directly via OpenCBTrade
+                  OpenCBTrade(cb_dir, cb_entry, cb_sl, cb_tp, cb_reason);
+               }
+               else
+               {
+                  PrintFormat("[CB-SKIP] governor-suppressed %s", cb_type);
+                  g_last_skip = "governor-" + cb_type;
+               }
             }
             else if(cb_reason != "")
             {
@@ -1678,6 +1867,7 @@ int GetStrategyIndex(string strat)
    if(strat=="CB-TICKFADE") return 5;
    if(strat=="CB-FADE")     return 6;
    if(strat=="CB-GRIND")    return 7;
+   if(strat=="VB-BURST")    return 8;   // v26.17: Volatility burst fade
    return -1;
 }
 
@@ -1818,32 +2008,82 @@ void PostTradeReview(string strategy, double rMultiple, string exitType)
    SaveReviewState();
 }
 
-// Check if any strategy should be auto-disabled
+//--- v26.20: Wilson 95% lower bound on win rate — an honest worst-case view
+//--- of small samples (2/2 wins reports 0.342, not 1.0). Reported in reviews;
+//--- the kill/reinstate DECISION stays on measured expectancy, which is what
+//--- protects capital while the probe stream keeps the evidence current.
+double WilsonWinLB(double wins, double n)
+{
+   if(n <= 0.0) return 0.0;
+   double z = 1.96, z2 = z * z, p = wins / n;
+   double denom  = 1.0 + z2 / n;
+   double center = p + z2 / (2.0 * n);
+   double margin = z * MathSqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n));
+   return (center - margin) / denom;
+}
+
+//--- v26.20: the single authority on whether a strategy may trade. Until now
+//--- nothing read g_strat_enabled, so "DISABLED" strategies kept trading.
+//--- Suppressed strategies still probe every InpProbeEveryN-th signal so their
+//--- statistics keep updating (no permanent freeze) and a recovered edge
+//--- earns reinstatement at the next review.
+bool StratEnabledOrProbe(int i)
+{
+   if(i < 0 || i >= STRAT_SLOTS) return true;
+   if(g_strat_enabled[i]) return true;
+   if(!InpProbeDisabled || InpProbeEveryN <= 0) return false;
+   g_strat_probe_n[i]++;
+   return (g_strat_probe_n[i] % InpProbeEveryN) == 1;
+}
+
+// Check if any strategy should be auto-disabled / reinstated (v26.20 governor)
 void CheckStrategyPerformance()
 {
    Print(VTAG+"=== STRATEGY PERFORMANCE REVIEW ===");   // v26.11: shared STRAT_NAMES
    for(int i=0; i<STRAT_SLOTS; i++)
    {
-      int need = (i >= 5) ? InpCBMinTradesToJudge : InpMinTradesToJudge;
-      if(g_strat_trades[i] < need) continue;
-      double wr = g_strat_wins[i] / g_strat_trades[i];
+      int    need       = (i >= 5) ? InpCBMinTradesToJudge : InpMinTradesToJudge;
+      int    n          = (int)g_strat_trades[i];
+      if(n < need) continue;
+      double wr         = g_strat_wins[i] / g_strat_trades[i];
       double expectancy = g_strat_total_r[i] / g_strat_trades[i];
-      double floor_r   = (i >= 5) ? InpCBMinExpectancy   : InpMinExpectancy;
-      bool   may_kill  = (i >= 5) ? true                 : InpAutoDisableStrat;
-      string status = "KEEP";
+      double floor_r    = (i >= 5) ? InpCBMinExpectancy   : InpMinExpectancy;
+      bool   may_kill   = (i >= 5) ? true                 : InpAutoDisableStrat;
+      double wr_lb      = WilsonWinLB(g_strat_wins[i], g_strat_trades[i]);
 
-      if(may_kill && expectancy < floor_r && g_strat_trades[i] >= need)
+      if(!g_strat_enabled[i])
+      {
+         if(!may_kill)
+         {  // master switch off: honour the user and reinstate
+            g_strat_enabled[i] = true;
+            PrintFormat(VTAG+"STRATEGY %s: %d trades, WR=%.0f%% (LB %.0f%%), ExpR=%+.2f → REINSTATED (auto-disable off)",
+                        STRAT_NAMES[i], n, wr*100, wr_lb*100, expectancy);
+            continue;
+         }
+         if(expectancy >= floor_r)
+         {  // v26.20: probe trades provided fresh evidence of recovery
+            g_strat_enabled[i] = true;
+            PrintFormat(VTAG+"STRATEGY %s: %d trades, WR=%.0f%% (LB %.0f%%), ExpR=%+.2f → REINSTATED (recovered above %.2f R/trade)",
+                        STRAT_NAMES[i], n, wr*100, wr_lb*100, expectancy, floor_r);
+            continue;
+         }
+         PrintFormat(VTAG+"STRATEGY %s: %d trades, WR=%.0f%% (LB %.0f%%), ExpR=%+.2f → SUPPRESSED (probing every %dth signal)",
+                     STRAT_NAMES[i], n, wr*100, wr_lb*100, expectancy, InpProbeEveryN);
+         continue;
+      }
+
+      if(may_kill && expectancy < floor_r && n >= need)
       {
          g_strat_enabled[i] = false;
-         status = "DISABLED";
-         PrintFormat(VTAG+"STRATEGY %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f → %s (below %.2f R/trade)",
-                     STRAT_NAMES[i], g_strat_trades[i], wr*100, expectancy, status, floor_r);
+         g_strat_probe_n[i] = 0;   // fresh probe cycle after a new kill
+         PrintFormat(VTAG+"STRATEGY %s: %d trades, WR=%.0f%% (LB %.0f%%), ExpR=%+.2f → DISABLED (below %.2f R/trade)",
+                     STRAT_NAMES[i], n, wr*100, wr_lb*100, expectancy, floor_r);
       }
       else
       {
          g_strat_enabled[i] = true;
-         PrintFormat(VTAG+"STRATEGY %s: %.0f trades, WR=%.0f%%, ExpR=%+.2f → %s",
-                     STRAT_NAMES[i], g_strat_trades[i], wr*100, expectancy, status);
+         PrintFormat(VTAG+"STRATEGY %s: %d trades, WR=%.0f%% (LB %.0f%%), ExpR=%+.2f → KEEP",
+                     STRAT_NAMES[i], n, wr*100, wr_lb*100, expectancy);
       }
    }
 }
@@ -1922,8 +2162,9 @@ void SaveReviewState()
                    g_stop_exits, g_early_cuts, g_consec_loss));
    // Strategy performance (v26.5: 8 slots — 5 classic + 3 CB modes)
    for(int i=0;i<STRAT_SLOTS;i++)
-       FileWriteString(h, StringFormat("STRAT,%d,%.0f,%.0f,%.4f,%d\n",
-                      i, g_strat_trades[i], g_strat_wins[i], g_strat_total_r[i], g_strat_enabled[i]?1:0));
+       FileWriteString(h, StringFormat("STRAT,%d,%.0f,%.0f,%.4f,%d,%d\n",
+                      i, g_strat_trades[i], g_strat_wins[i], g_strat_total_r[i], g_strat_enabled[i]?1:0,
+                      g_strat_probe_n[i]));
    // Regime performance
    for(int i=0;i<REGIME_SLOTS;i++)
        FileWriteString(h, StringFormat("REGIME,%d,%.0f,%.0f,%.4f\n",
@@ -1993,6 +2234,7 @@ void LoadReviewState()
             g_strat_wins[idx]    = StringToDouble(rp[3]);
             g_strat_total_r[idx] = StringToDouble(rp[4]);
             g_strat_enabled[idx] = (StringToInteger(rp[5]) == 1);
+            if(rn >= 7) g_strat_probe_n[idx] = (int)StringToInteger(rp[6]);   // v26.20: probe counters survive restarts
          }
       }
       else if(rp[0]=="REGIME" && rn >= 5)
@@ -2352,6 +2594,14 @@ int GenerateSignal(string &sig_type)
    g_regime = ClassifyRegime();
    if(g_regime==REGIME_NO_TRADE) return 0;
 
+   // v26.23: GOVERNOR CONVICTION THROTTLE — on a net-negative day the bar for
+   // new entries rises by one score point; a flat/green day restores it. The
+   // governor stops digging when the day is against us, without touching
+   // geometry (the 63-cell sweep proved geometry is already optimal).
+   int min_score_eff = InpMinScore;
+   if(InpAdaptiveConviction && g_daily_pnl < 0.0)
+      min_score_eff += 1;
+
    g_sig_is_band=false; g_last_band_dir=0; g_sig_sl_atr=0; g_sig_tp_atr=0;
 
    double scores[5];
@@ -2366,6 +2616,12 @@ int GenerateSignal(string &sig_type)
    if(InpUseMomentum)   { dirs[2]=StratMomentum(scores[2]); }
    if(InpUseMeanRevert) { dirs[3]=StratMeanRevert(scores[3]); }
    if(InpUseBandFade)   { dirs[4]=StratBandFade(scores[4]); }
+
+   // v26.20: governor gate — suppressed strategies are dropped here unless the
+   // probe schedule lets this signal through (keeps their statistics alive).
+   for(int i=0;i<5;i++)
+      if(dirs[i]!=0 && !StratEnabledOrProbe(i))
+      { dirs[i]=0; scores[i]=0; }
 
    const string LEGNAMES[5]={"PB","BO","MOM","MR","BF"};
    g_fired_legs="";
@@ -2394,12 +2650,12 @@ int GenerateSignal(string &sig_type)
 
    int final_dir=0;
    string skip_reason="";
-   if(buy_score >= InpMinScore && buy_score > sell_score)
+   if(buy_score >= min_score_eff && buy_score > sell_score)
    {
       if(InpRequire2Strats && buy_cnt<2) skip_reason="need-2-strats-BUY";
       else final_dir=1;
    }
-   else if(sell_score >= InpMinScore && sell_score > buy_score)
+   else if(sell_score >= min_score_eff && sell_score > buy_score)
    {
       if(InpRequire2Strats && sell_cnt<2) skip_reason="need-2-strats-SELL";
       else final_dir=-1;
@@ -2407,7 +2663,7 @@ int GenerateSignal(string &sig_type)
    if(final_dir==0 && skip_reason=="")
       skip_reason=(buy_cnt==0 && sell_cnt==0)
                 ? (mom_demoted ? "mom-demoted-lone-candle" : "no-legs")
-                : StringFormat("score B%d/S%d < min %d", buy_score, sell_score, InpMinScore);
+                : StringFormat("score B%d/S%d < min %d", buy_score, sell_score, min_score_eff);
 
    if(g_sig_is_band && (final_dir==0 || g_last_band_dir!=final_dir))
    { g_sig_is_band=false; g_sig_sl_atr=0; g_sig_tp_atr=0; }
@@ -2500,6 +2756,21 @@ void OpenTrade(int direction, string sig_type)
    double min_stop = (double)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*_Point;
    if(min_stop>0 && stop_dist<min_stop) stop_dist=min_stop;
    if(stop_dist > entry*0.03) stop_dist = entry*0.03;
+
+   // v26.23: GOVERNOR SPREAD-QUALITY GATE — refuse entries whose execution
+   // cost eats too much of the planned risk. Scalp-sweep forensics: spread
+   // was ~44% of the OOS loss; wide-spread moments (news ticks, illiquid
+   // hours) are where the engine bleeds most. No cooldown charged — a fresh
+   // quote arrives next bar and the gate re-checks it.
+   double spread_now = SymbolInfoDouble(_Symbol,SYMBOL_ASK) - SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   if(InpMaxSpreadATRFrac > 0 && stop_dist > 0 && spread_now > InpMaxSpreadATRFrac*stop_dist)
+   {
+      PrintFormat(VTAG+"SKIP %s — governor spread gate: spread %.1f > %.0f%% of stop (%.1f)",
+                  direction>0?"BUY":"SELL", spread_now, InpMaxSpreadATRFrac*100.0, stop_dist);
+      g_last_skip = StringFormat("spread-gate %.1f > %.0f%% of %.1f",
+                                  spread_now, InpMaxSpreadATRFrac*100.0, stop_dist);
+      return;
+   }
 
    double tp_dist = (g_sig_is_band && g_sig_tp_atr>0) ? g_sig_tp_atr*atr[0]
                                                       : InpTpMult*stop_dist;
@@ -3061,9 +3332,10 @@ void UpdateDashboard()
          InpIsCrashIndex?"CRASH":"BOOM", InpCBEnableGrind?"ON":"OFF",
          InpCBRequireSpikeDirection?"ON":"OFF", InpCBTickFade?"ON":"OFF");
    else
-      L[6]=StringFormat("Strats: PB=%s BO=%s MOM=%s MR=%s BF=%s",
+      L[6]=StringFormat("Strats: PB=%s BO=%s MOM=%s MR=%s BF=%s | VBurst: %s",
          InpUsePullback?"ON":"OFF", InpUseBreakout?"ON":"OFF",
-         InpUseMomentum?"ON":"OFF", InpUseMeanRevert?"ON":"OFF", InpUseBandFade?"ON":"OFF");
+         InpUseMomentum?"ON":"OFF", InpUseMeanRevert?"ON":"OFF", InpUseBandFade?"ON":"OFF",
+         g_vb.GetDashboard());
    L[7]=StringFormat("MinScore: %d | 2+Agree: %s | Cooldown: %d",InpMinScore,InpRequire2Strats?"YES":"NO", g_cooldown);
    //--- v26.16: StartHour == EndHour means the wrap-midnight branch of
    //--- IsSessionActive() is always true — the EA trades 24/7.
@@ -3146,11 +3418,19 @@ void UpdateDashboard()
                                 g_last_strategy_review);
       else
          L[line++]="Intel: Collecting data... (need 15+ trades)";
-      // v26.12: lost fade opportunities (rejected/aborted entries) — visible at a glance
-      if(g_cb_reject_total > 0)
-         L[line++]=StringFormat("Rejects: %d total / %d today (streak %d) last: %s",
-                                g_cb_reject_total, g_cb_reject_today,
-                                g_cb_reject_streak, g_cb_reject_last);
+      // v26.20: show which strategies the governor holds back (and probe position)
+      string dis="";
+      for(int i=0; i<STRAT_SLOTS; i++)
+         if(!g_strat_enabled[i])
+            dis += (dis==""?"":", ")+STRAT_NAMES[i]+
+                   ((InpProbeDisabled && InpProbeEveryN>0)
+                     ? StringFormat("(probe %d/%d)", g_strat_probe_n[i] % InpProbeEveryN, InpProbeEveryN)
+                     : "(frozen)");
+      if(dis!="") L[line++]=StringFormat("Governor: %s", dis);
+      // v26.23: governor coordination status — spread gate + conviction throttle
+      L[line++]=StringFormat("Coord: spread-gate %s (%.0f%% stop) | conviction %s",
+                             InpMaxSpreadATRFrac>0?"ON":"OFF", InpMaxSpreadATRFrac*100.0,
+                             (InpAdaptiveConviction && g_daily_pnl<0.0) ? "min+1 (day in red)" : "normal");
       // v26.12: lost fade opportunities (rejected/aborted entries) — visible at a glance
       if(g_cb_reject_total > 0)
          L[line++]=StringFormat("Rejects: %d total / %d today (streak %d) last: %s",

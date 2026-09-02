@@ -1,8 +1,12 @@
-# Production Configurations — MITEMSHUB AI v26.14
+# Production Configurations — MITEMSHUB AI v26.23
 
-> Last updated: 2026-09-01
-> EA version: **v26.14** (`MitemshubAI.mq5` — `APP_VERSION` single source of truth)
-> Architecture: 5 Core Strategies + Crash/Boom Mode + 7 Intelligence Layers
+> Last updated: 2026-09-02
+> EA version: **v26.23** (`MitemshubAI.mq5` — `APP_VERSION` single source of truth)
+> Architecture: 5 Core Strategies + Governor v3.1 (enforcement + coordination) + 7 Intelligence Layers
+> Live lineup: **V75 M15 (trading) + V100 M5 (dormant until funding)** — Boom/Crash retired 2026-09-02
+>
+> **Guides:** [The Governor — how the EA benches losers, re-arms after wins,
+> and gates execution quality](docs/GOVERNOR.md)
 
 ---
 
@@ -10,6 +14,15 @@
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| **v26.23** | 2026-09-02 | Governor v3.1 QUALITY GATES: spread gate (`InpMaxSpreadATRFrac=0.18`) refuses entries when live spread > 18% of planned stop — scalp-sweep forensics put spread at ~44% of the OOS loss; conviction throttle (`InpAdaptiveConviction`) raises MinScore +1 while the day is net-negative; `Coord:` dashboard line. Geometry untouched — the 63-cell scalp sweep (`artifacts/scalp_sweep_volatility_75_index.json`) rejected every tighter-TP cell OOS |
+| **v26.22** | 2026-09-02 | Governor v3 COORDINATION — win-rearm (`InpWinRearm`): cooldown = 0 after a winning close (losses keep the full breather); scalping idea formally rejected by data before shipping |
+| **v26.21** | 2026-09-02 | FOCUSED LINEUP: Boom/Crash charts deleted from the terminal profile; V75 M15 = the trading chart, V100 M5 armed-but-dormant (min-lot risk 12.8%/trade at $4.59); honest mode banners (Standard Mode); forward-split backtest protocol (`scripts/fwd_split_backtest.py`, CSV mode + per-bar spread) — V75/V100 OOS both negative, baseline archived |
+| **v26.20** | 2026-09-01 | GOVERNOR v2: auto-disable flag ENFORCED on all four trade paths (was decorative); probe-based re-entry (suppressed strategies take every 10th signal, no permanent freeze); Wilson 95% lower-bound win-rate reporting; probe counters persisted; duplicate dashboard block removed |
+| **v26.19** | 2026-09-01 | RECORDER RETIRED: `InpTickRecordEnabled` default OFF — broker tick history covers research (15.4M V100 ticks pulled in one call); `scripts/fetch_market_data.py` reproduces the `ts,bid,ask,mid` schema on demand (+ `--verify`); `scripts/weekly_refresh.py` + Sunday scheduled task; caveat: Boom/Crash broker spread channel is compressed, price path exact |
+| **v26.18** | 2026-09-01 | Journal hygiene v2: full per-symbol trade ledger (`AppendTradeRow`); slippage counters exit-price based — live equity curve trustworthy |
+| **v26.17** | 2026-08-31 | Volatility burst-fade module (tick-speed state machine) — later INVALIDATED by the 70-cell calibration (every configuration net-negative on V75/V100), pinned `InpVolBurstFade=false` permanently |
+| **v26.16** | 2026-08-31 | Tick-fade verdict tooling: EA-faithful replay entry heuristic (spike-jump + retrace window) in `scripts/tick_fade_verdict.py` |
+| **v26.15** | 2026-08-31 | CB fade TP 4.0 → 3.2, Quick-TP off — robustness-gate validated on recorded sessions |
 | **v26.12** | 2026-08-31 | Order-rejection accounting: `CBRecordReject()` counts every failed/aborted CB order send (retcode failures + tp-outran aborts) with lifetime/today/streak counters, one `reject` telemetry event each, a `Rejects` row in the init SELF-CHECK, and a deinit summary — lost fade opportunities are now quantified in the offline loop without manual broker-journal forensics |
 | **v26.11** | 2026-08-31 | Fixed-array self-test: STRAT/REGIME/TIME slot counts unified into named constants used by every declaration, walker loop, loader guard, and name table; `SelfTestFixedArrays()` walks all three tables at init (size check + full read walk + last-slot write touch) fail-closed BEFORE `LoadReviewState` — the v26.9 size-vs-loop crash class can never reach a live chart again |
 | **v26.10** | 2026-08-31 | AUTO per-symbol resolution extended to spike threshold / max spike prob / fade R-SL-TP (shared `ENUM_CB_PARAM_SOURCE`, calibration profile now ships the v26.8 geometry, stale compiled defaults corrected, `[CB-PARAM]` init audit); constant-λ prob blend A/B vs the legacy overdue model — ΔR=+0.00 on all recorded sessions (the 0.70 gate is a safety valve, not an active filter) |
@@ -24,26 +37,24 @@
 
 ## Active Live Presets
 
-### Volatility Indices (M15)
+### The live lineup (v26.21+)
 
-| Preset | Symbol | TF | Risk | Style | Status |
-|--------|--------|-----|------|-------|--------|
-| `VOL75_FINAL.set` | Volatility 75 | M15 | 0.50% | Conservative | ✅ **LIVE** |
-| `VOL75_AGGRO.set` | Volatility 75 | M15 | 0.50% | Aggressive | ✅ **LIVE** |
-| `VOL100_FINAL.set` | Volatility 100 | M15 | 0.50% | Conservative | ✅ **LIVE** |
-| `VOL100_AGGRO.set` | Volatility 100 | M15 | 0.50% | Aggressive | ✅ **LIVE** |
-| `VOL10_FINAL.set` | Volatility 10 | M15 | 0.50% | Conservative | ✅ Available |
-| `VOL25_FINAL.set` | Volatility 25 | M15 | 0.50% | Conservative | ✅ Available |
-| `VOL50_FINAL.set` | Volatility 50 | M15 | 0.50% | Conservative | ✅ Available |
-| `V100_H1.set` | Volatility 100 | H1 | 0.50% | Conservative | ✅ Available |
-| `V100_M5.set` | Volatility 100 | M5 | 0.50% | Conservative | ⚠️ Regenerated 2026-09-01, UNVALIDATED on M5 — run Strategy-Tester Pass-A before sizing up |
+| Preset | Symbol | TF | Risk | Status |
+|--------|--------|-----|------|--------|
+| `VOL75_FINAL.set` | Volatility 75 | M15 | 0.50% | ✅ **LIVE — the trading chart.** Only family symbol with 0.01 micro-lots (min-lot risk 0.09%/trade at $30). Validated band geometry (z 2.0 / 0.10σ stop / 1.20σ target), TP 2.0×stop, all 5 legs, governor v3.1. Chart profile embedded with the full 69-key preset 2026-09-02 (earlier embedded block was stale-keyed and silently ran code defaults) |
+| `V100_M5.set` | Volatility 100 | M5 | 0.50% | 🔒 **DORMANT** — strategies/execution off; min-lot risk 12.8%/trade makes it unsafe below ~$800; arms with one flip at funding. Inputs revalidated against v26.23 |
+| `VOL75_AGGRO.set` | Volatility 75 | M15 | 0.50% | Available (aggressive variant) |
+| `VOL100_FINAL.set`, `VOL100_AGGRO.set` | Volatility 100 | M15 | 0.50% | Available — balance-gated (needs ~$770 for sane min-lot risk) |
+| `VOL10_FINAL.set` / `VOL25_FINAL.set` / `VOL50_FINAL.set` | V10 / V25 / V50 | M15 | 0.50% | Available — balance-gated (min-lot risk 5–8.7%/trade at $30; V25 unlocks ~$500, V50 ~$300, V10 ~$380) |
+| `V100_H1.set` | Volatility 100 | H1 | 0.50% | Available (legacy-era profile) |
 
-### Crash/Boom Indices (M5) — NEW in v24
+**Symbol-selection evidence:** mechanics study (min-lot risk vs balance) + family-wide forward-split — no Volatility symbol currently passes OOS with the 5-leg blend; V75 chosen purely on risk granularity. See `artifacts/fwd_split_volatility_75_index.json` baseline.
 
-| Preset | Symbol | TF | Risk | Strategy | Status |
-|--------|--------|-----|------|----------|--------|
-| `BOOM1000_CB.set` | Boom 1000 | M5 | 0.30% | Post-Spike Fade + Grind | ✅ Available |
-| `CRASH1000_CB.set` | Crash 1000 | M5 | 0.30% | Post-Spike Fade + Grind | ✅ Available |
+### Crash/Boom Indices (M5) — RETIRED 2026-09-02
+
+| Preset | Symbol | Status |
+|--------|--------|--------|
+| `BOOM1000_CB.set` / `CRASH1000_CB.set` | Boom / Crash 1000 | ❌ Charts deleted from the terminal profile at owner decision; data agreed (CB-TICKFADE was the only CB leg that ever paid, and its one +8.75R win was given back in three losses). Presets remain in the repo for archaeology; the CB module stays in the EA (inert when `InpCrashBoomMode=false`) |
 
 ---
 
@@ -100,11 +111,13 @@ Built into the main EA, these run on every bar close:
 
 | Layer | What It Does | Threshold |
 |-------|-------------|-----------|
-| **Strategy Review** | Checks each strategy's win rate and expectancy | N=8 trades |
-| **Regime Review** | Checks performance per regime (trend/range/volatile) | N=15 trades |
-| **Time-Block Review** | Checks performance by time of day | N=20 trades |
-| **Auto-Disable** | Disables strategies with negative expectancy | Min 12 trades, min 0.1R expectancy |
-| **Volume Scaling** | Reduces lot after consecutive losses | 70% per loss, floor at 25% |
+| **Strategy Review** | Checks each strategy's win rate (Wilson 95% LB shown) and expectancy | N=10 trades |
+| **Regime Review** | Checks performance per regime (trend/range/volatile) | N=20 trades |
+| **Time-Block Review** | Checks performance by time of day | N=30 trades |
+| **Auto-Disable** | Disables strategies with negative expectancy | Min 15 trades, expectancy floor 0.10R (CB charts) / 0.00R (Vol charts) |
+| **Governor enforcement (v26.20)** | Disabled strategies are BLOCKED on all four trade paths; probe every 10th signal keeps their stats alive → automatic reinstatement on recovery | `InpProbeEveryN=10` |
+| **Governor coordination (v26.22–23)** | Win-rearm (cooldown 0 after winning close); spread gate (refuse entry when live spread > 18% of stop); conviction throttle (MinScore +1 while day net-negative) | `InpWinRearm`, `InpMaxSpreadATRFrac=0.18`, `InpAdaptiveConviction` |
+| **Volume Scaling** | Reduces lot after consecutive losses | ×0.75 per loss, floor ×0.30 |
 | **Cross-Instance Guard** | Blocks entry if fleet already has position on same symbol | 1 max position per symbol |
 
 ---
@@ -123,8 +136,8 @@ Built into the main EA, these run on every bar close:
 | `InpTrailStartR` | 1.0R | Trailing stop activation |
 | `InpTrailDistR` | 0.7R | Trailing stop distance |
 | `InpMaxConsecLoss` | 3 | Consecutive losses before pause |
-| `InpMaxDailyLossPct` | 0 (disabled) | Daily loss limit — disabled 2026-08-30 by user request; set 0.03 to re-enable |
-| `InpCoolDownBars` | 2 | Bars to wait after loss |
+| `InpMaxDailyLossPct` | 0.05 (5%) in shipped presets — note: user request 2026-08-30 was to disable; the EA SELF-CHECK flags this mismatch each start. Set 0 to honour the request |
+| `InpCoolDownBars` | 3 (VOL75_FINAL) — v26.22 win-rearm bypasses the cooldown after winning closes; losses keep the full breather |
 | `InpMagic` | 7788010/025/050/075/100 | Fleet magic numbers |
 
 ### Crash/Boom Indices (CB preset)
