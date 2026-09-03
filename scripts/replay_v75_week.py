@@ -424,6 +424,9 @@ def main():
     report["config"] = {"band_ext": band_ext, "mom_standalone": mom_standalone, "tag": args.tag}
     with open(os.path.join(DATA, f"replay_report_{args.tag}.json"), "w") as f:
         json.dump(report, f, indent=1)
+    with open(os.path.join(DATA, f"skipped_all_{args.tag}.jsonl"), "w") as f:
+        for s in skipped:
+            f.write(json.dumps(s) + "\n")
     print(json.dumps(report["summary"], indent=1))
     for t in trades:
         print(f"{t['t']}  {t['dir']:<4} {t['strat']:<8} entry={t['entry']:>9.2f} sd={t['sd']:>7.2f} "
