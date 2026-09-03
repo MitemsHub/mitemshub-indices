@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [MITEMSHUB AI EA v26.24] - 2026-09-03
+
+### Fixed — Governor bootstrap: fresh installs/migrations can no longer wake up benched
+- **State-load hardening (`LoadReviewState`)** — a `STRAT,i` row with `enabled=0` but **zero recorded trades** is now loaded as enabled. The performance review needs ≥ `InpMinTradesToJudge` (15) trades to legitimately disable a strategy, so a zero-trade suppress can only come from a stale/zeroed state file — and under v26.20's `StratEnabledOrProbe` gate it benched the strategy at init (Sep-03 Volatility 75: banner said `Trades=0` yet PB/BO/MOM/MR all showed `(probe n/10)`; every candidate bar was vetoed, the classic legs could never fire, and no probe trade could ever accumulate to earn reinstatement — a permanent deadlock).
+- Probe counters for zero-trade strategies are reset so probing restarts from a clean slate.
+
+### Fixed — Cold-start blindness: regime/sigma/GARCH gates are warm on the first bar after a restart
+- **`SeedHistoryState()` (new, called from `OnInit`)** — after a restart/migration the EA previously woke up blind: the ATR-percentile history was empty (percentile pinned at the 50 default → the regime classifier could not leave `RANGING` → Pullback/BO-sell sat out every trend), the sigma EMA was unseeded (`exp_ratio ≈ 1.0` → BandFade's `>1.25` expansion gate could not pass), and the GARCH module was cold (telemetry `z` stuck on the legacy-stddev scale for another 50 bars, tagged `[GARCH warmup]`).
+- The replay walks the last `max(InpAtrLookback, InpGarchWarmupBars+2)` closed bars oldest→newest through the **same** per-bar feeds as live (`ClassifyRegime`'s ATR append, `GarchFeedBar`, `UpdateSigmaBaseline` EMA with `PerBarSigma`/`ActiveBarSigma` now accepting a shift so historical sigma is measured as-of each replay cursor). One-time init log: `Cold-start catch-up: N bars replayed | ATR hist N | GARCH obs N | sigma EMA X`.
+- Short-history charts (< need+2 bars) keep the old gradual warmup. Defensive no-op when state is already warm (state files do not persist these series by design).
+- Sep-03 evidence: dashboard showed `Telem: z=-4.02 … [GARCH warmup]`, `ATR%: 50` (pinned), `Regime: RANGING` through a 2,400-point trend day, `exp 1.00x` while price collapsed — all four classic strategies either benched (bug 1) or regime/sigma-starved (bug 2). Zero trades was the product of both, not signal selectivity.
+
 ## [MITEMSHUB AI EA v26.15] - 2026-09-01
 
 ### Added — Quick-TP tick-fade exit mode (v26.15)

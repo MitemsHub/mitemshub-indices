@@ -135,7 +135,7 @@
 //|  - Entry/regime TF overrides, telemetry journal                  |
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
-#define APP_VERSION "26.23"
+#define APP_VERSION "26.24"
 
 //--- v25.2: single source of truth for the version string.
 //--- #property version, every log tag, and every order comment derive from
@@ -911,6 +911,7 @@ int OnInit()
    LoadCbSpikeState(); // v26.5: restore learned CB spike gating
    ReevaluateCbSpikeGate(); // v26.14: stale persisted verdict may not match current evidence (deadlock fix)
    LoadMetaLabelTable(); // v26.14: restore learned P(win) regime multipliers
+   SeedHistoryState();   // v26.24: warm ATR/sigma/GARCH from chart history — no blind window after restarts
    RecoverDetachedClose(); // v26.9: journal closes that happened while the EA was detached
    if(InpDrawDashboard) CreateDashboard();
    // v25.1: tick recorder — degrades to no-op if the file can't be opened
@@ -1645,15 +1646,19 @@ ENUM_TIMEFRAMES ParseTF(const string s, const ENUM_TIMEFRAMES fallback)
 }
 
 //+------------------------------------------------------------------+
-double PerBarSigma(const int lookback)
+//--- v26.24: optional shift — stddev of the returns ending at bar `shift+1`
+//--- (shift=0 keeps the live behavior: last closed bar). Used by the
+//--- cold-start replay so the sigma EMA is seeded from the HISTORICAL
+//--- sigma path, not N copies of the current stddev.
+double PerBarSigma(const int lookback, const int shift=0)
 {
    int n = MathMax(3, lookback);
-   if(Bars(_Symbol, g_tf_entry) < n+2) return 0.0;
+   if(Bars(_Symbol, g_tf_entry) < shift+n+2) return 0.0;
    double sum=0, sum2=0;
    for(int i=1; i<=n; i++)
    {
-      double c0 = iClose(_Symbol, g_tf_entry, i);
-      double c1 = iClose(_Symbol, g_tf_entry, i+1);
+      double c0 = iClose(_Symbol, g_tf_entry, shift+i);
+      double c1 = iClose(_Symbol, g_tf_entry, shift+i+1);
       if(c0<=0 || c1<=0) return 0.0;
       double r = MathLog(c0/c1);
       sum += r; sum2 += r*r;
@@ -1670,27 +1675,33 @@ double PerBarSigma(const int lookback)
 //| output degrades to the legacy PerBarSigma stddev after a short   |
 //| tolerance window (sticky kill for the session, logged once).     |
 //+------------------------------------------------------------------+
-bool GarchFeedBar()
+bool GarchFeedBar(const double forced_return = EMPTY_VALUE)
 {
    if(!InpUseGarch || !g_garch_ok)
       return(false);                           // disabled or permanently failed
    if(Bars(_Symbol, g_tf_entry) < InpGarchWarmupBars + 2)
       return(false);
    //--- log return of the last closed bar (same convention as the Python
-   //--- reference: log(c_t / c_{t-1}); no indicator handles involved)
-   double c1 = iClose(_Symbol, g_tf_entry, 1);
-   double c2 = iClose(_Symbol, g_tf_entry, 2);
-   if(c1 <= 0 || c2 <= 0)
+   //--- reference: log(c_t / c_{t-1}); no indicator handles involved).
+   //--- v26.24: history replay (SeedHistoryState) passes the return directly.
+   double lr = forced_return;
+   if(lr == EMPTY_VALUE)
    {
-      if(++g_garch_fail_n >= 50)
+      double c1 = iClose(_Symbol, g_tf_entry, 1);
+      double c2 = iClose(_Symbol, g_tf_entry, 2);
+      if(c1 <= 0 || c2 <= 0)
       {
-         g_garch_ok = false;
-         Print(VTAG+"GARCH disabled: persistent bad price data — legacy sigma path active");
+         if(++g_garch_fail_n >= 50)
+         {
+            g_garch_ok = false;
+            Print(VTAG+"GARCH disabled: persistent bad price data — legacy sigma path active");
+         }
+         return(false);
       }
-      return(false);
+      lr = MathLog(c1 / c2);
    }
    double sigma = 0.0;
-   bool   ready = g_garch.Update(MathLog(c1 / c2), sigma);
+   bool   ready = g_garch.Update(lr, sigma);
    if(sigma <= 0 || !MathIsValidNumber(sigma))
    {
       if(++g_garch_fail_n >= 50)
@@ -1714,11 +1725,64 @@ bool GarchFeedBar()
 
 //--- Sigma source selection with fallback (v26.9 phase 1):
 //--- GARCH when enabled+healthy+warm, else the legacy stddev path.
-double ActiveBarSigma(const int lookback)
+double ActiveBarSigma(const int lookback, const int shift=0)
 {
    if(InpUseGarch && g_garch_ok && g_garch.Observations() >= InpGarchWarmupBars && g_garch_sigma > 0)
       return(g_garch_sigma);
-   return(PerBarSigma(lookback));
+   return(PerBarSigma(lookback, shift));
+}
+
+//+------------------------------------------------------------------+
+//| v26.24: cold-start catch-up. After a restart/migration the EA    |
+//| woke up blind: empty ATR history pins the percentile at 50 (the  |
+//| regime classifier cannot leave RANGING), the sigma EMA is        |
+//| unseeded (exp_ratio pinned ~1.0 fails BandFade's expansion gate) |
+//| and the GARCH module is cold (z on the legacy-stddev scale for   |
+//| another 50 bars). The classifier blindness also silently switches|
+//| OFF the trend legs (PB needs BULL/BEAR; BO sells only in BEAR).  |
+//| Replay the last closed bars through the SAME per-bar feeds once  |
+//| at init so every gate is warm on the first live bar.             |
+//+------------------------------------------------------------------+
+void SeedHistoryState()
+{
+   if(g_sigma_init || atr_hist_count > 0 || g_garch.Observations() > 0)
+      return;                                          // already warm (defensive)
+   int need = MathMax(InpAtrLookback, InpGarchWarmupBars + 2);
+   if(Bars(_Symbol, g_tf_entry) < need + 2)
+      return;                                          // short history: warm up the legacy way
+   for(int i = need; i >= 1; i--)                       // oldest → newest closed bar
+   {
+      double c1 = iClose(_Symbol, g_tf_entry, i);
+      double c2 = iClose(_Symbol, g_tf_entry, i + 1);
+      double atr_i[1];
+      bool   have_atr = (CopyBuffer(hATR_E, 0, i, 1, atr_i) == 1 && atr_i[0] > 0);
+      if(have_atr)                                        // same append as ClassifyRegime
+      {
+         if(atr_hist_count < ArraySize(atr_hist)) atr_hist[atr_hist_count++] = atr_i[0];
+         else
+         {
+            for(int k = 0; k < ArraySize(atr_hist) - 1; k++) atr_hist[k] = atr_hist[k + 1];
+            atr_hist[ArraySize(atr_hist) - 1] = atr_i[0];
+         }
+      }
+      if(c1 > 0 && c2 > 0) GarchFeedBar(MathLog(c1 / c2));
+      if(have_atr)
+      {
+         double sig = ActiveBarSigma(20, i);   // stddev AS OF the replay cursor
+         if(sig > 0)
+         {
+            if(!g_sigma_init) { g_sigma_ema = sig; g_sigma_init = true; }
+            else
+            {
+               double a = 2.0 / (InpBandSigmaEmaLen + 1.0);
+               g_sigma_ema = a * sig + (1.0 - a) * g_sigma_ema;
+            }
+         }
+      }
+   }
+   PrintFormat(VTAG+"Cold-start catch-up: %d bars replayed | ATR hist %d | GARCH obs %d | sigma EMA %.5f%s",
+               need, atr_hist_count, g_garch.Observations(), g_sigma_ema,
+               g_sigma_init ? "" : " (sigma EMA NOT seeded)");
 }
 
 //+------------------------------------------------------------------+
@@ -2233,7 +2297,14 @@ void LoadReviewState()
             g_strat_trades[idx]  = StringToDouble(rp[2]);
             g_strat_wins[idx]    = StringToDouble(rp[3]);
             g_strat_total_r[idx] = StringToDouble(rp[4]);
-            g_strat_enabled[idx] = (StringToInteger(rp[5]) == 1);
+            // v26.24: governor bootstrap — a strategy with ZERO recorded trades
+            // can never be legitimately suppressed (the review needs >=
+            // InpMinTradesToJudge trades to disable anything). An enabled=0 at
+            // zero trades can only come from a stale/zeroed state file; it used
+            // to bench the strategy at init (Sep-03 V75: "Trades=0" yet
+            // PB/BO/MOM/MR all "(probe n/10)" — nothing could trade).
+            g_strat_enabled[idx] = (StringToInteger(rp[5]) == 1) || (StringToDouble(rp[2]) <= 0.0);
+            if(StringToDouble(rp[2]) <= 0.0) g_strat_probe_n[idx] = 0;   // fresh probe cycle
             if(rn >= 7) g_strat_probe_n[idx] = (int)StringToInteger(rp[6]);   // v26.20: probe counters survive restarts
          }
       }
