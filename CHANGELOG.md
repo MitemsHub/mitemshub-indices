@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [MITEMSHUB AI EA v26.26] - 2026-09-03
+
+### Added — Post-entry Risk Sentinel: the broker's fill is now audited, never trusted
+- **Why** — the v26.25 incident proved that planned and real risk can diverge silently: every pre-send guard validated the *plan*, and nothing re-measured after the fill. Any broker-side volume normalization, stop adjustment, fill slippage, or spec change would have altered real risk invisibly.
+- **`RunRiskSentinel()`** — runs after every confirmed entry (main opener, CB opener, and orphan recovery) and reads the position back as the **broker recorded it** (`POSITION_PRICE_OPEN`, `POSITION_SL`, `POSITION_VOLUME`). Computes real dollar-at-risk with **calibrated** tick values, prints a `RISK AUDIT` line (planned vs actual, with `[broker adjusted]` flag on any divergence), and **adopts the broker geometry** into `g_entry/g_sl/g_orig_risk/g_risk_money` so R-math, exit management, and the learning tables all operate on truth.
+- **Breach = fatal, not advisory** — if real risk exceeds `InpMaxEffectiveRiskPct` of equity (the same policy the entry chain enforces), the EA pauses itself, logs a `SENTINEL BREACH`, writes a `sentinel` telemetry event, and force-closes the position. The 2026-09-03 failure mode (57% of equity at stake while every guard passed) is now structurally impossible to repeat silently.
+
+## [MITEMSHUB AI EA v26.25] - 2026-09-03
+
+### Fixed — CRITICAL: position sizing consumed a broker tick value 100x understated on Volatility 75 Index
+- **Root cause (evidence, not theory)** — Deriv SVG reports `SYMBOL_TRADE_TICK_VALUE=0.0001` for V75 with `tick_size=0.01`, `contract_size=1.0`, account USD. The true value, measured from the 2026-09-03 closed trade (SELL 0.03, 251.55 pts, +$7.55 = $1.0009 per price-unit per 1.0 lot), is **$1.0009** — the broker number is **100.09x understated**. Sibling symbols (V100, Crash 1000, Boom 1000) are consistent with the identity `tick_value == tick_size * contract_size`; only V75 lies.
+- **Impact** — the sizing chain believed the 500-point stop risked $5/lot and sized 0.03–0.04 lots; the *real* risk was **$15.03 (57% of equity)** on the morning trade and **$20.02 (61%)** on the 15:00 signal. Every guardrail (`InpMaxEffectiveRiskPct=20%`, fleet cap, v26.6 micro-fit) validated against the same poisoned number and passed silently. The dashboard's `Risk: 0.50%` was fiction. The user's manual save of the morning trade hid this from the account record.
+- **Fix** — new `CalibTickValue(sym)`: when profit currency == account currency, the identity `tick_value == tick_size * contract_size` must hold; if the broker value deviates >5%, the geometry value is used and a loud `TICKVALUE CALIBRATED` line prints. Non-USD-quoted instruments keep the broker value (genuine conversion factor). Wired into **all** consumers: main trade opener, CB opener (which feeds the CB engine's dynamic sizing), detached-close recovery, and fleet-wide open-risk accounting.
+- Post-fix behavior on this account: wanted vol for a 500pt stop ≈ 0.0003 lots → min-lot 0.01 clamps to **$5.00 true risk = 14.7% of equity**, and the v26.6 micro-fit then shrinks SL/TP to bring effective risk to ≈1.5% (spread-bound floor). Realistic worst case per trade falls from 57–61% to ~4%.
+
 ## [MITEMSHUB AI EA v26.24] - 2026-09-03
 
 ### Fixed — Governor bootstrap: fresh installs/migrations can no longer wake up benched

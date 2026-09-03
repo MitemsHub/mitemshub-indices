@@ -135,7 +135,7 @@
 //|  - Entry/regime TF overrides, telemetry journal                  |
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
-#define APP_VERSION "26.24"
+#define APP_VERSION "26.26"
 
 //--- v25.2: single source of truth for the version string.
 //--- #property version, every log tag, and every order comment derive from
@@ -855,6 +855,44 @@ void RunPolicySelfCheck()
 }
 
 //+------------------------------------------------------------------+
+//| v26.25: CALIBRATED TICK VALUE — trusts the broker only after a    |
+//| cross-check. The sizing chain everywhere consumes                 |
+//| (stop/tick_size)*tick_value*vol as the $ at risk. On Deriv SVG,   |
+//| Volatility 75 Index reports trade_tick_value=0.0001 for           |
+//| tick_size=0.01 & contract_size=1.0 — 100x understated             |
+//| (truth, from the 2026-09-03 closed trade: $1.0009 per price-unit  |
+//| per 1.0 lot; the broker number implies $0.01). The EA believed    |
+//| its 500pt stop risked $5/lot and sized 0.03-0.04 lots — real      |
+//| risk $15-20 = 57-61% of equity, while the dashboard said 0.5%.    |
+//| Every guardrail passed because they share the poisoned input.     |
+//| For instruments quoted in the account currency the identity       |
+//| tick_value == tick_size * contract_size must hold; when it does   |
+//| not, derive from the identity. Non-USD quotes keep the broker     |
+//| number (a conversion factor we cannot reconstruct locally).       |
+//+------------------------------------------------------------------+
+double CalibTickValue(const string sym)
+{
+   double ts = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+   double tv = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
+   double cs = SymbolInfoDouble(sym, SYMBOL_TRADE_CONTRACT_SIZE);
+   if(ts <= 0.0 || cs <= 0.0) return(tv);
+
+   string acct_ccy = AccountInfoString(ACCOUNT_CURRENCY);
+   string prof_ccy = SymbolInfoString(sym, SYMBOL_CURRENCY_PROFIT);
+   if(acct_ccy == "" || prof_ccy != acct_ccy)
+      return(tv);   // quote converted to another account ccy: broker value may be right
+
+   double tv_identity = ts * cs;
+   if(tv <= 0.0 || MathAbs(tv - tv_identity) > 0.05 * tv_identity)
+   {
+      PrintFormat(VTAG+"TICKVALUE CALIBRATED on %s: broker says %.6f, geometry says %.6f (tick_size %.5f x contract %.2f) — using geometry",
+                  sym, tv, tv_identity, ts, cs);
+      return(tv_identity);
+   }
+   return(tv);
+}
+
+//+------------------------------------------------------------------+
 int OnInit()
 {
    g_tf_entry  = ParseTF(InpEntryTFOverride, (ENUM_TIMEFRAMES)Period());
@@ -1466,6 +1504,7 @@ void OnTick()
          g_high_water_r=0;
          PrintFormat(VTAG+"RECOVERED orphaned position %s %s @%.5f (was missed during reload)",
                      g_dir>0?"BUY":"SELL", _Symbol, g_entry);
+         RunRiskSentinel(g_position_volume, g_sl, g_tp, -1.0, "RECOVERY");   // v26.26: audit orphans too — breach closes them
          break;
       }
    }
@@ -2427,8 +2466,9 @@ void RecoverDetachedClose()
    else if(dr == DEAL_REASON_SO) reason = "STOP";
    // Recompute the $ risk from the restored context — the same formula the
    // entry path used, so daily/session P&L stays exact without persisting it.
+   // v26.25: calibrated tick value (see CalibTickValue).
    double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
-   double tick_value = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   double tick_value = CalibTickValue(_Symbol);
    if(tick_size > 0 && tick_value > 0 && g_position_volume > 0)
       g_risk_money = g_position_volume * (g_orig_risk / tick_size) * tick_value;
    PrintFormat(VTAG+"RESTART RECOVERY: position %I64u closed while detached — deal %I64u @%.5f reason=%s — journaling now",
@@ -2461,7 +2501,7 @@ double FleetOpenRisk(int &no_sl_count)
       string sym   = PositionGetString(POSITION_SYMBOL);
       if(sl<=0){ no_sl_count++; continue; }
       double ts = SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE);
-      double tv = SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_VALUE);
+      double tv = CalibTickValue(sym);   // v26.25: calibrated — fleet risk must not inherit the broker lie
       if(ts<=0 || tv<=0) continue;
       total += MathAbs(entry-sl)/ts*tv*vol;
    }
@@ -2860,7 +2900,7 @@ void OpenTrade(int direction, string sig_type)
    }
    double risk_money = g_eq * InpRiskPerTrade * ml_mult;
    double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
-   double tick_value = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   double tick_value = CalibTickValue(_Symbol);   // v26.25: broker understates V75 tick value 100x — size on truth
    if(tick_size<=0 || tick_value<=0) return;
    double vol = risk_money / ((stop_dist/tick_size)*tick_value);
    vol = NormalizeVolume(vol);
@@ -2940,6 +2980,8 @@ void OpenTrade(int direction, string sig_type)
       : InpMaxHoldBars;
    g_trades_today++;
 
+   RunRiskSentinel(vol, sl, tp, g_risk_money, "OPEN");   // v26.26: audit the fill, adopt broker reality
+
    if(InpDrawSignals) DrawArrow(direction,TimeCurrent(),entry,sig_type);
    PrintFormat(VTAG+"%s %s @%.5f SL=%.5f TP=%.5f vol=%.2f", sig_type, direction>0?"BUY":"SELL", entry,sl,tp,vol);
 
@@ -2966,7 +3008,7 @@ bool OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
    if(stop_dist <= 0 || tp_dist <= 0) return(false);
 
    double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
-   double tick_value = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   double tick_value = CalibTickValue(_Symbol);   // v26.25: calibrated — see CalibTickValue()
    double min_lot    = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
    double max_lot    = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
    double lot_step   = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
@@ -2974,7 +3016,7 @@ bool OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
 
    // v24: Use dynamic risk sizing from Crash/Boom engine
    double vol = g_cb.CalculateVolume(g_eq, stop_dist, tick_size, tick_value,
-                                     min_lot, max_lot, lot_step);
+                                     min_lot, max_lot, lot_step);   // tick_value calibrated above (v26.25)
    if(vol <= 0) return(false);
 
    //--- v26.6: RE-ANCHOR stops to the live price before sending.
@@ -3115,6 +3157,8 @@ bool OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
    g_trades_today++;
    g_sig_is_band = false;
 
+   RunRiskSentinel(vol, sl, tp, g_risk_money, "CB-OPEN");   // v26.26: audit the fill, adopt broker reality
+
    if(InpDrawSignals) DrawArrow(direction, TimeCurrent(), entry, reason);
    PrintFormat(VTAG+"%s %s @%.5f SL=%.5f TP=%.5f vol=%.2f | %s",
                reason, direction>0?"BUY":"SELL", entry, sl, tp, vol,
@@ -3140,6 +3184,75 @@ double NormalizeVolume(double vol)
    vol=MathFloor(vol/step)*step;
    if(vol<minv) vol=minv; if(vol>maxv) vol=maxv;
    return NormalizeDouble(vol,2);
+}
+
+//+------------------------------------------------------------------+
+//| v26.26: POST-ENTRY RISK SENTINEL — verify the fill against the    |
+//| plan. The sizing chain validates BEFORE the send; this validates  |
+//| AFTER, from the broker-confirmed position, because the broker may |
+//| normalize volume, adjust stops, or the fill may slip — and the    |
+//| 2026-09-03 incident (broker tick value 100x understated on V75)   |
+//| proved that planned and real risk can diverge silently. The       |
+//| sentinel re-measures with CALIBRATED values; any breach of the    |
+//| same InpMaxEffectiveRiskPct policy the entry chain enforces is    |
+//| loud and fatal (pause + close), never advisory.                   |
+//| Also adopts reality: g_entry/g_sl/g_orig_risk/g_risk_money are    |
+//| overwritten with the broker-confirmed geometry so R-math, exits,  |
+//| and the learning tables all operate on truth, not the plan.       |
+//+------------------------------------------------------------------+
+void RunRiskSentinel(double planned_vol, double planned_sl, double planned_tp,
+                     double planned_risk, string tag)
+{
+   if(g_ticket==0 || g_dir==0) return;
+
+   // 1. Read the position as the BROKER recorded it (falls back to plan in
+   //    paper mode, where no real position exists — audit is then a no-op).
+   double real_entry = g_entry, real_sl = g_sl, real_vol = g_position_volume;
+   if(PositionSelectByTicket(g_ticket))
+   {
+      real_entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      real_sl    = PositionGetDouble(POSITION_SL);
+      real_vol   = PositionGetDouble(POSITION_VOLUME);
+   }
+
+   // 2. Real dollar-at-risk from calibrated symbol values.
+   double ts = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   double tv = CalibTickValue(_Symbol);
+   if(ts<=0 || tv<=0 || real_vol<=0 || real_sl<=0) return;   // unmeasurable — keep plan values
+   double real_risk = real_vol * (MathAbs(real_entry-real_sl)/ts) * tv;
+
+   // 3. Loud planned-vs-actual audit line, always.
+   string adj = (MathAbs(real_vol-planned_vol)>0.0001 || MathAbs(real_sl-planned_sl)>1e-9)
+                ? "  [broker adjusted]" : "";
+   if(planned_risk > 0)
+      PrintFormat(VTAG+"RISK AUDIT %s: planned $%.2f (vol %.2f) -> actual $%.2f (vol %.2f, %+.1f%%)%s",
+                  tag, planned_risk, planned_vol, real_risk, real_vol,
+                  (real_risk-planned_risk)/MathMax(planned_risk,0.01)*100.0, adj);
+   else
+      PrintFormat(VTAG+"RISK AUDIT %s: actual $%.2f (vol %.2f)%s",
+                  tag, real_risk, real_vol, adj);
+
+   // 4. Adopt reality into every downstream consumer.
+   g_risk_money      = real_risk;
+   g_orig_risk       = MathAbs(real_entry-real_sl);
+   g_entry           = real_entry;
+   g_sl              = real_sl;
+   g_position_volume = real_vol;
+
+   // 5. Policy breach on REAL money: pause + close. This is the account-killer
+   //    tripwire the 2026-09-03 incident lacked (real risk was 57% of equity
+   //    while the plan said 0.5% and every pre-send guard passed).
+   double cap_money = g_eq * InpMaxEffectiveRiskPct / 100.0;
+   if(real_risk > cap_money)
+   {
+      PrintFormat(VTAG+"SENTINEL BREACH: real risk $%.2f > cap $%.2f (%.1f%% of equity) — PAUSED, closing position %I64u",
+                  real_risk, cap_money, real_risk/MathMax(g_eq,0.01)*100.0, g_ticket);
+      Telem("sentinel", StringFormat(
+         "\"sym\":\"%s\",\"action\":\"CLOSE\",\"real_risk\":%.2f,\"cap\":%.2f,\"eq\":%.2f,\"vol\":%.2f",
+         _Symbol, real_risk, cap_money, g_eq, real_vol));
+      g_paused = true;
+      ClosePosition("SENTINEL");
+   }
 }
 
 //+------------------------------------------------------------------+
