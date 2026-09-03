@@ -51,7 +51,7 @@ InpRiskPerTrade=0.005
 InpMaxEffectiveRiskPct=20.0
 InpTpMult=2.0
 InpMaxHoldBars=20
-InpMaxDailyLossPct=0.05
+InpMaxDailyLossPct=0.0
 InpMaxConsecLoss=3
 InpCoolDownBars=3
 InpUseTrailing=true
@@ -73,7 +73,7 @@ InpMaxTotalRiskPct=15.0
 InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100
 ; v23 Intelligence & Safety
 InpSessionStartHour=0
-InpSessionEndHour=23
+InpSessionEndHour=0
 InpSameSymbolMaxPos=1
 InpGraduatedExit=true
 InpEarlyCutBars=6
