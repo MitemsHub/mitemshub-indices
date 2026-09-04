@@ -59,7 +59,10 @@ RNAME = {0: "BULLISH", 1: "BEARISH", 2: "RANGING", 3: "HIGH_VOL", 4: "NO_TRADE"}
 
 
 def load(name):
-    with open(os.path.join(DATA, name)) as f:
+    # CERT_DATA_DIR lets the same harness certify other Volatility symbols
+    # (e.g. V100) without touching the V75 default.
+    data_dir = os.environ.get("CERT_DATA_DIR", DATA)
+    with open(os.path.join(data_dir, name)) as f:
         rows = list(csv.DictReader(f))
     out = []
     for r in rows:

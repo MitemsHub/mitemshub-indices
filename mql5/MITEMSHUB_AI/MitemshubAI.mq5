@@ -1,14 +1,18 @@
 //+------------------------------------------------------------------+
 //|                                             MitemshubAI.mq5      |
-//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.23     |
-//|   Intelligent • Regime-Aware • Crash/Boom • Spike-Aware • Smart  |
+//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.34     |
+//|   Intelligent • Regime-Aware • Volatility-Only • Spike-Aware • Smart  |
 //|                                                                  |
 //| v26.x SERIES (2026-08-30) — see PRODUCTION_CONFIGS.md for full   |
-//| details. Single fresh-build deploy line for Boom + Crash:        |
-//|  v26.19 RECORDER RETIRED: InpTickRecordEnabled default OFF        |
-//|     (broker tick history covers research); the two CB presets     |
-//|     stop recording too. The CTickRecorder code stays for          |
-//|     opt-in microstructure studies.                                |
+//| details. Volatility-only deploy line:                            |
+//|  v26.34 CB ENGINE REMOVED: the dormant Crash/Boom engine, its     |
+//|     inputs, learned-gate files, burst-guard policy table, and     |
+//|     reject-accounting counters are physically deleted (every      |
+//|     historical CB strategy question was settled net-negative;     |
+//|     v26.33 already refuses CB symbols). The TickRecorder module   |
+//|     survives (moved to Microstructure/) — it is the opt-in tick   |
+//|     archive for Volatility microstructure studies. Strategy       |
+//|     table: PB/BO/MOM/MR/BF + VB-BURST (6 slots).                  |
 //|  v26.23 GOVERNOR v3.1 — QUALITY GATES: (1) SPREAD GATE: entries   |
 //|     are refused when the live spread exceeds 18% of the planned   |
 //|     stop distance (scalp-sweep forensics: spread was ~44% of the  |
@@ -135,7 +139,7 @@
 //|  - Entry/regime TF overrides, telemetry journal                  |
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
-#define APP_VERSION "26.26"
+#define APP_VERSION "26.34"
 
 //--- v25.2: single source of truth for the version string.
 //--- #property version, every log tag, and every order comment derive from
@@ -147,26 +151,24 @@ const string VTAG = "[v" + APP_VERSION + "] ";
 #property strict
 
 #include <Trade\Trade.mqh>
-#include "CrashBoom/CrashBoomEngine.mqh"
-#include "CrashBoom/TickRecorder.mqh"
+#include "Microstructure/TickRecorder.mqh"   // v26.34: relocated from CrashBoom/ — opt-in tick archive (default OFF)
 #include "Strategies/VolBurstFade.mqh"   // v26.17: Volatility momentum-burst fade (EXPERIMENTAL, default OFF)
 // v26.9-phase1: modular market engine — EGARCH conditional-vol forecaster
 // (locked against the Python reference by Tests/Phase10Tests.mq5).
 #include "Market/GarchForecaster.mqh"
 CTrade trade;
-CTickRecorder g_tick_rec;   // v25.1: always-on tick microstructure archive
+CTickRecorder g_tick_rec;   // opt-in tick microstructure archive (v26.19: default OFF)
 CVolBurstFade g_vb;         // v26.17: Volatility momentum-burst fade (EXPERIMENTAL)
 
 #define TELEM_BASE "MitemshubAI_v23_telemetry"   // v26.1: per-symbol suffix appended
 #define STATE_BASE "MitemshubAI_state"           // v26.1: per-symbol suffix appended
 
-// v26.1: per-INSTANCE file names — Boom and Crash charts must never share
-// learning state. A shared state.csv let each instance overwrite the other's
-// counters, and one merged review.csv mixed unrelated trades (Boom's Aug-28
-// trades appeared on the Crash HUD). Files become e.g.
-//   MitemshubAI_state_Crash_1000_Index.csv
-//   MitemshubAI_review_Boom_1000_Index.csv
-//   MitemshubAI_v23_telemetry_Boom_1000_Index.jsonl
+// v26.1: per-INSTANCE file names — two instances on different symbols must
+// never share learning state (a shared state.csv once let each instance
+// overwrite the other's counters). Files become e.g.
+//   MitemshubAI_state_Volatility_75_Index.csv
+//   MitemshubAI_review_Volatility_75_Index.csv
+//   MitemshubAI_v23_telemetry_Volatility_75_Index.jsonl
 string SymbolTaggedFile(const string base, const string ext)
 {
    string tag = _Symbol;
@@ -205,6 +207,7 @@ input double InpAtrHighPct       = 90.0;
 input group "=== Strategy Parameters ==="
 input double InpPullbackMin      = 0.30;
 input double InpPullbackMax      = 2.20;
+input bool   InpPbEmaSideVeto    = false;   // v26.29: veto PB when close pierces EMA20 against trend (cert-validated on V75)
 input double InpBreakoutBuffer   = 0.10;
 input int    InpBreakoutBars     = 12;
 input double InpMomBodyMin       = 0.45;
@@ -216,7 +219,7 @@ input double InpBandZEntry       = 2.0;      // |z_dev| fade trigger (R_75/R_100
 input double InpBandVolExtRatio  = 1.25;     // sigma must exceed this x sigma EMA baseline
 input int    InpBandSigmaEmaLen  = 30;       // sigma baseline EMA length (bars)
 input double InpBandStopSigmaMult  = 0.10;   // stop   = 0.10 x sigma_h (validated)
-input double InpBandTargetSigmaMult= 0.60;   // target = 0.60 x sigma_h (Boom/Crash 1000 retune: lower DD than 0.80)
+input double InpBandTargetSigmaMult= 0.60;   // target = 0.60 x sigma_h (validated)
 input int    InpBandHoldSec      = 3600;     // band hold horizon (seconds)
 input double InpBandMinRR        = 2.5;      // min reward:risk for band plans
 input double InpBandMaxStopPct   = 0.015;    // reject band plan if stop > 1.5% of price
@@ -386,6 +389,10 @@ input int    InpWarmupBars       = 250;
 input bool   InpDrawDashboard    = true;
 input bool   InpDrawSignals      = true;
 input bool   InpLiveExecution    = true;
+input double InpPaperEquity      = 50.0;     // v26.28 PAPER: virtual starting equity (InpLiveExecution=false)
+input bool   InpFitRouter        = true;     // v26.30: min-lot risk router — refuse an instrument whose min lot cannot fit the risk cap
+input double InpRouterScanATR    = 1.7;      // v26.30: stop distance (x ATR) used for the min-lot fit measurement
+input double InpPaperSpreadMult  = 1.0;      // v26.28 PAPER: spread multiplier for conservative virtual fills
 input int    InpMaxTradesPerDay  = 0;        // 0 = DISABLED (v26.14: boundless opportunities - no daily trade cap)
 
 input group "=== Intelligence & Safety (v23) ==="
@@ -405,53 +412,9 @@ input double InpProfitLockR      = 0.5;      // Lock profit if trade reached 1R+
 input group "=== Execution Telemetry (v26.4) ==="
 input bool   InpUseOnTradeTransaction = true; // Event-driven close detection (O(1) deals; polling fallback if off/fails)
 
-// v26.5: CB strategies in the intelligence layer.
-// PostTradeReview's strategy table only knew PB/BO/MOM/MR/BF, so the
-// strategies that do ALL Crash/Boom trading (CB-TICKFADE, CB-FADE, CB-GRIND)
-// were invisible to the self-review system: STRAT rows stayed at zero while
-// trades accumulated, and auto-disable could never judge them (Aug-30 state
-// file: 6 closed CB trades, all STRAT counters 0.0).
-#define CB_STRAT_N 3
-input bool   InpCBLearnStrategies = true;    // Track CB fade/grind expectancy + auto-disable
-input int    InpCBMinTradesToJudge = 20;     // Min CB trades before auto-disable can act
-input double InpCBMinExpectancy   = -0.10;    // Disable a CB mode below this expectancy (R/trade)
-
-input group "=== Crash/Boom Mode (v24) ==="
-input bool   InpCrashBoomMode    = false;    // Enable Crash/Boom trading mode
-input bool   InpIsCrashIndex     = false;    // true = Crash (1000/500/300), false = Boom (1000/500/300)
-input bool   InpCBMicroFade      = true;     // v25.3: reduce risk on small (micro) spikes
-
-// v26.10: AUTO per-symbol resolution for the CB numeric parameters — the same
-// cure as InpCBBurstGuardMode, extended to the exit geometry. AUTO (compiled
-// default) = the symbol calibration profile in CrashBoomCalibration.mqh (the
-// deployed v26.8 grid-search values). CUSTOM = the explicit input below wins
-// on BOTH charts. A stale stored chart input can no longer poison any of
-// these: unknown legacy inputs drop out, the new mode inputs default to AUTO,
-// and the profile ships the policy. Resolution is logged at init as
-// [CB-PARAM] lines — audit at a glance which source decided each value.
-enum ENUM_CB_PARAM_SOURCE { CB_PARAM_AUTO=0,     // Auto: symbol calibration profile
-                            CB_PARAM_CUSTOM=1 }; // Custom: explicit input wins
-input ENUM_CB_PARAM_SOURCE InpCBSpikeThresholdMode = CB_PARAM_AUTO; // Spike threshold source
-input double InpCBSpikeThreshold = 2.2;      // (CUSTOM) body ratio to count as spike (v25.3: 2.2x avg)
-input ENUM_CB_PARAM_SOURCE InpCBMaxSpikeProbMode = CB_PARAM_AUTO;   // Max spike prob source
-input double InpCBMaxSpikeProb   = 0.70;     // (CUSTOM) block entries above this spike probability
-input ENUM_CB_PARAM_SOURCE InpCBFadeRMode        = CB_PARAM_AUTO;   // Fade R source
-input double InpCBFadeR          = 0.4;      // (CUSTOM) fade entry at 0.4R into retrace (v26.8)
-input ENUM_CB_PARAM_SOURCE InpCBFadeSLMode       = CB_PARAM_AUTO;   // Fade SL source
-input double InpCBFadeSL         = 0.3;      // (CUSTOM) fade stop = 0.3x ATR (v26.8)
-input ENUM_CB_PARAM_SOURCE InpCBFadeTPMode       = CB_PARAM_AUTO;   // Fade TP source
-input double InpCBFadeTP         = 3.2;      // (CUSTOM) fade target = 3.2x ATR (v26.15; robustness gate F2 winner)
-//--- v26.15: QUICK-TP tick-fade exit (EXPERIMENTAL — failed robustness gate F2)
-//--- Opt-in via .set only. ON banks a small fixed target (2.5xATR was the best
-//--- small-TP family in scripts/cb_quick_tp_study.py: +42.9R base) but the
-//--- worst session drops to -2.1R vs +1.8R for the deployed TP 3.2 trail-ON
-//--- geometry. OFF keeps the validated profile.
-input bool   InpCBQuickTP       = false;    // Quick-TP tick-fade exit (small fixed target, no trail)
-input double InpCBQuickTPTPMult = 2.5;      // Quick-TP target = this x ATR
-
 input group "=== Volatility Burst Fade (v26.17, EXPERIMENTAL) ==="
-// v26.17: momentum-burst fade for Volatility indices — the CB tick-fade state
-// machine ported to the Vol analogue of a spike (fast net move over N ticks).
+// v26.17: momentum-burst fade for Volatility indices — a fast net move over
+// N ticks arms a fade with a retrace-window/confirm-release lifecycle.
 // Every threshold is unvalidated until replayed against recorded Vol ticks;
 // the master switch defaults OFF and stays off in every shipped preset.
 input bool   InpVolBurstFade     = false;    // Master: enable the Vol burst-fade leg
@@ -464,33 +427,6 @@ input double InpVBSL_ATR         = 0.3;      // Burst-fade stop = this x entry-T
 input double InpVBTP_ATR         = 3.2;      // Burst-fade target = this x entry-TF ATR
 input double InpVBMinRR          = 2.0;      // R:R gate at signal time
 input int    InpVBCooldownSec    = 300;      // Quiet period after a confirmed burst fade (s)
-
-input group "=== Tick Fast-Fade (v25.4) ==="
-input bool   InpCBTickFade      = true;     // Fire fades on the tick spike itself (no M5 wait)
-input double InpCBTickSpikePts  = 3.0;      // Min tick jump (points) that counts as a spike
-input int    InpCBTickFadeTOSec = 900;      // Fast-fade pending timeout (v25.6: 900s — big spikes retrace slowly)
-// v26.10: spike-threshold / max-spike-prob / fade R / SL / TP moved to the
-// "CB Parameters — AUTO per-symbol resolution" group above (with AUTO/CUSTOM
-// source selectors).
-input double InpCBBaseRisk       = 0.5;      // Base risk % for Crash/Boom trades
-input int    InpCBMaxConsecLoss  = 4;        // v26.5: pause CB mode after N consec losses (day-scoped)
-input double InpCBMinRisk        = 0.15;     // Min risk % during high spike probability
-input bool   InpCBEnableGrind    = false;    // Enable grind continuation leg (default: fade-only)
-input bool   InpCBRequireSpikeDirection = true; // Only fade correctly directed spike candles
-input double InpCBMinATRPoints   = 0.0;     // Optional minimum ATR in points; 0 disables
-// v26.9: smart per-symbol burst-guard default. AUTO is resolved INSIDE the
-// engine (Crash → ON, Boom → OFF — the §7 offline replay verdict in
-// EA_UPGRADE_RESEARCH.md), so a chart that never loads its preset still
-// ships the right policy. This kills the Aug-31 failure mode where the Boom
-// chart ran on stale stored inputs with guard=true while the .set said off.
-// Explicit ON/OFF are hard overrides and always win over AUTO.
-enum ENUM_CB_BURST_GUARD { CB_BURSTGUARD_AUTO=0,  // Auto: smart per-symbol (Crash ON, Boom OFF)
-                           CB_BURSTGUARD_ON=1,    // Force ON (explicit override)
-                           CB_BURSTGUARD_OFF=2 }; // Force OFF (explicit override)
-input ENUM_CB_BURST_GUARD InpCBBurstGuardMode = CB_BURSTGUARD_AUTO; // Burst guard mode (AUTO = Crash ON / Boom OFF; ON/OFF = override)
-input int    InpCBBurstWindowSec = 1800;    // Burst window (s): count spikes inside
-input int    InpCBBurstMaxSpikes = 2;       // Block fades when spikes-in-window >= this
-input int    InpCBBurstMinGapSec = 600;     // Block fades when prev-spike gap < this (s); 0 disables
 
 input group "=== Tick Recorder (v25.1) ==="
 input bool   InpTickRecordEnabled = false;  // Tick recorder (OFF by default: broker tick history covers research; enable per-preset only for microstructure studies)
@@ -507,7 +443,6 @@ input bool   InpAutoDisableStrat = true;     // Auto-disable strategies with neg
 input bool   InpProbeDisabled    = true;     // v26.20: suppressed strategies probe every Nth signal (no permanent freeze)
 input int    InpProbeEveryN      = 10;       // v26.20: probe every Nth blocked signal (0 = full freeze)
 input bool   InpAutoBlockTime    = false;    // Auto-block worst-performing time blocks
-input bool   InpCBPersistLearning= true;     // v26.5: CB fade/grind expectancy survives restarts (learned gating)
 
 //+------------------------------------------------------------------+
 //| GLOBALS                                                            |
@@ -517,6 +452,8 @@ int hEMA_Fast_R, hEMA_Mid_R, hEMA_Slow_R;
 int hEMA_Fast_E, hEMA_Mid_E, hEMA_Slow_E, hRSI_E, hATR_E, hBB_E;
 
 double g_eq=0, g_peak_eq=0, g_daily_pnl=0;
+bool   g_fit_ok=true;            // v26.30: min-lot risk router verdict for the chart symbol
+string g_fit_recommend="";       // v26.30: last router recommendation line
 datetime g_day_start=0;
 double g_day_start_eq=0;
 int g_cooldown=0, g_consec_loss=0, g_trades_today=0;
@@ -529,7 +466,7 @@ bool   g_sigma_init=false;
 
 // v22 TELEMETRY
 double g_sigma_now=0, g_z_dev=0, g_exp_ratio=0;
-string g_fired_legs="", g_last_skip="", g_last_cb_skip="";
+string g_fired_legs="", g_last_skip="";
 
 //--- v26.9 phase 1: GARCH conditional-volatility forecaster (modular Market
 //--- engine, phase-10 locked against the Python reference). Bar-driven only
@@ -548,7 +485,6 @@ bool   g_sig_is_band=false;
 int    g_last_band_dir=0;
 double g_sig_sl_atr=0, g_sig_tp_atr=0;
 double g_risk_money=0;
-bool   g_pos_tickfade=false;   // v26.15: open position came from the tick-fade leg (quick-TP management gate)
 int    g_max_hold=14;
 
 // trade performance (v23: persisted to file)
@@ -580,8 +516,9 @@ double g_session_pnl=0;
 // v23.1 INTELLIGENCE LAYER — self-review after every trade
 #define REVIEW_BASE "MitemshubAI_review"         // v26.1: per-symbol suffix appended
 
-// v26.5 strategy table: 8 slots — 0=PB,1=BO,2=MOM,3=MR,4=BF (classic)
-// + 5=CB-TICKFADE,6=CB-FADE,7=CB-GRIND (Crash/Boom modes).
+// v26.5 strategy table: v26.34 — 6 slots — 0=PB,1=BO,2=MOM,3=MR,4=BF (classic)
+// + 5=VB-BURST (v26.17 Volatility burst fade). The Crash/Boom modes that
+// previously occupied slots 5..7 were removed with the CB engine (v26.34).
 // v26.9-fix (2026-08-31): these arrays stayed [5] when the 8-slot table was
 // introduced — every walker (CheckStrategyPerformance, the LoadReviewState
 // echo, SaveReviewState, the HUD Intel line, PostTradeReview) then crashed
@@ -592,15 +529,14 @@ double g_session_pnl=0;
 // drift can no longer be reintroduced silently — and SelfTestFixedArrays()
 // re-verifies all of it at init, fail-closed, BEFORE the first file-indexed
 // write can reach the tables.
-// v26.5: CB modes — slots 5..7; v26.17: slot 8 = VB-BURST (Volatility burst fade)
-#define STRAT_SLOTS   9   // 5 classic + 3 CB modes + 1 Vol burst
+#define STRAT_SLOTS   6   // 5 classic + 1 Vol burst (v26.34: CB modes removed)
 #define REGIME_SLOTS  5
 #define TIME_SLOTS    5
 
 // v26.11: name tables hoisted to constant globals sized by the same constants
 // (they were duplicated inline in CheckStrategyPerformance/CheckRegime-
 // Performance and AGAIN in the HUD — a third drift hazard).
-const string STRAT_NAMES[STRAT_SLOTS]   = {"PB","BO","MOM","MR","BF","CB-TICKFADE","CB-FADE","CB-GRIND","VB-BURST"};
+const string STRAT_NAMES[STRAT_SLOTS]   = {"PB","BO","MOM","MR","BF","VB-BURST"};
 const string REGIME_NAMES[REGIME_SLOTS] = {"BULLISH","BEARISH","RANGING","HIGH_VOL","NO_TRADE"};
 
 double g_strat_trades[STRAT_SLOTS];     // total trades per strategy
@@ -632,10 +568,10 @@ string g_last_exit_type="NONE";
 // the offline loop can value them (Aug-30: 7 rejected Boom fades were invisible
 // to every learning table; the offline replay had to reconstruct them by hand
 // from the Experts log + broker journal).
-int g_cb_reject_total   = 0;   // lifetime: all failed/aborted CB order sends
-int g_cb_reject_today   = 0;   // today: reset with the daily counters
-int g_cb_reject_streak  = 0;   // consecutive rejections without an accepted order
-string g_cb_reject_last = "";  // last rejection: "retcode=10016" / "abort-tp-outran"
+int g_cb_reject_total   = 0;   // v26.34: kept for state continuity; no longer incremented (CB engine removed)
+int g_cb_reject_today   = 0;
+int g_cb_reject_streak  = 0;
+string g_cb_reject_last = "";
 
 // v26.14: meta-labeling P(win) size multipliers — loaded from
 // data/meta_label_regime_table.csv (produced by scripts/meta_label_trainer.py).
@@ -645,9 +581,6 @@ string g_ml_regime[META_LABEL_MAX_ROWS];
 int    g_ml_dir[META_LABEL_MAX_ROWS];
 double g_ml_mult[META_LABEL_MAX_ROWS];
 int    g_ml_rows = 0;
-
-// v24: Crash/Boom engine
-CCrashBoomEngine g_cb;
 
 //+------------------------------------------------------------------+
 ENUM_TIMEFRAMES GetRegimeTF(ENUM_TIMEFRAMES tf)
@@ -672,187 +605,23 @@ ENUM_TIMEFRAMES GetRegimeTF(ENUM_TIMEFRAMES tf)
 //| (The banner itself only exists in fresh builds — its presence is  |
 //| also a binary-freshness marker.)                                  |
 //+------------------------------------------------------------------+
-//+------------------------------------------------------------------+
-//| v26.10: resolve one CB numeric parameter (AUTO = calibration      |
-//| profile, CUSTOM = explicit input wins) and log the decision so    |
-//| the init log shows exactly which source shipped each value.       |
-//+------------------------------------------------------------------+
-//--- v26.10: resolved CB parameter values + source flags (filled by
-//--- ResolveCBParam), consumed by the policy self-check below
-double g_cb_res[5];
-bool   g_cb_custom[5];
-const string g_cb_names[5] = {"spike-thresh", "max-spike-prob", "fade-R", "fade-SL", "fade-TP"};
-
-double ResolveCBParam(ENUM_CB_PARAM_SOURCE mode, double auto_val, double custom_val,
-                      const string label, const int slot)
-{
-   if(mode == CB_PARAM_CUSTOM)
-   {
-      g_cb_res[slot]    = custom_val;
-      g_cb_custom[slot] = true;
-      PrintFormat(VTAG+"[CB-PARAM] %-14s = %.2f (explicit override)", label, custom_val);
-      return custom_val;
-   }
-   g_cb_res[slot]    = auto_val;
-   g_cb_custom[slot] = false;
-   PrintFormat(VTAG+"[CB-PARAM] %-14s = %.2f (AUTO: %s calibration profile)",
-               label, auto_val, InpIsCrashIndex ? "Crash" : "Boom");
-   return auto_val;
-}
-
 void PrintStartupSelfCheck()
 {
    string halt = (InpMaxDailyLossPct <= 0.0)
       ? "OFF"
       : StringFormat("ON %.1f%%", InpMaxDailyLossPct * 100.0);
-   string bg;
-   if(!InpCrashBoomMode)                             bg = "n/a (non-CB chart)";
-   else if(InpCBBurstGuardMode == CB_BURSTGUARD_ON)  bg = "ON (explicit override)";
-   else if(InpCBBurstGuardMode == CB_BURSTGUARD_OFF) bg = "OFF (explicit override)";
-   else if(InpIsCrashIndex)                          bg = "AUTO -> ON (Crash policy)";
-   else                                              bg = "AUTO -> OFF (Boom policy)";
+   string bg = "removed (v26.34)";
    string mf = (InpMicroFitPct <= 0.0) ? "OFF" : StringFormat("%.1f%%", InpMicroFitPct);
 
    Print(VTAG+"SELF-CHECK — key v26.x switches ('<' = deployed expectation):");
    PrintFormat(VTAG+"  DailyHalt    = %-26s < expect OFF (0%% — user request 2026-08-30)", halt);
-   PrintFormat(VTAG+"  BurstGuard   = %-26s < Crash AUTO->ON / Boom AUTO->OFF (v26.9 policy)", bg);
+   PrintFormat(VTAG+"  BurstGuard   = %-26s < Crash/Boom engine removed (v26.34)", bg);
    PrintFormat(VTAG+"  MicroFit     = %-26s < expect 1.5%% on CB charts (0 = stale v26.5- inputs)", mf);
    PrintFormat(VTAG+"  LambdaModel  = %-26s < built-in ON (v26.9; λ trusted at 3 learned gaps)", "ON (built-in)");
    PrintFormat(VTAG+"  CloseDetect = %-26s < expect ON (v26.4 event-driven closes)",
                InpUseOnTradeTransaction ? "ON (event-driven)" : "OFF (polling fallback)");
-   PrintFormat(VTAG+"  Rejects      = %-26s < counts lost fade entries (v26.12); today=%d streak=%d",
-               StringFormat("%d total", g_cb_reject_total), g_cb_reject_today, g_cb_reject_streak);
-   int n_custom = (InpCBSpikeThresholdMode==CB_PARAM_CUSTOM ? 1 : 0)
-                + (InpCBMaxSpikeProbMode  ==CB_PARAM_CUSTOM ? 1 : 0)
-                + (InpCBFadeRMode         ==CB_PARAM_CUSTOM ? 1 : 0)
-                + (InpCBFadeSLMode        ==CB_PARAM_CUSTOM ? 1 : 0)
-                + (InpCBFadeTPMode        ==CB_PARAM_CUSTOM ? 1 : 0);
-   PrintFormat(VTAG+"  CB-Params    = %-26s < AUTO=calibration profile (v26.8 geometry), CUSTOM=input wins",
-               n_custom==0 ? "all AUTO (profile)" : StringFormat("%d/5 CUSTOM", n_custom));
 }
 
-//+------------------------------------------------------------------+
-//| v26.10: POLICY SELF-CHECK — compare the RESOLVED config against   |
-//| the .set-declared deployed policy and warn on any mismatch.       |
-//| The POLICY_* constants below are the runtime mirror of            |
-//| MitemshubAI_{BOOM,CRASH}1000_CB.set: whenever the .set policy     |
-//| changes, update these constants in the SAME commit so the check   |
-//| stays meaningful. An intentional one-off override is allowed but  |
-//| is made LOUD here — overrides must never be silent again (the     |
-//| Aug-30/31 stale-input incidents were exactly silent drifts).      |
-//+------------------------------------------------------------------+
-#define POLICY_GUARD_CRASH    true     // Crash 1000: burst guard ON  (v26.0/v26.9 §7 verdict)
-#define POLICY_GUARD_BOOM     false    // Boom 1000: burst guard OFF (v26.0/v26.9 §7 verdict)
-#define POLICY_SPIKE_THRESH   2.2      // InpCBSpikeThreshold
-#define POLICY_MAX_PROB       0.70     // InpCBMaxSpikeProb
-#define POLICY_FADE_R         0.4      // InpCBFadeR (v26.8 grid-search)
-#define POLICY_FADE_SL        0.3      // InpCBFadeSL xATR (v26.8)
-#define POLICY_FADE_TP        3.2      // InpCBFadeTP xATR (v26.15: only geometry passing robustness gate F2)
-#define POLICY_TICK_FADE      true     // InpCBTickFade
-#define POLICY_TICK_PTS       3.0      // InpCBTickSpikePts
-#define POLICY_TICK_TO_SEC    900      // InpCBTickFadeTOSec
-#define POLICY_MAX_HOLD_BARS  6        // InpMaxHoldBars (1800s hold)
-#define POLICY_BASE_RISK      0.30     // InpCBBaseRisk (both charts)
-#define POLICY_MICRO_FADE     true     // InpCBMicroFade
-#define POLICY_REQ_SPIKE_DIR  true     // InpCBRequireSpikeDirection
-#define POLICY_DAILY_LOSS     0.0      // InpMaxDailyLossPct — halt OFF (user request 2026-08-30)
-#define POLICY_MICRO_FIT      1.5      // InpMicroFitPct (percent units)
-#define POLICY_CLOSE_DETECT   true     // InpUseOnTradeTransaction (v26.4)
-
-int    g_pol_ok = 0, g_pol_total = 0;
-string g_pol_mism = "";
-
-void PolRow(const string name, const string resolved, const string declared,
-            const bool ok, const string fix_hint)
-{
-   g_pol_total++;
-   string line = StringFormat("  %-14s resolved=%-18s declared=%-10s", name, resolved, declared);
-   if(ok) { line += " ok"; g_pol_ok++; }
-   else
-   {
-      line += "  <-- MISMATCH";
-      g_pol_mism += StringFormat("%s: resolved %s vs declared %s%s; ",
-                                 name, resolved, declared,
-                                 fix_hint == "" ? "" : " — " + fix_hint);
-   }
-   Print(VTAG+line);
-}
-
-void RunPolicySelfCheck()
-{
-   if(!InpCrashBoomMode)
-   {
-      Print(VTAG+"[POLICY] self-check n/a (non-CB chart)");
-      return;
-   }
-   string sym = _Symbol;
-   StringToUpper(sym);
-   if(StringFind(sym, "1000") < 0)
-   {
-      PrintFormat(VTAG+"[POLICY] no declared policy table for %s — self-check skipped (Boom/Crash 1000 only)",
-                  _Symbol);
-      return;
-   }
-
-   g_pol_ok = 0; g_pol_total = 0; g_pol_mism = "";
-   const bool   decl_guard = InpIsCrashIndex ? POLICY_GUARD_CRASH : POLICY_GUARD_BOOM;
-   const string set_file   = InpIsCrashIndex ? "MitemshubAI_CRASH1000_CB.set" : "MitemshubAI_BOOM1000_CB.set";
-
-   Print(VTAG+"[POLICY] resolved config vs .set-declared policy:");
-   PolRow("BurstGuard",
-          StringFormat("%s (%s)", g_cb.GetBurstGuardActive() ? "ON" : "OFF",
-                       InpCBBurstGuardMode == CB_BURSTGUARD_AUTO ? "AUTO" : "override"),
-          decl_guard ? "ON" : "OFF",
-          g_cb.GetBurstGuardActive() == decl_guard,
-          "load " + set_file);
-   for(int i = 0; i < 5; i++)
-   {
-      double declv = 0;
-      if(i == 0)      declv = POLICY_SPIKE_THRESH;
-      else if(i == 1) declv = POLICY_MAX_PROB;
-      else if(i == 2) declv = POLICY_FADE_R;
-      else if(i == 3) declv = POLICY_FADE_SL;
-      else            declv = POLICY_FADE_TP;
-      PolRow(g_cb_names[i],
-             StringFormat("%.2f (%s)", g_cb_res[i], g_cb_custom[i] ? "CUSTOM" : "AUTO"),
-             StringFormat("%.2f", declv),
-             MathAbs(g_cb_res[i] - declv) < 0.005,
-             g_cb_custom[i] ? ("verify override is intentional, or load " + set_file) : "");
-   }
-   PolRow("tick-fade",     InpCBTickFade ? "ON" : "OFF", "ON",
-          InpCBTickFade == POLICY_TICK_FADE, "load " + set_file);
-   PolRow("tick-spike",    StringFormat("%.1f pts", InpCBTickSpikePts), "3.0 pts",
-          MathAbs(InpCBTickSpikePts - POLICY_TICK_PTS) < 0.005, "");
-   PolRow("tick-TO",       StringFormat("%ds", InpCBTickFadeTOSec), "900s",
-          InpCBTickFadeTOSec == POLICY_TICK_TO_SEC, "");
-   PolRow("quick-tp",      InpCBQuickTP ? "ON" : "OFF", "OFF",
-          !InpCBQuickTP, "v26.15 experimental — failed robustness gate F2");
-   PolRow("max-hold",      StringFormat("%d bars", InpMaxHoldBars), "6 bars",
-          InpMaxHoldBars == POLICY_MAX_HOLD_BARS, "");
-   PolRow("base-risk",     StringFormat("%.2f%%", InpCBBaseRisk), "0.30%",
-          MathAbs(InpCBBaseRisk - POLICY_BASE_RISK) < 0.005, "");
-   PolRow("micro-fade",    InpCBMicroFade ? "ON" : "OFF", "ON",
-          InpCBMicroFade == POLICY_MICRO_FADE, "load " + set_file);
-   PolRow("req-spike-dir", InpCBRequireSpikeDirection ? "ON" : "OFF", "ON",
-          InpCBRequireSpikeDirection == POLICY_REQ_SPIKE_DIR, "");
-   PolRow("DailyHalt",     InpMaxDailyLossPct <= 0.0 ? "OFF" : StringFormat("%.1f%%", InpMaxDailyLossPct * 100.0), "OFF",
-          InpMaxDailyLossPct <= POLICY_DAILY_LOSS, "set InpMaxDailyLossPct=0 (user request 2026-08-30)");
-   PolRow("MicroFit",      InpMicroFitPct <= 0.0 ? "OFF" : StringFormat("%.1f%%", InpMicroFitPct), "1.5%",
-          MathAbs(InpMicroFitPct - POLICY_MICRO_FIT) < 0.05, "0 = stale v26.5- inputs");
-   PolRow("CloseDetect",  InpUseOnTradeTransaction ? "ON" : "OFF", "ON",
-          InpUseOnTradeTransaction == POLICY_CLOSE_DETECT, "v26.4 event-driven closes");
-
-   if(g_pol_mism == "")
-      PrintFormat(VTAG+"[POLICY] %d/%d rows match the declared policy — config is clean.",
-                  g_pol_ok, g_pol_total);
-   else
-   {
-      PrintFormat(VTAG+"*** POLICY MISMATCH: %d of %d rows deviate from the declared policy ***",
-                  g_pol_total - g_pol_ok, g_pol_total);
-      Print(VTAG+"*** Deviations: " + g_pol_mism + "***");
-      Print(VTAG+"*** Fix: click Load in the EA dialog and pick " + set_file + " (MQL5\\Presets), or correct the flagged inputs. If an override is intentional, update the .set AND the POLICY_* mirrors together. ***");
-   }
-}
 
 //+------------------------------------------------------------------+
 //| v26.25: CALIBRATED TICK VALUE — trusts the broker only after a    |
@@ -895,6 +664,24 @@ double CalibTickValue(const string sym)
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   // VOLATILITY-ONLY MANDATE (v26.33, owner decision 2026-09-04): this EA
+   // trades Volatility indices only. Boom/Crash is permanently retired
+   // (v26.21 lineup, 2026-09-02): spike-gap mechanics fill stops at the
+   // post-spike quote (structurally incompatible with the BE/trail ladder),
+   // the tick-burst family measured net-negative across the full 70-cell
+   // calibration. v26.34: the dormant CB engine has been removed entirely.
+   // Refuse to run on Crash/Boom symbols entirely.
+   string cbchk = _Symbol;
+   StringToLower(cbchk);
+   if(StringFind(cbchk, "crash ") == 0 || StringFind(cbchk, "boom ") == 0)
+   {
+      Print(VTAG+"REFUSED: "+_Symbol+" is a Crash/Boom symbol. This build is "
+            "VOLATILITY-ONLY (mandate 2026-09-04) - attach it to a Volatility "
+            "index (10/25/50/75/100) instead. Crash/Boom stays retired; the "
+            "engine was removed in v26.34.");
+      return(INIT_FAILED);
+   }
+
    g_tf_entry  = ParseTF(InpEntryTFOverride, (ENUM_TIMEFRAMES)Period());
    ENUM_TIMEFRAMES regParsed = ParseTF(InpRegimeTFOverride, PERIOD_CURRENT);
    g_tf_regime = (regParsed == PERIOD_CURRENT) ? GetRegimeTF(g_tf_entry) : regParsed;
@@ -946,8 +733,6 @@ int OnInit()
       return(INIT_FAILED);
    LoadReviewState();  // v23.1: restore persisted trade stats + intelligence
    LoadSlipState();    // v26.2: restore spike-slippage counters
-   LoadCbSpikeState(); // v26.5: restore learned CB spike gating
-   ReevaluateCbSpikeGate(); // v26.14: stale persisted verdict may not match current evidence (deadlock fix)
    LoadMetaLabelTable(); // v26.14: restore learned P(win) regime multipliers
    SeedHistoryState();   // v26.24: warm ATR/sigma/GARCH from chart history — no blind window after restarts
    RecoverDetachedClose(); // v26.9: journal closes that happened while the EA was detached
@@ -955,8 +740,8 @@ int OnInit()
    // v25.1: tick recorder — degrades to no-op if the file can't be opened
    g_tick_rec.Init(_Symbol, InpTickRecordEnabled, InpTickFlushTicks, InpTickFlushSeconds);
 
-   Print(VTAG+"MITEMSHUB AI v"+APP_VERSION+" started | 5 Strategies | Regime-Aware | " +
-         (InpCrashBoomMode ? "Crash/Boom Mode" : "Standard Mode"));
+   Print(VTAG+"MITEMSHUB AI v"+APP_VERSION+" started | Volatility-Only | Regime-Aware | " +
+         "Standard Mode (Crash/Boom retired v26.21, refused v26.33, engine removed v26.34)");
    PrintFormat(VTAG+"Entry TF=%s | Regime TF=%s | Band=%s | MinScore=%d | RiskCap=%.0f%%",
                EnumToString(g_tf_entry), EnumToString(g_tf_regime),
                InpUseBandFade?"ON":"OFF", InpMinScore, InpMaxEffectiveRiskPct);
@@ -979,62 +764,24 @@ int OnInit()
                InpMaxSpreadATRFrac>0?"ON":"OFF", InpMaxSpreadATRFrac*100.0,
                InpAdaptiveConviction?"ON":"OFF", InpWinRearm?"ON":"OFF");
 
-   // v24: Initialize Crash/Boom engine
-   if(InpCrashBoomMode)
-   {
-      g_cb.Init(true, InpIsCrashIndex);
-      // v26.10: AUTO per-symbol resolution — the calibration profile ships the
-      // deployed v26.8 geometry; CUSTOM mode lets an explicit input win.
-      double pv;
-      pv = ResolveCBParam(InpCBSpikeThresholdMode, g_cb.GetSpikeThresholdEff(), InpCBSpikeThreshold, "spike-thresh", 0);
-      if(InpCBSpikeThresholdMode == CB_PARAM_CUSTOM) g_cb.SetSpikeThreshold(pv);
-      pv = ResolveCBParam(InpCBMaxSpikeProbMode,   g_cb.GetMaxSpikeProbEff(),   InpCBMaxSpikeProb,   "max-spike-prob", 1);
-      if(InpCBMaxSpikeProbMode   == CB_PARAM_CUSTOM) g_cb.SetMaxSpikeProb(pv);
-      pv = ResolveCBParam(InpCBFadeRMode,          g_cb.GetFadeREff(),          InpCBFadeR,          "fade-R", 2);
-      if(InpCBFadeRMode          == CB_PARAM_CUSTOM) g_cb.SetFadeR(pv);
-      pv = ResolveCBParam(InpCBFadeSLMode,         g_cb.GetFadeSLEff(),         InpCBFadeSL,         "fade-SL", 3);
-      if(InpCBFadeSLMode         == CB_PARAM_CUSTOM) g_cb.SetFadeSL(pv);
-      pv = ResolveCBParam(InpCBFadeTPMode,         g_cb.GetFadeTPEff(),         InpCBFadeTP,         "fade-TP", 4);
-      if(InpCBFadeTPMode         == CB_PARAM_CUSTOM) g_cb.SetFadeTP(pv);
-      g_cb.SetBaseRisk(InpCBBaseRisk);
-      g_cb.SetMinRisk(InpCBMinRisk);
-      g_cb.SetEnableGrind(InpCBEnableGrind);
-      g_cb.SetRequireSpikeDirection(InpCBRequireSpikeDirection);
-      g_cb.SetMinATRPoints(InpCBMinATRPoints);
-      g_cb.SetMicroFade(InpCBMicroFade);
-      g_cb.SetTickFade(InpCBTickFade, InpCBTickSpikePts, InpCBTickFadeTOSec);
-      g_cb.SetTickFadeGuard((int)InpCBBurstGuardMode, InpCBBurstWindowSec, InpCBBurstMaxSpikes, InpCBBurstMinGapSec);
-      g_cb.SetTickFadeQuickTP(InpCBQuickTP, InpCBQuickTPTPMult);   // v26.15: experimental quick-TP exit (default OFF)
-      PrintFormat(VTAG+"Crash/Boom mode: %s | spike_thresh=%.1f | max_prob=%.2f | fade R=%.2f SL=%.2fxATR TP=%.1fxATR | risk=%.2f%% | grind=%s | micro=%s",
-                  InpIsCrashIndex?"CRASH":"BOOM",
-                  g_cb.GetSpikeThresholdEff(), g_cb.GetMaxSpikeProbEff(),
-                  g_cb.GetFadeREff(), g_cb.GetFadeSLEff(), g_cb.GetFadeTPEff(),
-                  InpCBBaseRisk,
-                  InpCBEnableGrind?"ON":"OFF", InpCBMicroFade?"ON":"OFF");
-      // v25.9: make a stale remembered-parameter attach impossible to miss.
-      if(!InpCBMicroFade)
-         Print(VTAG+"WARNING: micro=OFF on "+_Symbol+
-               " — click Load in the EA dialog and pick MitemshubAI_BOOM1000_CB.set (MQL5\\Presets)");
-      if(!InpCBTickFade)
-         Print(VTAG+"WARNING: TickFade=OFF on "+_Symbol+
-               " — the same Load fixes it (InpCBTickFade=true)");
-   }
-   else
-   {
-      g_cb.Init(false, false);
-   }
+   // v26.28: PAPER TRADING ENGINE — virtual equity, virtual fills, real logic
+   PaperInit();
+   if(PaperActive())
+      PrintFormat(VTAG+"PAPER MODE: virtual equity $%.2f | fills at live spread x%.1f | NO real orders",
+                  g_paper_eq, InpPaperSpreadMult);
+
+   // v26.30: MIN-LOT RISK ROUTER — can this account trade this instrument at all?
+   if(InpFitRouter) RunFitRouter();
 
    //--- v26.17: Volatility burst-fade leg (EXPERIMENTAL, default OFF).
-   //    Active only when the master input is on AND we're NOT in Crash/Boom
-   //    mode — on Boom/Crash the spike fades already own the microstructure;
-   //    this leg is built for symbols that tick without spikes.
-   g_vb.Init(InpVolBurstFade && !InpCrashBoomMode,
+   //    Built for symbols that tick without spikes; independent of the
+   //    classic bar-based legs.
+   g_vb.Init(InpVolBurstFade,
              InpVBLookTicks, InpVBVelPts, InpVBRetrMin, InpVBRetrMax,
              InpVBTimeoutSec, InpVBSL_ATR, InpVBTP_ATR, InpVBMinRR,
              InpVBCooldownSec);
 
    PrintStartupSelfCheck();   // v26.9: one-glance stale-chart detector in the log
-   RunPolicySelfCheck();      // v26.10: resolved config vs .set-declared policy
 
    return INIT_SUCCEEDED;
 }
@@ -1049,7 +796,6 @@ void OnDeinit(const int reason)
 
    SaveReviewState();  // v23.1: persist trade stats + intelligence on shutdown
    SaveSlipState();    // v26.2: persist spike-slippage counters
-   if(InpCrashBoomMode) g_cb.Deinit();  // v24.1: release indicator handles
    g_tick_rec.Flush();  // v25.1: persist buffered ticks (file closed by destructor)
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
@@ -1081,138 +827,6 @@ bool IsSessionActive()
                 dt.min < 60 - MathMax(InpSessionEndOffsetMin, 0))));
    else  // wraps midnight
       return (dt.hour >= InpSessionStartHour || dt.hour < InpSessionEndHour);
-}
-
-//--- v26.5: learned CB gating — spikes (grind+fade) survive restarts
-int    g_cb_spike_n       = 0;   // CB spike trades (fade+grind attempts) accumulated
-double g_cb_spike_r_sum   = 0.0; // realized R summed over CB spike trades
-double g_cb_spike_expect  = 0.0; // EWMA expectancy of CB spike trades (R/trade)
-double g_cb_spike_sigma   = 0.5; // EWMA std of CB spike trade R
-int    g_cb_spike_streak  = 0;   // consec losses on CB spike trades (EWMA lifetime)
-bool   g_cb_spike_blocked = false; // learned gate verdict (persists)
-bool   g_cb_spike_was_blocked = false; // edge-trigger for the facade log line
-int    g_cb_gate_probe    = 0;   // v26.13: exploration budget after a gate close
-int    g_cb_quiet_days    = 0;   // v26.13: days with zero spike trades (EWMA decay)
-
-
-
-//--- EWMA update of CB spike expectancy after each CB spike close
-void UpdateCbSpikeLearning(double r)
-{
-   g_cb_spike_n++;
-   g_cb_spike_r_sum += r;
-   const double a = 0.15;                       // ~7-trade memory (day-scale)
-   g_cb_spike_expect = (g_cb_spike_n <= 2) ? r : (a*r + (1.0-a)*g_cb_spike_expect);
-   double dev = (r - g_cb_spike_expect);
-   g_cb_spike_sigma = (g_cb_spike_n <= 2) ? 0.5 : MathSqrt(a*dev*dev + (1.0-a)*g_cb_spike_sigma*g_cb_spike_sigma);
-   if(r < 0) g_cb_spike_streak++; else g_cb_spike_streak = 0;
-   // v26.13: a completed trade is fresh evidence — close the exploration window
-   if(g_cb_gate_probe > 0)
-   {
-      g_cb_gate_probe = 0;
-      PrintFormat(VTAG+"CB-SPIKE GATE: exploration trade completed (R=%+.2f) — budget closed, gate verdict re-evaluated", r);
-   }
-   g_cb_quiet_days = 0;
-}
-
-//--- v26.13: daily EWMA decay — called once per new session day.
-//    The deadlock fix: the old gate could block ALL spike trades forever
-//    (expect<1.5σ with a fat sigma from one gap-through loss), and expect
-//    could never recover because recovery requires trades — which the gate
-//    blocked. Now a quiet day halves |expect| toward 0 and decays n, so
-//    after ~2 days without trades the gate re-arms on its own.
-void DecayCbSpikeLearning()
-{
-   if(g_cb_spike_n == 0) return;
-   g_cb_quiet_days++;
-   g_cb_spike_expect *= 0.5;          // mean decays toward 0 (re-arms the gate)
-   g_cb_spike_sigma  = MathMax(0.5, g_cb_spike_sigma * 0.7);  // noise shrinks too
-   if(g_cb_spike_n > 2) g_cb_spike_n = (int)(g_cb_spike_n * 0.6);  // evidence ages
-   g_cb_spike_streak = 0;             // day-scoped, matching g_consec_loss
-   PrintFormat(VTAG+"CB-SPIKE LEARNING: quiet day %d — expect decays to %+.2fR, sigma %.2f, n=%d (gate re-arms as mean → 0)",
-               g_cb_quiet_days, g_cb_spike_expect, g_cb_spike_sigma, g_cb_spike_n);
-}
-
-//--- Learned gate: block CB spike entries while the fade thesis trends fake.
-//    A real edge shows mean >> noise; facades show mean <= 0 with fat noise.
-//    v26.13 deadlock fix:
-//      * "noise swamps edge" now requires expect < 0 — a positive mean is
-//        NEVER blocked (the old expect < 1.5σ froze the gate at sigma=0.5
-//        default even for a healthy +0.74R mean).
-//      * exploration budget: after a gate closes, the next g_cb_gate_probe
-//        spike signals still fire (spaced by cooldown) so the EWMA gets
-//        fresh data instead of freezing forever.
-bool CbSpikeFacade()
-{
-   if(!InpCBPersistLearning || g_cb_spike_n < 4) return false;   // not enough evidence
-   if(g_cb_gate_probe > 0) return false;                         // exploration budget open
-   if(g_cb_spike_expect < -0.25)                                 // persistent negative edge
-      return true;
-   if(g_cb_spike_expect < 0.0 &&
-      g_cb_spike_sigma > 0 && g_cb_spike_expect < 1.5*g_cb_spike_sigma)
-      return true;                                               // negative mean swamped by noise
-   return false;
-}
-
-//--- v26.14: re-evaluate the learned gate verdict against the CURRENT EWMA
-//    state. The verdict was previously refreshed only after a completed
-//    trade, so once blocked with an empty exploration budget it stayed
-//    blocked forever — the daily quiet-day decay updated expect/sigma/n
-//    but nothing ever re-ran the verdict (the exact deadlock v26.13
-//    intended to fix). Call after state restore and after daily decay.
-void ReevaluateCbSpikeGate()
-{
-   if(!InpCrashBoomMode) return;
-   bool was = g_cb_spike_blocked;
-   g_cb_spike_blocked = CbSpikeFacade();
-   g_cb_spike_was_blocked = g_cb_spike_blocked;
-   if(g_cb_spike_blocked != was)
-   {
-      PrintFormat(VTAG+"CB-SPIKE GATE re-evaluated: %s (mean=%+.2fR sigma=%.2f n=%d probe=%d) — was %s",
-                  g_cb_spike_blocked ? "BLOCKED" : "OPEN",
-                  g_cb_spike_expect, g_cb_spike_sigma, g_cb_spike_n, g_cb_gate_probe,
-                  was ? "BLOCKED" : "OPEN");
-      SaveCbSpikeState();
-   }
-}
-
-//--- Persist per symbol; survives re-attaches and restarts (v26.5)
-void SaveCbSpikeState()
-{
-   int h=FileOpen(SymbolTaggedFile("MitemshubAI_cblearn", ".csv"), FILE_WRITE|FILE_TXT|FILE_ANSI);
-   if(h==INVALID_HANDLE) return;
-   FileWriteString(h, StringFormat("%d,%.4f,%.4f,%.4f,%d,%d,%d,%d\n",
-                   g_cb_spike_n, g_cb_spike_r_sum, g_cb_spike_expect, g_cb_spike_sigma,
-                   g_cb_spike_streak, g_cb_spike_blocked?1:0,
-                   g_cb_gate_probe, g_cb_quiet_days));   // v26.13: probe + quiet days persist
-   FileClose(h);
-}
-
-void LoadCbSpikeState()
-{
-   int h=FileOpen(SymbolTaggedFile("MitemshubAI_cblearn", ".csv"), FILE_READ|FILE_TXT|FILE_ANSI);
-   if(h==INVALID_HANDLE) return;
-   string line=FileReadString(h);
-   FileClose(h);
-   if(StringLen(line)==0) return;
-   string p[];
-   if(StringSplit(line, ',', p) >= 6)
-   {
-      g_cb_spike_n       = (int)StringToInteger(p[0]);
-      g_cb_spike_r_sum   = StringToDouble(p[1]);
-      g_cb_spike_expect  = StringToDouble(p[2]);
-      g_cb_spike_sigma   = StringToDouble(p[3]);
-      g_cb_spike_streak  = (int)StringToInteger(p[4]);
-      g_cb_spike_blocked = (StringToInteger(p[5]) == 1);
-      if(StringSplit(line, ',', p) >= 8)   // v26.13 fields (tolerate old files)
-      {
-         g_cb_gate_probe  = (int)StringToInteger(p[6]);
-         g_cb_quiet_days  = (int)StringToInteger(p[7]);
-      }
-      PrintFormat(VTAG+"CB-SPIKE LEARNING restored: n=%d mean=%+.3fR sigma=%.3f streak=%d gate=%s probe=%d quiet_days=%d",
-                  g_cb_spike_n, g_cb_spike_expect, g_cb_spike_sigma, g_cb_spike_streak,
-                  g_cb_spike_blocked ? "BLOCKED" : "OPEN", g_cb_gate_probe, g_cb_quiet_days);
-   }
 }
 
 //+------------------------------------------------------------------+
@@ -1266,34 +880,8 @@ void HandleTradeClose(double exit_p, string reason, ulong deal_ticket)
 
    RecordTradeSlippage(r, exit_p, reason);   // v26.18: exit-price-based execution quality
    AppendTradeRow(reason, exit_p, r);        // v26.18: full per-symbol trade ledger
-   // v26.5: learned CB spike gating — update the EWMA + persist
-   if(InpCrashBoomMode)
-   {
-      UpdateCbSpikeLearning(r);
-      g_cb_spike_blocked = CbSpikeFacade();
-      if(g_cb_spike_blocked && !g_cb_spike_was_blocked)
-      {
-         // v26.13: grant an exploration budget — the next 3 spike signals fire
-         // even while blocked, so the EWMA can recover from a bad streak.
-         g_cb_gate_probe = 3;
-         PrintFormat(VTAG+"CB-SPIKE GATE: BLOCKED (mean=%+.2fR sigma=%.2f n=%d streak=%d) — exploration budget 3 signals granted to break the deadlock",
-                     g_cb_spike_expect, g_cb_spike_sigma, g_cb_spike_n, g_cb_spike_streak);
-      }
-      else if(!g_cb_spike_blocked && g_cb_spike_was_blocked)
-      {
-         PrintFormat(VTAG+"CB-SPIKE GATE: OPEN (mean=%+.2fR sigma=%.2f n=%d) — spike fades re-enabled",
-                     g_cb_spike_expect, g_cb_spike_sigma, g_cb_spike_n);
-      }
-      g_cb_spike_was_blocked = g_cb_spike_blocked;
-      SaveCbSpikeState();
-   }
-
-   // v24.11: Notify CB engine of trade close (for trend-reversal guard)
-   if(InpCrashBoomMode && g_dir != 0)
-      g_cb.OnTradeClosed(g_dir, g_entry);
 
    g_ticket=0; g_dir=0; g_bars_held=0; g_high_water_r=0;
-   g_pos_tickfade = false;           // v26.15: position gone — quick-TP management gate off
    g_pending_close_deal = 0;         // v26.4: consumed (or out-of-order event ignored)
 
    // v23.1: Run intelligence review after every trade
@@ -1366,49 +954,30 @@ void OnTick()
    double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    // v25.1: tick recorder captures EVERY tick
    if(InpTickRecordEnabled) g_tick_rec.OnTick(bid, ask);
-   // v24: Crash/Boom tick handler (tick-pattern analyzer + detector tick speed)
-   if(InpCrashBoomMode) g_cb.OnTick(bid, ask);
+   // v26.30 fit router: an instrument whose min lot cannot hold the risk cap
+   // gets no entries at all (re-checked if equity grows 50% — it may then fit)
+   if(InpFitRouter && !g_fit_ok)
+   {
+      static double s_last_eq = 0.0;
+      double eq_now = PaperActive() ? PaperEquity() : AccountInfoDouble(ACCOUNT_EQUITY);
+      if(eq_now >= s_last_eq * 1.5) { RunFitRouter(); s_last_eq = eq_now; }
+      if(!g_fit_ok) return;
+   }
    // v26.17: Volatility momentum-burst fade — track every tick, fire only when
-   // gates open. Mirrors the CB tick-fade call site incl. consume-on-confirm.
+   // gates open. A self-contained tick-level leg (v26.34: the CB tick-fade
+   // machinery it originally mirrored was removed with the CB engine).
    if(g_vb.Enabled())
    {
       bool can_trade = (g_ticket==0 && !g_paused && g_cooldown==0 && !DailyLossHalted()
                         && IsSessionActive() && !HasOpenPositionOnSymbol(_Symbol));
       double ve=0, vs=0, vtp=0; string vr="";
       int vd = g_vb.OnTick(bid, ve, vs, vtp, vr, can_trade);
-      if(vd != 0 && can_trade && StratEnabledOrProbe(8))   // v26.20 governor gate (probe counts only when a burst actually fires)
+      if(vd != 0 && can_trade && StratEnabledOrProbe(5))   // v26.20 governor gate (v26.34: VB-BURST is slot 5; probe counts only when a burst actually fires)
       {
          g_last_strategy = "VB-BURST";
-         if(OpenCBTrade(vd, ve, vs, vtp, vr))   // same re-anchor + micro-fit + guardrail path as the CB fades
+         if(OpenTradeLive(vd, ve, vs, vtp, vr))   // same re-anchor + micro-fit + guardrail path as the classic opener
             g_vb.Confirm();                     // accepted: consume burst + cooldown
          else                                   g_vb.Release();   // rejected: burst stays pending
-      }
-   }
-   // v25.4: tick-triggered fast fade — track every tick, fire only when gates open
-   if(InpCrashBoomMode && InpCBTickFade)
-   {
-      bool can_trade = (g_ticket==0 && !g_paused && g_cooldown==0 && !DailyLossHalted()
-                        && IsSessionActive() && !HasOpenPositionOnSymbol(_Symbol)
-                        && (!g_cb_spike_blocked || g_cb_gate_probe > 0));   // v26.13: probe budget overrides the learned gate
-      double fe=0, fs=0, ftp=0; string tfr="";
-      int fd = g_cb.OnTickFade(bid, fe, fs, ftp, tfr, can_trade);
-      if(fd != 0 && can_trade && StratEnabledOrProbe(5))   // v26.20 governor gate (declined fades stay pending and count)
-      {
-         g_last_strategy = "CB-TICKFADE";
-         g_pos_tickfade = false;   // v26.15: set true only if this order ACCEPTS (below)
-         // v26.13: consume-on-confirm. The spike stays pending inside the
-         // engine until the order's fate is known: accepted → TickFadeConfirm
-         // (cooldown + M5-path block, exactly the old consume-on-send);
-         // rejected/aborted → TickFadeRelease (fade can re-fire on the next
-         // tick with FRESH entry/SL/TP instead of the opportunity being
-         // silently eaten by one invalid-stops rejection).
-         if(OpenCBTrade(fd, fe, fs, ftp, tfr))
-         {
-            g_pos_tickfade = true;   // v26.15: this position is a tick-fade trade
-            g_cb.TickFadeConfirm();
-            if(g_cb_gate_probe > 0) g_cb_gate_probe--;   // v26.13: exploration budget consumed by a fired fade
-         }
-         else                                  g_cb.TickFadeRelease();
       }
    }
 
@@ -1417,7 +986,7 @@ void OnTick()
    if(cur == last_bar) { if(InpDrawDashboard) UpdateDashboard(); return; }
    last_bar = cur;
 
-   g_eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_eq = PaperActive() ? PaperEquity() : AccountInfoDouble(ACCOUNT_EQUITY);   // v26.28: virtual equity in paper mode
    if(g_eq > g_peak_eq) g_peak_eq = g_eq;
 
    datetime ds = TimeCurrent() - (TimeCurrent()%86400);
@@ -1426,7 +995,7 @@ void OnTick()
        g_day_start_eq = g_eq;
        g_session_pnl=0;
        g_consec_loss=0;
-       g_cb_reject_today=0;   // v26.12: rejection counter follows the daily reset       if(InpCrashBoomMode) { DecayCbSpikeLearning(); ReevaluateCbSpikeGate(); }   // v26.13 decay + v26.14: decay must re-arm the gate
+       g_cb_reject_today=0;   // v26.34: legacy counter (no longer incremented)
       if(g_paused)
       {
          g_paused=false;
@@ -1440,7 +1009,8 @@ void OnTick()
 
    if(g_ticket>0)
    {
-      if(PositionSelectByTicket(g_ticket)) ManagePosition();
+      if(PaperActive()) PaperManage();          // v26.28: virtual position lifecycle
+      else if(PositionSelectByTicket(g_ticket)) ManagePosition();
       else
       {
          // v26.4: position vanished without a transaction event (EA was busy,
@@ -1533,51 +1103,11 @@ void OnTick()
       }
       else
       {
-         // v24: Crash/Boom mode uses dedicated signal engine
-         if(InpCrashBoomMode)
-         {
-            string cb_reason="", cb_type="";
-            double cb_entry=0, cb_sl=0, cb_tp=0;
-            int cb_dir = g_cb.OnBar(cb_entry, cb_sl, cb_tp, cb_reason, cb_type);
-            if(cb_dir != 0)
-            {
-               if(StratEnabledOrProbe(GetStrategyIndex(cb_type)))   // v26.20 governor gate
-               {
-                  g_last_strategy = cb_type;
-                  // Use CB entry/SL/TP directly via OpenCBTrade
-                  OpenCBTrade(cb_dir, cb_entry, cb_sl, cb_tp, cb_reason);
-               }
-               else
-               {
-                  PrintFormat("[CB-SKIP] governor-suppressed %s", cb_type);
-                  g_last_skip = "governor-" + cb_type;
-               }
-            }
-            else if(cb_reason != "")
-            {
-               // v25.2: surface every CB skip to the Experts log (deduped)
-               if(cb_reason != g_last_cb_skip)
-               {
-                  PrintFormat("[CB-SKIP] %s", cb_reason);
-                  g_last_cb_skip = cb_reason;
-               }
-               g_last_skip = cb_reason;
-               if(g_fired_legs == "")
-                  Telem("sig", StringFormat(
-                     "\"sym\":\"%s\",\"action\":\"%s\",\"dir\":0,\"reason\":\"%s\",\"legs\":\"CB\","
-                     "\"score_b\":0,\"score_s\":0,\"regime\":\"%s\",\"z\":%.3f,\"exp\":%.3f,"
-                     "\"sigma\":%.6f,\"sigma_base\":%.6f,\"band_geom\":false",
-                     _Symbol, "SKIP", cb_reason, RegimeToStr(g_regime),
-                     g_z_dev, g_exp_ratio, g_sigma_now, g_sigma_ema));
-            }
-         }
-         else
-         {
-            // Standard Volatility mode
-            string sig="";
-            int dir = GenerateSignal(sig);
-            if(dir != 0) OpenTrade(dir, sig);
-         }
+         // Standard Volatility mode (v26.34: the Crash/Boom signal branch was
+         // removed with the CB engine — this is the only entry path now)
+         string sig="";
+         int dir = GenerateSignal(sig);
+         if(dir != 0) OpenTrade(dir, sig);
       }
    }
    else if(g_ticket==0 && (g_paused || g_cooldown>0 || DailyLossHalted() || !IsSessionActive()))
@@ -1589,27 +1119,6 @@ void OnTick()
    }
 
    if(InpDrawDashboard) UpdateDashboard();
-}
-
-//+------------------------------------------------------------------+
-//| v26.12: ORDER-REJECTION ACCOUNTING                                |
-//| A rejected/aborted CB entry is a LOST fade opportunity: it never  |
-//| reaches the review journal (no position → no close → no review),  |
-//| so the offline loop was blind to it (Aug-30: 7 rejected Boom      |
-//| fades had to be reconstructed by hand from the broker journal).   |
-//| Counters + one telemetry event per rejection fix that blindness.  |
-//+------------------------------------------------------------------+
-void CBRecordReject(string why, string reason)
-{
-   g_cb_reject_total++;
-   g_cb_reject_today++;
-   g_cb_reject_streak++;
-   g_cb_reject_last = why;
-   PrintFormat(VTAG+"CB-REJECT #%d (today %d, streak %d): %s | %s",
-               g_cb_reject_total, g_cb_reject_today, g_cb_reject_streak, why, reason);
-   Telem("reject", StringFormat(
-      "\"sym\":\"%s\",\"why\":\"%s\",\"reason\":\"%s\",\"total\":%d,\"today\":%d,\"streak\":%d",
-      _Symbol, why, reason, g_cb_reject_total, g_cb_reject_today, g_cb_reject_streak));
 }
 
 //+------------------------------------------------------------------+
@@ -1966,11 +1475,7 @@ int GetStrategyIndex(string strat)
    if(strat=="MOM") return 2;
    if(strat=="MR") return 3;
    if(strat=="BF") return 4;
-   // v26.5: CB modes — indexes 5..7 (arrays sized 8)
-   if(strat=="CB-TICKFADE") return 5;
-   if(strat=="CB-FADE")     return 6;
-   if(strat=="CB-GRIND")    return 7;
-   if(strat=="VB-BURST")    return 8;   // v26.17: Volatility burst fade
+   if(strat=="VB-BURST")    return 5;   // v26.17: Volatility burst fade (slot 5 since v26.34)
    return -1;
 }
 
@@ -2145,13 +1650,13 @@ void CheckStrategyPerformance()
    Print(VTAG+"=== STRATEGY PERFORMANCE REVIEW ===");   // v26.11: shared STRAT_NAMES
    for(int i=0; i<STRAT_SLOTS; i++)
    {
-      int    need       = (i >= 5) ? InpCBMinTradesToJudge : InpMinTradesToJudge;
+      int    need       = InpMinTradesToJudge;
       int    n          = (int)g_strat_trades[i];
       if(n < need) continue;
       double wr         = g_strat_wins[i] / g_strat_trades[i];
       double expectancy = g_strat_total_r[i] / g_strat_trades[i];
-      double floor_r    = (i >= 5) ? InpCBMinExpectancy   : InpMinExpectancy;
-      bool   may_kill   = (i >= 5) ? true                 : InpAutoDisableStrat;
+      double floor_r    = InpMinExpectancy;
+      bool   may_kill   = InpAutoDisableStrat;
       double wr_lb      = WilsonWinLB(g_strat_wins[i], g_strat_trades[i]);
 
       if(!g_strat_enabled[i])
@@ -2584,6 +2089,15 @@ int StratPullback(double &score)
    double pb = MathAbs(price - emaF[0]);
    if(pb < InpPullbackMin*atr[0] || pb > InpPullbackMax*atr[0]) return 0;
 
+   // v26.29 cert-validated filter (scripts/certify_v75.py sweep, +0.85R vs -30.05R legacy):
+   // a close through EMA20 against the trend means the pullback already failed.
+   if(InpPbEmaSideVeto)
+   {
+      if(dir>0 && price<=emaF[0]) return 0;
+      if(dir<0 && price>=emaF[0]) return 0;
+   }
+   // shallow-chase floor rides on the existing InpPullbackMin (cert-validated 0.60 on V75).
+
    if(dir>0 && (rsi[0]>65 || body<-0.1*atr[0])) return 0;
    if(dir<0 && (rsi[0]<35 || body>0.1*atr[0])) return 0;
 
@@ -2955,21 +2469,24 @@ void OpenTrade(int direction, string sig_type)
          PrintFormat(VTAG+"ORDER FAILED retcode=%d desc=%s", retcode, desc);
       }
    }
-   else { g_ticket=(ulong)TimeCurrent(); ok=true; Print(VTAG+"PAPER MODE"); }   if(!ok) { g_cooldown = InpCoolDownBars; return; }
+   else { ok=PaperOpen(direction, entry, sl, tp, vol, g_risk_money, sig_type, g_sig_is_band, g_sig_sl_atr); }   if(!ok) { g_cooldown = InpCoolDownBars; return; }
 
-   g_ticket=0;
-   for(int a=0;a<6;a++)
+   if(!PaperActive())
    {
-      Sleep(60);
-      for(int i=PositionsTotal()-1;i>=0;i--)
+      g_ticket=0;
+      for(int a=0;a<6;a++)
       {
-         ulong t=PositionGetTicket(i);
-         if(t>0 && PositionGetInteger(POSITION_MAGIC)==InpMagic && PositionGetString(POSITION_SYMBOL)==_Symbol)
-         { g_ticket=t; break; }
+         Sleep(60);
+         for(int i=PositionsTotal()-1;i>=0;i--)
+         {
+            ulong t=PositionGetTicket(i);
+            if(t>0 && PositionGetInteger(POSITION_MAGIC)==InpMagic && PositionGetString(POSITION_SYMBOL)==_Symbol)
+            { g_ticket=t; break; }
+         }
+         if(g_ticket>0) break;
       }
-      if(g_ticket>0) break;
+      if(g_ticket==0) g_ticket=trade.ResultOrder();
    }
-   if(g_ticket==0) g_ticket=trade.ResultOrder();
 
    g_dir=direction; g_entry=entry; g_sl=sl; g_tp=tp;
    g_orig_risk=stop_dist; g_position_volume=vol;
@@ -2980,7 +2497,10 @@ void OpenTrade(int direction, string sig_type)
       : InpMaxHoldBars;
    g_trades_today++;
 
-   RunRiskSentinel(vol, sl, tp, g_risk_money, "OPEN");   // v26.26: audit the fill, adopt broker reality
+   if(PaperActive())
+   { g_entry=g_pp_entry; g_sl=g_pp_sl; g_tp=g_pp_tp; g_orig_risk=g_pp_orig_risk; g_max_hold=g_pp_max_hold; }   // v26.28: adopt virtual fill
+   else
+      RunRiskSentinel(vol, sl, tp, g_risk_money, "OPEN");   // v26.26: audit the fill, adopt broker reality
 
    if(InpDrawSignals) DrawArrow(direction,TimeCurrent(),entry,sig_type);
    PrintFormat(VTAG+"%s %s @%.5f SL=%.5f TP=%.5f vol=%.2f", sig_type, direction>0?"BUY":"SELL", entry,sl,tp,vol);
@@ -2995,14 +2515,15 @@ void OpenTrade(int direction, string sig_type)
 }
 
 //+------------------------------------------------------------------+
-//| v24: Crash/Boom trade opener — uses CB-specific risk sizing      |
-//| v26.13: returns bool — true = order accepted (or paper mode).    |
-//| The tick-fade caller uses it to confirm/release the pending      |
-//| spike; the M5 path ignores the return as before.                 |
+//| Trade opener for engine-provided entry/SL/TP plans (v24 origin:    |
+//| the CB fades; since v26.34 also the VB-BURST leg). Uses the same   |
+//| re-anchor, micro-fit, and guardrail path as the classic opener.    |
+//| v26.13: returns bool — true = order accepted (or paper mode).      |
+//| The burst-fade caller uses it to confirm/release the pending burst;|
+//| other callers may ignore the return.                               |
 //+------------------------------------------------------------------+
-bool OpenCBTrade(int direction, double entry, double sl, double tp, string reason)
+bool OpenTradeLive(int direction, double entry, double sl, double tp, string reason)
 {
-   g_pos_tickfade = false;   // v26.15: default — only the tick-fade call site sets this
    double stop_dist = MathAbs(entry - sl);
    double tp_dist = MathAbs(tp - entry);
    if(stop_dist <= 0 || tp_dist <= 0) return(false);
@@ -3014,9 +2535,12 @@ bool OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
    double lot_step   = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
    if(tick_size<=0 || tick_value<=0) return(false);
 
-   // v24: Use dynamic risk sizing from Crash/Boom engine
-   double vol = g_cb.CalculateVolume(g_eq, stop_dist, tick_size, tick_value,
-                                     min_lot, max_lot, lot_step);   // tick_value calibrated above (v26.25)
+   // Risk volume via the standard sizing chain (v26.34: the CB engine's
+   // dynamic sizing went with the engine; this is the classic path —
+   // risk-planned lots, clamped, then consec-loss-scaled by the caller's
+   // guardrails below)
+   double vol = (g_eq * InpRiskPerTrade) / MathMax(((stop_dist / tick_size) * tick_value), 1e-9);
+   vol = NormalizeVolume(vol);
    if(vol <= 0) return(false);
 
    //--- v26.6: RE-ANCHOR stops to the live price before sending.
@@ -3039,7 +2563,6 @@ bool OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
          if(tp <= ask_now + st + tick_size)
           {         PrintFormat(VTAG+"ENTRY ABORT %s — price outran target during send (tp %.5f vs ask %.5f)",
                      direction>0?"BUY":"SELL", tp, ask_now);
-             CBRecordReject("abort-tp-outran", reason);   // v26.12
              return(false);
           }
       }
@@ -3049,7 +2572,6 @@ bool OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
          if(tp >= bid_now - st - tick_size)
           {         PrintFormat(VTAG+"ENTRY ABORT %s — price outran target during send (tp %.5f vs bid %.5f)",
                      direction>0?"BUY":"SELL", tp, bid_now);
-             CBRecordReject("abort-tp-outran", reason);   // v26.12
              return(false);
           }
       }
@@ -3114,34 +2636,34 @@ bool OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
    {
       PrintFormat(VTAG+"Executing %s vol=%.2f SL=%.5f TP=%.5f | %s",
                   direction>0?"BUY":"SELL", vol, sl, tp, reason);
-      if(direction>0) ok = trade.Buy(vol, _Symbol, 0, NormalizeDouble(sl,_Digits), NormalizeDouble(tp,_Digits), "CB_v"+APP_VERSION);
-      else            ok = trade.Sell(vol, _Symbol, 0, NormalizeDouble(sl,_Digits), NormalizeDouble(tp,_Digits), "CB_v"+APP_VERSION);
+      if(direction>0) ok = trade.Buy(vol, _Symbol, 0, NormalizeDouble(sl,_Digits), NormalizeDouble(tp,_Digits), "VOL_v"+APP_VERSION);
+      else            ok = trade.Sell(vol, _Symbol, 0, NormalizeDouble(sl,_Digits), NormalizeDouble(tp,_Digits), "VOL_v"+APP_VERSION);
       if(!ok)
       {
          uint retcode = trade.ResultRetcode();
          string desc = trade.ResultRetcodeDescription();
          PrintFormat(VTAG+"ORDER FAILED retcode=%d desc=%s", retcode, desc);
-         // v26.12: quantify the lost fade opportunity for the offline loop
-         CBRecordReject(StringFormat("retcode=%u %s", retcode, desc), reason);
       }
-   }
-   else { g_ticket = (ulong)TimeCurrent(); ok = true; Print(VTAG+"PAPER MODE"); }
+   }   else { ok = PaperOpen(direction, entry, sl, tp, vol, g_risk_money, reason, false, 0); }
 
    if(!ok) { g_cooldown = InpCoolDownBars; return(false); }
 
-   g_ticket = 0;
-   for(int a=0; a<6; a++)
+   if(!PaperActive())
    {
-      Sleep(60);
-      for(int i=PositionsTotal()-1; i>=0; i--)
+      g_ticket = 0;
+      for(int a = 0; a < 6; a++)
       {
-         ulong t = PositionGetTicket(i);
-         if(t>0 && PositionGetInteger(POSITION_MAGIC)==InpMagic && PositionGetString(POSITION_SYMBOL)==_Symbol)
-         { g_ticket = t; break; }
+         Sleep(60);
+         for(int i = PositionsTotal()-1; i >= 0; i--)
+         {
+            ulong t = PositionGetTicket(i);
+            if(t > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagic && PositionGetString(POSITION_SYMBOL) == _Symbol)
+            { g_ticket = t; break; }
+         }
+         if(g_ticket > 0) break;
       }
-      if(g_ticket > 0) break;
+      if(g_ticket == 0) g_ticket = trade.ResultOrder();
    }
-   if(g_ticket == 0) g_ticket = trade.ResultOrder();
    if(g_ticket == 0)
    {
       Print(VTAG+"ORDER accepted but position ticket was not found; waiting for recovery");
@@ -3157,12 +2679,14 @@ bool OpenCBTrade(int direction, double entry, double sl, double tp, string reaso
    g_trades_today++;
    g_sig_is_band = false;
 
-   RunRiskSentinel(vol, sl, tp, g_risk_money, "CB-OPEN");   // v26.26: audit the fill, adopt broker reality
+   if(PaperActive())
+   { g_entry=g_pp_entry; g_sl=g_pp_sl; g_tp=g_pp_tp; g_orig_risk=g_pp_orig_risk; g_max_hold=g_pp_max_hold; }   // v26.28: adopt virtual fill
+   else
+      RunRiskSentinel(vol, sl, tp, g_risk_money, "OPEN");   // v26.26: audit the fill, adopt broker reality
 
    if(InpDrawSignals) DrawArrow(direction, TimeCurrent(), entry, reason);
-   PrintFormat(VTAG+"%s %s @%.5f SL=%.5f TP=%.5f vol=%.2f | %s",
-               reason, direction>0?"BUY":"SELL", entry, sl, tp, vol,
-               g_cb.GetDashboardInfo());
+   PrintFormat(VTAG+"%s %s @%.5f SL=%.5f TP=%.5f vol=%.2f",
+               reason, direction>0?"BUY":"SELL", entry, sl, tp, vol);
 
    Telem("open", StringFormat(
       "\"sym\":\"%s\",\"ticket\":%I64u,\"dir\":%d,\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,"
@@ -3256,6 +2780,256 @@ void RunRiskSentinel(double planned_vol, double planned_sl, double planned_tp,
 }
 
 //+------------------------------------------------------------------+
+//| v26.28: PAPER TRADING ENGINE                                      |
+//| InpLiveExecution=false is now a real simulator: virtual fill at   |
+//| live bid/ask (spread-multiplier for conservatism), the position   |
+//| is managed with the exact ManagePosition ladder (SL/TP/PLOCK/    |
+//| ECUT/TIME/BE/trail + CB spike exits), closes flow through         |
+//| HandleTradeClose so governor/learning/cooldown train on paper     |
+//| trades, and sizing runs on VIRTUAL equity (InpPaperEquity) so the |
+//| 20% cap and compounding validate the funded scenario.             |
+//+------------------------------------------------------------------+
+bool    g_pp_open=false;
+int     g_pp_dir=0;
+double  g_pp_entry=0, g_pp_sl=0, g_pp_tp=0, g_pp_orig_risk=0;
+double  g_pp_vol=0, g_pp_eff_risk=0;
+int     g_pp_bars=0, g_pp_max_hold=0;
+double  g_pp_hw=0;
+datetime g_pp_entry_time=0;
+string  g_pp_tag="";
+double  g_paper_eq=0, g_paper_start=0;
+
+bool PaperActive() { return(!InpLiveExecution); }
+
+//+------------------------------------------------------------------+
+//| v26.30 MIN-LOT RISK ROUTER                                        |
+//| Measures the SMALLEST achievable stop-risk on the chart symbol    |
+//| (broker min lot at the EA's real stop geometry vs the risk plan   |
+//| and the InpMaxEffectiveRiskPct cap), warns loudly when the account|
+//| cannot trade this instrument, and points at instruments that fit. |
+//+------------------------------------------------------------------+
+void RunFitRouter()
+{
+   double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tv     = CalibTickValue(_Symbol);   // v26.25 truth: broker understates V75 tv 100x
+   double tsz    = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double minlot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double atr_arr[1];
+   bool have_atr = (CopyBuffer(hATR_E, 0, 1, 1, atr_arr)==1 && atr_arr[0]>0);
+   double stop_dist = have_atr ? InpRouterScanATR*atr_arr[0] : 100*point;
+   if(tsz<=0 || tv<=0 || stop_dist<=0 || minlot<=0)
+   {
+      Print(VTAG+"FIT ROUTER: skipped — symbol specs unavailable");
+      return;
+   }
+   double eq         = PaperActive() ? PaperEquity() : AccountInfoDouble(ACCOUNT_EQUITY);
+   double risk_money = eq * InpRiskPerTrade;
+   double cap_money  = eq * InpMaxEffectiveRiskPct / 100.0;
+   double min_risk   = stop_dist / tsz * tv * minlot;   // $ risk of ONE min-lot trade
+   bool fits_plan    = (min_risk <= risk_money + 1e-9);
+   bool fits_cap     = (min_risk <= cap_money  + 1e-9);
+   g_fit_ok          = fits_cap;
+
+   if(fits_plan)
+      g_fit_recommend = StringFormat("%s min-lot stop-risk $%.2f <= plan $%.2f (%.2f%% of eq) - GOOD FIT",
+                                     _Symbol, min_risk, risk_money, min_risk/eq*100.0);
+   else if(fits_cap)
+      g_fit_recommend = StringFormat("%s min-lot stop-risk $%.2f exceeds the %.2f%% plan ($%.2f) but sits inside the %.0f%% cap - TOLERATED, each trade risks %.1f%% of equity",
+                                     _Symbol, min_risk, InpRiskPerTrade*100.0, risk_money,
+                                     InpMaxEffectiveRiskPct, min_risk/eq*100.0);
+   else
+   {
+      double need_eq = min_risk / (InpMaxEffectiveRiskPct/100.0);
+      g_fit_recommend = StringFormat("%s CANNOT FIT: min-lot stop-risk $%.2f > %.0f%% cap $%.2f - every signal would be vetoed. Suggested minimum equity for this symbol: $%.2f",
+                                     _Symbol, min_risk, InpMaxEffectiveRiskPct, cap_money, need_eq);
+   }
+   Print(VTAG+"FIT ROUTER: "+g_fit_recommend);
+   if(!g_fit_ok) ScanFitAlternatives(eq, cap_money);
+   Telem("fit", StringFormat("\"sym\":\"%s\",\"eq\":%.2f,\"min_risk\":%.2f,\"plan\":%.2f,\"cap\":%.2f,\"fit\":%s,\"recommend\":\"%s\"",
+          _Symbol, eq, min_risk, risk_money, cap_money,
+          g_fit_ok?"true":"false", g_fit_recommend));
+}
+
+// v26.30: per-instrument fit comparison at the EA's REAL stop geometry
+// (1.7 x mean M15 range via CopyRates — no indicator warmup needed). Symbols
+// with no bar history fall back to a 100-point floor, which UNDERSTATES
+// high-volatility instruments, so the basis is printed either way.
+void ScanFitAlternatives(const double eq, const double cap_money)
+{
+   // VOLATILITY-ONLY universe (v26.33): the router may only recommend
+   // Volatility indices. Boom/Crash never fits a mandate the EA cannot
+   // certify (no V75-style walk-forward exists for CB, and none is planned).
+   string cands[] = {"Volatility 10 Index","Volatility 25 Index","Volatility 50 Index",
+                     "Volatility 75 Index","Volatility 100 Index"};
+   Print(VTAG+"FIT ROUTER: instruments vs a $"+DoubleToString(eq,2)+
+         " account (min-lot stop-risk at 1.7xATR M15):"
+         );
+   for(int i=0; i<ArraySize(cands); i++)
+   {
+      if(cands[i]==_Symbol) continue;
+      if(!SymbolSelect(cands[i], true)) continue;   // pull specs via Market Watch
+      double p   = SymbolInfoDouble(cands[i], SYMBOL_POINT);
+      double tv  = CalibTickValue(cands[i]);   // calibrated — the scan must not inherit the broker lie
+      double tsz = SymbolInfoDouble(cands[i], SYMBOL_TRADE_TICK_SIZE);
+      double mlot= SymbolInfoDouble(cands[i], SYMBOL_VOLUME_MIN);
+      if(tsz<=0 || tv<=0 || p<=0 || mlot<=0) continue;
+      double basis_atr = 0.0;
+      MqlRates rr[];
+      if(CopyRates(cands[i], PERIOD_M15, 1, 60, rr)==60)
+      {
+         double s=0; for(int k=0;k<60;k++) s += (rr[k].high-rr[k].low);
+         basis_atr = s/60.0;
+      }
+      double stop  = (basis_atr>0 ? InpRouterScanATR*basis_atr : 100.0*p);
+      double r     = stop / tsz * tv * mlot;
+      if(r <= cap_money)
+         PrintFormat(VTAG+"   FITS: %-24s min-lot stop-risk $%.2f (%.1f%% of eq) [%s]",
+                     cands[i], r, r/eq*100.0,
+                     basis_atr>0?"1.7xATR":"100pt FLOOR — verify");
+   }
+}
+
+double PaperEquity() { return(g_paper_eq>0 ? g_paper_eq : InpPaperEquity); }
+
+string PaperFile() { return(SymbolTaggedFile("MitemshubAI_paper",".csv")); }
+
+void PaperLog(string line)
+{
+   int h=FileOpen(PaperFile(), FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI);
+   if(h==INVALID_HANDLE) { Print(VTAG+"paper log open failed: ", GetLastError()); return; }
+   FileSeek(h,0,SEEK_END);
+   FileWriteString(h, line+"\r\n");
+   FileClose(h);
+}
+
+bool PaperInit()
+{
+   g_paper_eq=InpPaperEquity; g_paper_start=InpPaperEquity;
+   int h=FileOpen(PaperFile(), FILE_READ|FILE_TXT|FILE_ANSI);
+   if(h==INVALID_HANDLE) return(true);      // fresh start
+   double eq=InpPaperEquity;
+   double o_dir=0,o_entry=0,o_sl=0,o_tp=0,o_vol=0,o_eff=0,o_risk=0,o_hold=0;
+   string  o_tag=""; datetime o_time=0; ulong o_ticket=0; bool dangling=false;
+   while(!FileIsEnding(h))
+   {
+      string ln=FileReadString(h);
+      if(StringLen(ln)<2) continue;
+      string p[];
+      int n=StringSplit(ln, ',', p);
+      if(n<=0) continue;
+      if(p[0]=="EQ" && n>=2)                 eq=StringToDouble(p[1]);
+      else if(p[0]=="OPEN" && n>=11)
+      {
+         o_time=(datetime)StringToInteger(p[1]); o_ticket=(ulong)StringToInteger(p[2]);
+         o_dir=(int)StringToInteger(p[3]);
+         o_entry=StringToDouble(p[4]); o_sl=StringToDouble(p[5]); o_tp=StringToDouble(p[6]);
+         o_vol=StringToDouble(p[7]); o_eff=StringToDouble(p[8]); o_risk=StringToDouble(p[9]);
+         o_hold=(int)StringToInteger(p[10]); o_tag=(n>=12?p[11]:""); dangling=true;
+      }
+      else if(p[0]=="CLOSE" && n>=8)       { eq=StringToDouble(p[7]); dangling=false; }
+   }
+   FileClose(h);
+   g_paper_eq=eq; g_paper_start=eq;         // paper equity survives restarts
+   if(dangling)
+   {
+      g_pp_open=true; g_pp_dir=(int)o_dir; g_pp_entry=o_entry; g_pp_sl=o_sl; g_pp_tp=o_tp;
+      g_pp_orig_risk=o_risk; g_pp_vol=o_vol; g_pp_eff_risk=o_eff; g_pp_max_hold=(int)o_hold;
+      g_pp_tag=o_tag; g_pp_bars=0; g_pp_hw=0; g_pp_entry_time=o_time;
+      g_ticket=o_ticket; g_dir=g_pp_dir; g_entry=g_pp_entry; g_sl=g_pp_sl; g_tp=g_pp_tp;
+      g_orig_risk=g_pp_orig_risk; g_position_volume=g_pp_vol; g_risk_money=g_pp_eff_risk;
+      g_max_hold=g_pp_max_hold; g_bars_held=0; g_high_water_r=0; g_entry_time=o_time;
+      PrintFormat(VTAG+"PAPER restore: virtual %s position #%I64u from %s",
+                  g_pp_dir>0?"BUY":"SELL", o_ticket, TimeToString(o_time));
+   }
+   return(true);
+}
+
+bool PaperOpen(int direction,double entry,double sl,double tp,double vol,
+               double eff_risk,string tag,bool is_band,double sl_atr)
+{
+   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double sprd=ask-bid;
+   double extra=MathMax(InpPaperSpreadMult-1.0,0.0)*sprd;
+   double fill=(direction>0)?ask+extra:bid-extra;   // conservative virtual fill
+   double delta=fill-entry;
+   if(MathAbs(delta)>0){ entry+=delta; sl+=delta; tp+=delta; }
+   ulong ticket=(ulong)TimeCurrent();
+   g_pp_open=true; g_pp_dir=direction; g_pp_entry=entry; g_pp_sl=sl; g_pp_tp=tp;
+   g_pp_orig_risk=MathAbs(entry-sl); g_pp_vol=vol; g_pp_eff_risk=eff_risk;
+   g_pp_bars=0; g_pp_hw=0; g_pp_entry_time=TimeCurrent(); g_pp_tag=tag;
+   g_pp_max_hold=(is_band && sl_atr>0)
+      ? (int)MathMax(4,(int)MathRound((double)InpBandHoldSec/MathMax(60,PeriodSeconds(g_tf_entry)))+2)
+      : InpMaxHoldBars;
+   g_ticket=ticket; g_dir=direction; g_entry=entry; g_sl=sl; g_tp=tp;
+   g_orig_risk=g_pp_orig_risk; g_position_volume=vol; g_risk_money=eff_risk;
+   g_entry_time=g_pp_entry_time; g_bars_held=0; g_high_water_r=0; g_max_hold=g_pp_max_hold;
+   PrintFormat(VTAG+"PAPER FILL %s vol=%.2f @%.5f SL=%.5f TP=%.5f risk=$%.2f (%.1f%% vEq) | %s",
+               direction>0?"BUY":"SELL", vol, entry, sl, tp, eff_risk,
+               eff_risk/MathMax(PaperEquity(),0.01)*100.0, tag);
+   Telem("paper_open", StringFormat(
+      "\"sym\":\"%s\",\"ticket\":%I64u,\"dir\":%d,\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,"
+      "\"vol\":%.2f,\"eff_risk\":%.2f,\"regime\":\"%s\",\"strat\":\"%s\",\"veq\":%.2f",
+      _Symbol,ticket,direction,entry,sl,tp,vol,eff_risk,RegimeToStr(g_regime),tag,PaperEquity()));
+   PaperLog(StringFormat("OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s",
+            (long)TimeCurrent(),ticket,direction,entry,sl,tp,vol,eff_risk,g_pp_orig_risk,g_pp_max_hold,tag));
+   return(true);
+}
+
+void PaperClose(string reason)
+{
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double exit=(g_pp_dir>0)?bid:ask;
+   double r=g_pp_orig_risk>0?((g_pp_dir>0)?(exit-g_pp_entry):(g_pp_entry-exit))/g_pp_orig_risk:0;
+   double pnl=g_pp_eff_risk*r;
+   ulong ticket=g_ticket;
+   PaperLog(StringFormat("CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f",
+            (long)TimeCurrent(),ticket,reason,exit,r,pnl,PaperEquity()+pnl));
+   HandleTradeClose(exit, reason, 0);        // full close bookkeeping on the virtual trade
+   g_paper_eq+=pnl;
+   PaperLog(StringFormat("EQ,%.2f",g_paper_eq));
+   g_pp_open=false; g_pp_dir=0; g_pp_entry=0; g_pp_sl=0; g_pp_tp=0;
+   g_pp_orig_risk=0; g_pp_vol=0; g_pp_eff_risk=0; g_pp_hw=0; g_pp_bars=0;
+   g_ticket=0;
+   PrintFormat(VTAG+"PAPER CLOSE %s R=%+.2f pnl=$%+.2f vEq=$%.2f", reason, r, pnl, g_paper_eq);
+   Telem("paper_close", StringFormat(
+      "\"sym\":\"%s\",\"ticket\":%I64u,\"reason\":\"%s\",\"exit\":%.5f,\"r\":%.3f,\"pnl\":%.2f,\"veq\":%.2f",
+      _Symbol,ticket,reason,exit,r,pnl,g_paper_eq));
+}
+
+void PaperManage()
+{
+   if(!g_pp_open){ g_ticket=0; return; }
+   g_pp_bars++; g_bars_held=g_pp_bars;
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   if(g_pp_dir>0){ if(bid<=g_pp_sl){PaperClose("STOP");return;} if(bid>=g_pp_tp){PaperClose("TARGET");return;} }
+   else         { if(ask>=g_pp_sl){PaperClose("STOP");return;} if(ask<=g_pp_tp){PaperClose("TARGET");return;} }
+   double r_now=g_pp_orig_risk>0?((g_pp_dir>0)?(bid-g_pp_entry):(g_pp_entry-ask))/g_pp_orig_risk:0;
+   if(r_now>g_pp_hw) g_pp_hw=r_now;
+   if(g_pp_hw>=1.0 && r_now<=InpProfitLockR && r_now>0){PaperClose("PLOCK");return;}
+   if(InpGraduatedExit && g_pp_bars>=InpEarlyCutBars && g_pp_bars<g_pp_max_hold
+      && r_now<=InpEarlyCutMaxR && g_pp_hw<0.3){PaperClose("ECUT");return;}
+   int eff_hold=g_pp_max_hold;
+   if(InpGraduatedExit && r_now>0.3 && g_pp_bars>=g_pp_max_hold)
+      eff_hold=(int)(g_pp_max_hold*InpExtendWinMult);
+   if(g_pp_bars>=eff_hold && r_now<=0.2){PaperClose("TIME");return;}
+   if(InpUseBreakeven && r_now>=InpBeTriggerR)   // virtual BE: state-only
+   {
+      double be=(g_pp_dir>0)?g_pp_entry+2*_Point:g_pp_entry-2*_Point;
+      if((g_pp_dir>0 && g_pp_sl<be)||(g_pp_dir<0 && g_pp_sl>be)) g_pp_sl=be;
+   }
+   if(InpUseTrailing && r_now>=InpTrailStartR)   // virtual trail
+   {
+      double dist=InpTrailDistR*g_pp_orig_risk;
+      if(g_pp_dir>0){ double ns=bid-dist; if(ns>g_pp_sl && ns>g_pp_entry) g_pp_sl=ns; }
+      else         { double ns=ask+dist; if(ns<g_pp_sl && ns<g_pp_entry) g_pp_sl=ns; }
+   }
+   g_high_water_r=g_pp_hw;
+}
+
+//+------------------------------------------------------------------+
 //| v23: MANAGE POSITION — graduated exit, profit lock, trailing      |
 //+------------------------------------------------------------------+
 void ManagePosition()
@@ -3272,72 +3046,11 @@ void ManagePosition()
 
    double r_now = g_orig_risk>0 ? (g_dir>0?(bid-g_entry):(g_entry-ask))/g_orig_risk : 0;
 
-   //--- v26.15: QUICK-TP tick-fade position — exits happen at TP, SL or time
-   //    ONLY (matches the study's trail=False replay: scripts/cb_quick_tp_study.py).
-   //    No trailing, no profit locks, no early cut, no breakeven: banking the
-   //    small fixed target is the whole mode. Spike-prob safety exits below
-   //    stay active.
-   bool qtp = (InpCBQuickTP && g_pos_tickfade);
-
-   // v24.1: CRASH/BOOM SPIKE-AWARE EXIT — check spike probability first
-   if(InpCrashBoomMode && g_cb.IsEnabled())
-   {
-      double spike_prob = g_cb.GetSpikeProbability();
-      
-      // If spike probability > 80% and trade is in profit, exit NOW
-      if(spike_prob > 0.80 && r_now > 0)
-      {
-         PrintFormat(VTAG+"CB SPIKE EXIT — prob=%.2f R=+.2f, banking profit before spike",
-                     spike_prob, r_now);
-         ClosePosition("CB-SPIKE");
-         return;
-      }
-      
-      // If spike probability > 60% and trade is losing, cut immediately
-      if(spike_prob > 0.60 && r_now < 0)
-      {
-         PrintFormat(VTAG+"CB SPIKE-CUT — prob=%.2f R=%.2f, cutting loss before spike",
-                     spike_prob, r_now);
-         ClosePosition("CB-SPIKE-CUT");
-         return;
-      }
-      
-      // CB-specific tighter trailing: start at 0.5R instead of 1.0R
-      // v26.13: routed through ValidStopForModify — an unguarded modify during
-      // a spike (price moving fast) was the retcode-10016 "invalid stops"
-      // source on the Boom chart (SL landed inside the stops level, or the
-      // TP sat on the wrong side of a just-gapped price).
-      // v26.15: skipped for quick-TP tick-fade positions (exit at TP/SL/time only).
-      if(!qtp && r_now >= 0.5)
-      {
-         double cb_dist = 0.4 * g_orig_risk;  // tighter than standard 0.7R
-         if(g_dir>0){ double ns=NormalizeDouble(ValidStopForModify(bid-cb_dist,1,g_tp),_Digits); if(ns>g_sl && ns>g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
-         else       { double ns=NormalizeDouble(ValidStopForModify(ask+cb_dist,-1,g_tp),_Digits); if(ns<g_sl && ns<g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
-      }
-      
-      // CB-specific profit lock: lock at 0.3R if reached 0.8R (tighter than standard)
-      if(!qtp && g_high_water_r >= 0.8 && r_now <= 0.3 && r_now > 0)
-      {
-         PrintFormat(VTAG+"CB PROFIT LOCK — high-water %.2fR now %.2fR", g_high_water_r, r_now);
-         ClosePosition("CB-PLOCK");
-         return;
-      }
-      
-      // CB-specific early cut: 4 bars instead of 6
-      if(!qtp && g_bars_held >= 4 && r_now <= -0.3 && g_high_water_r < 0.2)
-      {
-         PrintFormat(VTAG+"CB EARLY CUT — %d bars R=%.2f", g_bars_held, r_now);
-         ClosePosition("CB-ECUT");
-         return;
-      }
-   }
-
    // v23: update high-water mark
    if(r_now > g_high_water_r) g_high_water_r = r_now;
 
    // v23: PROFIT LOCK — trade reached 1R+ then reversed below InpProfitLockR
-   // v26.15: skipped for quick-TP tick-fade positions
-   if(!qtp && g_high_water_r >= 1.0 && r_now <= InpProfitLockR && r_now > 0)
+   if(g_high_water_r >= 1.0 && r_now <= InpProfitLockR && r_now > 0)
    {
       PrintFormat(VTAG+"PROFIT LOCK — high-water %.2fR now at %.2fR, banking profit", g_high_water_r, r_now);
       ClosePosition("PLOCK");
@@ -3345,8 +3058,7 @@ void ManagePosition()
    }
 
    // v23: GRADUATED TIME EXIT — early cut losers that never got profitable
-   // v26.15: skipped for quick-TP tick-fade positions (SL handles losers)
-   if(!qtp && InpGraduatedExit && g_bars_held >= InpEarlyCutBars && g_bars_held < g_max_hold)
+   if(InpGraduatedExit && g_bars_held >= InpEarlyCutBars && g_bars_held < g_max_hold)
    {
       if(r_now <= InpEarlyCutMaxR && g_high_water_r < 0.3)
       {
@@ -3382,11 +3094,10 @@ void ManagePosition()
    }
 
    // breakeven: move SL to entry + 2 points at +1R
-   // v26.13: validity guard before every PositionModify — on Boom/Crash the
-   // price can gap between bid/ask read and the modify call, so an unguarded
-   // SL can land inside the broker's stops level → retcode 10016 spam.
-   // v26.15: skipped for quick-TP tick-fade positions.
-   if(!qtp && InpUseBreakeven && r_now >= InpBeTriggerR)
+   // v26.13: validity guard before every PositionModify — the price can gap
+   // between bid/ask read and the modify call, so an unguarded SL can land
+   // inside the broker's stops level → retcode 10016 spam.
+   if(InpUseBreakeven && r_now >= InpBeTriggerR)
    {
       double be = g_dir>0 ? g_entry+2*_Point : g_entry-2*_Point;
       if((g_dir>0 && g_sl<be) || (g_dir<0 && g_sl>be))
@@ -3397,8 +3108,8 @@ void ManagePosition()
       }
    }
 
-   // trailing stop (standard mode — CB mode handled above)
-   if(!InpCrashBoomMode && InpUseTrailing && r_now >= InpTrailStartR)
+   // trailing stop
+   if(InpUseTrailing && r_now >= InpTrailStartR)
    {
       double dist = InpTrailDistR * g_orig_risk;
       if(g_dir>0){ double ns=NormalizeDouble(ValidStopForModify(bid-dist,1,g_tp),_Digits); if(ns>g_sl && ns>g_entry) if(trade.PositionModify(g_ticket,ns,g_tp)) g_sl=ns; }
@@ -3511,12 +3222,7 @@ void UpdateDashboard()
                       g_trades, open_count, wr, g_total_r);
    L[5]=StringFormat("Status: %s%s", g_paused?"PAUSED":(DailyLossHalted()?"DAILY-HALT":"ACTIVE"),
         IsSessionActive()?" | SESSION-ON":" | SESSION-OFF");
-   if(InpCrashBoomMode)
-      L[6]=StringFormat("CB: %s | Mode: FADE-ONLY | Grind: %s | DirFilter: %s | TickFade: %s",
-         InpIsCrashIndex?"CRASH":"BOOM", InpCBEnableGrind?"ON":"OFF",
-         InpCBRequireSpikeDirection?"ON":"OFF", InpCBTickFade?"ON":"OFF");
-   else
-      L[6]=StringFormat("Strats: PB=%s BO=%s MOM=%s MR=%s BF=%s | VBurst: %s",
+   L[6]=StringFormat("Strats: PB=%s BO=%s MOM=%s MR=%s BF=%s | VBurst: %s",
          InpUsePullback?"ON":"OFF", InpUseBreakout?"ON":"OFF",
          InpUseMomentum?"ON":"OFF", InpUseMeanRevert?"ON":"OFF", InpUseBandFade?"ON":"OFF",
          g_vb.GetDashboard());
@@ -3526,13 +3232,7 @@ void UpdateDashboard()
    string sessTxt = (InpSessionStartHour == InpSessionEndHour)
       ? "24/7"
       : StringFormat("%02d:00-%02d:%02d", InpSessionStartHour, InpSessionEndHour - 1,
-                     60 - MathMax(InpSessionEndOffsetMin, 0));
-   L[8]=InpCrashBoomMode
-      ? StringFormat("CB Risk: %.2f%% | Cap: %.0f%% | MicroFit: %.1f%% | Sess: %s | Fade TP: %.1fx | Hold: %d | Thr: %.1fx%s",
-         InpCBBaseRisk, InpMaxEffectiveRiskPct, InpMicroFitPct, sessTxt,
-         InpIsCrashIndex ? InpCBFadeTP : InpCBFadeTP, InpMaxHoldBars,
-         InpCBSpikeThreshold, InpCBMicroFade?" MICRO":"" )
-      : StringFormat("Risk: %.2f%% (cap %.0f%%) | TP: %.1fx | Hold: %d",
+                     60 - MathMax(InpSessionEndOffsetMin, 0));   L[8]=StringFormat("Risk: %.2f%% (cap %.0f%%) | TP: %.1fx | Hold: %d",
          InpRiskPerTrade*100,InpMaxEffectiveRiskPct,InpTpMult,InpMaxHoldBars);
    L[9]=StringFormat("Band: z>=%.1f tgt=%.2f sig | Trail: %s (%.1fR/%.1fR) BE: %s",
         InpBandZEntry,InpBandTargetSigmaMult,
@@ -3615,15 +3315,17 @@ void UpdateDashboard()
       L[line++]=StringFormat("Coord: spread-gate %s (%.0f%% stop) | conviction %s",
                              InpMaxSpreadATRFrac>0?"ON":"OFF", InpMaxSpreadATRFrac*100.0,
                              (InpAdaptiveConviction && g_daily_pnl<0.0) ? "min+1 (day in red)" : "normal");
-      // v26.12: lost fade opportunities (rejected/aborted entries) — visible at a glance
+      if(PaperActive() && line<25)   // v26.28
+         L[line++]=StringFormat("PAPER: vEq $%.2f (start $%.2f) | fill spread x%.1f | no real orders",
+                                g_paper_eq, g_paper_start, InpPaperSpreadMult);
+      // v26.12: legacy reject counters (no longer incremented since v26.34)
       if(g_cb_reject_total > 0)
-         L[line++]=StringFormat("Rejects: %d total / %d today (streak %d) last: %s",
-                                g_cb_reject_total, g_cb_reject_today,
-                                g_cb_reject_streak, g_cb_reject_last);
+         L[line++]=StringFormat("Rejects: %d total (legacy, CB engine removed)",
+                                g_cb_reject_total);
    }
 
-   // v25.1: tick recorder status (CB mode only)
-   if(InpCrashBoomMode)
+   // v25.1: tick recorder status (when enabled)
+   if(InpTickRecordEnabled)
       L[line++]=g_tick_rec.GetDashboard();
 
    while(line<26) L[line++]=" ";

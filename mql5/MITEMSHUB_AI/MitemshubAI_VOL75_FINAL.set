@@ -1,26 +1,26 @@
-; MITEMSHUB AI v23.0 — Volatility 75 FINAL profile (VALIDATED)
-; Regenerated 2026-08-27 with ALL v23 intelligence & safety upgrades.
+; MITEMSHUB AI v26.32 — Volatility 75 FINAL profile (PAPER MODE)
+; Regenerated 2026-09-04 on the 210-day walk-forward result (round 3).
+;
+; v26.32 STRATEGY (scripts/walkforward_v75.py round 3, 26 folds x 8d,
+; 508 trades, artifact walkforward_210d.json):
+;   InpTpMult 1.8 alone: +52.4R total, t=1.68, 15/26 folds positive — the
+;   best config. Legacy (TP 2.4): +51.4R, t=1.57.
+;   The v26.29 static stack (EMA-side veto + pb-min 0.60) measured only
+;   +18.3R on the same folds — a ~33R drag vs legacy; it was curve-fit to
+;   August and is now OFF. The family throttle adds nothing (+50.4R).
+;   Caveat: all candidates failed the strict 60%-positive-folds bar — the
+;   edge is modest and choppy. The paper run is the final gate.
 ;
 ; R_75 validated band geometry:
 ;   z=2.0, stop=0.10x sigma_h, target=1.20x sigma_h
 ;   trailing ON (0.7R dist), breakeven ON at 1R
-;
-; KEY v23 FIXES vs v22:
-;   1. TRAILING + BREAKEVEN RE-ENABLED (were both OFF — the #1 killer)
-;   2. MaxConsecLoss 3 (tight circuit breaker)
-;   3. CoolDownBars 3 (regain discipline after loss)
-;   4. MaxHoldBars 20 (give winners room on M15)
-;   5. MaxDailyLossPct 5% (hard daily stop)
-;   6. Graduated exit cuts losers early, extends winners
-;   7. Profit lock banks gains when trade gives back from 1R+
-;   8. Volume scales down 25% per consecutive loss
 ;
 ; Magic 7788075 — fleet exposure guard compliant.
 InpUsePullback=true
 InpUseBreakout=false
 InpUseMomentum=true
 InpUseMeanRevert=true
-InpUseBandFade=true
+InpUseBandFade=false
 InpMinScore=3
 InpRequire2Strats=false
 InpMomentumStandalone=false
@@ -39,6 +39,7 @@ InpBreakoutBars=12
 InpMomBodyMin=0.45
 InpRsiOversold=32.0
 InpRsiOverbought=68.0
+InpPbEmaSideVeto=false
 InpBandZEntry=2.0
 InpBandVolExtRatio=1.25
 InpBandSigmaEmaLen=30
@@ -49,7 +50,7 @@ InpBandMinRR=2.5
 InpBandMaxStopPct=0.015
 InpRiskPerTrade=0.005
 InpMaxEffectiveRiskPct=20.0
-InpTpMult=2.0
+InpTpMult=1.8
 InpMaxHoldBars=20
 InpMaxDailyLossPct=0.0
 InpMaxConsecLoss=3
@@ -59,6 +60,16 @@ InpTrailStartR=1.0
 InpTrailDistR=0.7
 InpUseBreakeven=true
 InpBeTriggerR=1.0
+; v26.28 PAPER MODE — virtual fills at live bid/ask, InpPaperEquity drives sizing
+; (the 20% real-risk cap, loss-streak scaling, and compounding all run on the
+; funded scenario). $50 matches the certification harness; raise to the target
+; funded size when that account's paper validation is the goal.
+InpPaperEquity=50.0
+InpPaperSpreadMult=1.5
+; v26.30 min-lot risk router: refuses entries when the broker minimum lot cannot
+; hold the risk cap (tiny accounts), and prints which instruments DO fit.
+InpFitRouter=true
+InpRouterScanATR=1.7
 InpEntryTFOverride=M15
 InpRegimeTFOverride=H1
 InpMagic=7788075
@@ -66,7 +77,7 @@ InpMaxSlippagePts=40
 InpWarmupBars=150
 InpDrawDashboard=true
 InpDrawSignals=true
-InpLiveExecution=true
+InpLiveExecution=false
 InpMaxTradesPerDay=9999
 ; Account-wide exposure guard
 InpMaxTotalRiskPct=15.0

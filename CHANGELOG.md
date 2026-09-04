@@ -6,6 +6,158 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [v26.34 — Crash/Boom engine physically removed] - 2026-09-04
+
+### Removed — the dormant CB engine is gone from the source tree (user request)
+- **Deleted**: `mql5/MITEMSHUB_AI/CrashBoom/` (CrashBoomEngine, CrashBoomStrategy, SpikeDetector, TickPatternAnalyzer, MultiTimeframeConfirm, TimeOfDayAwareness, SymbolCalibration, DynamicRiskSizing) — ~9 modules reachable only from the retired CB path. History preserved in git and `artifacts/v2633_source_backup/`.
+- **Deleted from the EA**: every CB input (mode/is-crash/micro-fade/AUTO-param sources/quick-TP/tick-fade/burst-guard group), the learned CB spike gate (EWMA + `MitemshubAI_cblearn` persistence), the burst-guard policy self-check table, `CBRecordReject` reject-accounting (counters kept, no longer incremented), the CB signal branch and CB exits in both live and paper manage paths.
+- **Survived, deliberately**: the Volatility-only init guard (now cites v26.34), the tick recorder (`TickRecorder.mqh` relocated to `Microstructure/` — the opt-in microstructure archive, default OFF), `OpenTradeLive` (the engine-plan opener, kept for the VB-BURST leg) now using the standard risk-planned sizing chain, and the v26.12 reject counters for state-file continuity.
+- **Strategy table**: 9 → 6 slots (PB/BO/MOM/MR/BF + VB-BURST at slot 5); `STRAT_SLOTS=6`, names table, governor thresholds, and the state-file loader (old rows 5–8 dropped cleanly) all aligned. Fixed a latent bug in the same stroke: the VB-BURST governor gate called `StratEnabledOrProbe(8)`, which would have silently bypassed the governor on the 6-slot table.
+- **Verified**: MetaEditor compile **0 errors / 0 warnings**, fresh `.ex5` synced to all 12 instances (108 orphans pruned on first sync), `verify_set_inputs.py` passes on the V75 presets (zero CB keys), weekly drift report parses v26.34 banners.
+
+
+## [Paper pipeline: weekly scheduled run] - 2026-09-04
+
+### Added — automated weekly verdict tracking (no manual runs to remember)
+- **`scripts/paper_pipeline_weekly.cmd`** — scheduled-task entry point (repo's `%~dp0` wrapper convention, venv python); appends every run to `artifacts/v75_replay/paper_pipeline_sched.log` so unattended runs are permanently recorded.
+- **Scheduled task `Mitemshub Paper Pipeline Weekly`** — Sundays 06:30, deliberately 30 min after the existing `Mitemshub Weekly Data Refresh` (Sundays 06:00) so reconciliation/regime tools see the week's fresh bars. Read-only by design.
+- Verified end-to-end via `Start-ScheduledTask`: run completed with result 0, next fire 2026-09-06 06:30. From the first paper trade onward, the log's diff section is the automatic "which verdicts changed" report.
+
+---
+
+## [Regime-gate study round 2 (harness-only, no EA change)] - 2026-09-04
+
+### Studied — adaptive regime gating re-tested on the 210-day sample: NOT VALIDATED, three independent ways
+- **"What changed after Aug 9" — nothing anomalous.** Post-Aug9 legacy fold z-scores −0.08..−1.23 sit inside the pre-Aug distribution (9/22 pre-Aug folds were also negative); fold-to-fold R autocorrelation is **−0.12** (a momentum regime gate would have scored +23.7R vs buy-and-hold-the-strategy's +51.4R). A perfect ex-ante gate's oracle bound is +40R over legacy — the prize exists, so the question moved to trade level.
+- **Trade level (scripts/regime_gate_study_v2.py, pre-registered calibration F01–F16 / validation F17–F26 split)**: on 283 calibration PB trades, mild separators finally appear at real sample size — mid-|z| bucket +0.203R vs tails −0.032R, hour-bucket B1 +0.270R, and the family-throttle's causal basis is real but weak (trades taken while the 10-trade window is below −3R: +0.013R vs +0.099R cold). The chosen `|z| ≤ 1.08` gate was directionally right out-of-sample (vetoed bucket worse OOS, kept-total higher) but **deleted 56% of trades to gain +0.3R** → G3 fail → GATE NOT VALIDATED.
+- **Round-4 walk-forward (walkforward_210d_r4_gate.json, reference = tp18)**: the never-tested tp18+throttle combination scores **+45.88R vs tp18's +52.42R — the throttle costs 6.5R on the validated base config**. Every adaptive variant (throttle, gate+stack, tp18+thr) fails V2/V3/V4/V6; static **TP 1.8 remains the only walk-forward-consistent config**.
+- Standing architecture: the harness keeps `--family-throttle` for re-testing as paper data grows, and trades now carry `atr_pct` in their records for future regime work — but no gate is deployed. The EA's existing outcome-adaptive machinery (per-strategy auto-disable, 3-loss pause, probe re-entry) remains the only adaptation with a validated basis.
+
+## [TP-duel fresh-data test] - 2026-09-04
+
+### Studied — the last uncontaminated V75 window adjudicates the TP duel: CONFIRMS-TP18-LEAD
+- **Design** (docs/TP_DUEL_FRESH_TEST.md, frozen before execution): legacy TP 2.4 had never run on pre-Feb-2026 bars, so the paired difference on 2025-08 .. 2026-01 was uncontaminated; D = legacy − tp18 with registered thresholds (CONFIRMS ≤ −3.0R & t ≤ −1.0; tie-band between; UPSET ≥ +3.0R & t ≥ +1.0 relabels the favorite but never touches the preset); 3 registered ~2-month folds; one look, then closed.
+- **Result**: legacy +10.86R vs tp18 +20.98R → **D = −10.12R, fold deltas [−7.71, +4.42, −13.70], t = −1.06 → CONFIRMS-TP18-LEAD**. TP 1.8 wins 2/3 folds; both arms positive on the window; deployed preset unchanged; paper A/B proceeds as the final judge (two-sided by design).
+- **Standing duel record**: Feb–Sep 2026 (26 folds, ~500 tr): tie (+52.42 vs +51.44). Aug 2025–Jan 2026 (fresh one-shot): tp18 by +10.12R. Historical power for this question is now exhausted — paper data is the only remaining adjudicator, as it always was. Also notable: the tp18 family is now positive on **three** disjoint multi-month spans (Oct–Dec 2024 +17.4R probe, Aug 2025–Jan 2026 +20.98R, Feb–Sep 2026 +52.4R).
+
+## [V100 two-year walk-forward] - 2026-09-04
+
+### Studied — the stack-vs-legacy flip was fold-count noise: the veto+depth stack loses on BOTH instruments; question settled
+- **Power**: 2 years of V100 bars (2024-08 .. 2026-09, 71,038 M15 bars; 210-day set snapshotted), 53×14-day folds, ~2,000 trades per config — ~5× the V75 round-3 power. Driver gained env knobs (`WF_FOLD_DAYS`, `WF_CONFIGS`) so per-symbol runs never touch V75 defaults.
+- **Result**: legacy TP 2.4 +31.66R (26/53 folds, t=+0.67) | **v2629 stack −7.09R (t=−0.18)** | tp18 +25.01R (reference). The 210-day stack lead (+15.1R vs legacy −2.05R) **inverts completely under power** — the stack is now measured harmful on V75 (~33R drag) AND net-negative on V100. There is no instrument where it wins; the "V100's config" hypothesis is dead.
+- **Second settled question**: no V100 geometry validates (best t=+0.67, worst fold −13.5R). V100 stays uncertified — the fit router may name it, but funding follows certification, and V75 remains the only certified instrument.
+- **Meta-lesson (third occurrence)**: August filters → 33R drag at 26 folds; mid-z effect → sign flip on fresh data; V100 stack flip → inversion at 53 folds. Every small-sample lead this project has chased died under power. The pre-registered walk-forward discipline is the only reason none of them reached the EA.
+
+## [Pipeline runner] - 2026-09-04
+
+### Added — scripts/paper_pipeline.py: one command runs every study tool and reports which verdicts changed
+- Dynamic tools re-executed (all self-gating, read-only): A/B adjudicator, paper↔tick reconciler, regime-gate replication v3, weekly report (ledger + watchdog + preset drift). Registered one-look contracts read from artifacts, never re-run: z-gate Phase A, V75/V100 walk-forwards, regime3 interim.
+- Arm A/B discovery is automatic (chart-magic scan of terminal profiles, ledger-presence fallback). Verdict extraction handles VERDICT/Verdict lines and the watchdog's CERTIFIED/VIOLATIONS format.
+- State: `artifacts/v75_replay/pipeline_state.json` — every run diffs verdicts against the previous run and prints NEW / CHANGED (was → now) / unchanged. This is the "re-run once a week of paper data exists and report what changed" deliverable: it is one command, and it reports nothing-but-the-truth today (arm dirs: none — still gated on the MT5 reload; zgate NOT VALIDATED; both walk-forwards NOT VALIDATED for adaptive configs; watchdog CERTIFIED 36/0/28).
+
+## [Z-gate Phase A] - 2026-09-04
+
+### Studied — the z-only gate gets its pre-registered fresh-data test and fails comprehensively: NOT VALIDATED, final for this generation
+- **Protocol first** (docs/Z_GATE_PROTOCOL.md, frozen before any data point was examined): Phase A on strictly untouched history (2024-08 .. 2026-01 — zero overlap with the burned Feb–Sep 2026 window), gate forms committed in advance (PRIMARY tertile-keep, FALLBACK median-keep), calibration pre-bar C1–C3, one-shot validation W1–W5 with segment-consistency requirements, multiple-comparisons ban on further threshold archaeology. Pull tooling gained `--end` for historical windows; `z_gate_phaseA.py` executes the contract mechanically.
+- **Outcome**: calibration passed decisively (720 PB trades, keep +0.125R vs veto −0.038R, gap +0.163 → edges frozen |z| ∈ (0.420, 1.240]) — then validation (one shot, 170 trades) **flipped sign**: kept +0.017R vs vetoed +0.159R (gap −0.14), kept only 25% of trades, and keeping mid-z trades cost −12.9R/−7.4R per segment against +20.98R for trading everything. W1–W5 all false → NOT VALIDATED, final.
+- **Reading**: the mid-z effect was window-luck with a clean mechanism-shaped costume — it fit in Feb–Sep 2026, reversed in Aug 2025–Jan 2026. This is exactly what the protocol was designed to catch: one look, fresh data, sign-flip exposed. The |z| gate question is closed at this sample size.
+- **Descriptive silver lining** (not a criterion): the tp18 base strategy scored +20.98R on the Aug 2025–Jan 2026 window — positive on two disjoint ~7-month spans now.
+
+## [Cross-instrument certification: V100] - 2026-09-04
+
+### Studied — the harness now certifies any Volatility symbol; V100 measured, NOT VALIDATED, and the lesson is structural
+- **Capability (sharpening the Volatility mandate)**: `certify_v75.py` is now symbol-agnostic via env (`CERT_DATA_DIR/CERT_SPREAD/CERT_USD_PER_UNIT_PER_LOT/CERT_MIN_LOT/CERT_LOT_STEP/CERT_SPREAD_GATE_FRAC`), `pull_v75_week.py` takes `--symbol/--outdir`. V75 defaults byte-identical; all prior artifacts reproduce.
+- **V100 fit (live specs)**: honest broker tick value (identity verified — unlike V75's 100× lie), spread 0.26 (3% of a 1.7×ATR stop, so the spread gate passes instead of strangling), min lot 1.0 → $8.76/min-lot trade = 4.4% at $200. Risk-wise the best Volatility instrument yet.
+- **V100 verdict (210 days, 26 folds, ~500 trades, pre-registered V1–V6)**: every config NOT VALIDATED. The surprise is a **personality flip vs V75**: legacy TP 2.4 scores −2.05R (t=−0.09) while the v26.29 stack scores +15.1R (t=+0.69) — the veto+depth filters that were a 33R drag on V75 are a +17R swing on V100. There is **no universal geometry**: instrument personality differs, and every symbol needs its own walk-forward + paper evidence before funding. Per protocol nothing is deployed for V100; the stack-positive lead (t=0.69, 12/26 folds) is recorded for a future, properly powered study (2y of V100 bars or a paper arm) — not promoted on t=0.69.
+- **Standing conclusion hardened**: V75 (TP 1.8) remains the only certified instrument. "Sharpening Volatility skills" = per-instrument certification discipline, now executable in one env-prefixed command for any symbol in the family.
+
+## [MITEMSHUB AI EA v26.33] - 2026-09-04
+
+### Changed — VOLATILITY-ONLY MANDATE (owner decision: nothing to do with Crash/Boom, ever)
+- **`OnInit` refuses Crash/Boom symbols** — `INIT_FAILED` with a loud log naming the mandate; the EA can no longer be attached to a Boom/Crash chart by accident. Rationale on record: spike-gap mechanics fill stops at post-spike quotes (structurally incompatible with the BE/trail ladder), the tick-burst family measured net-negative across the full 70-cell calibration, and no CB walk-forward exists or is planned.
+- **Fit-router universe trimmed** to Volatility 10/25/50/75/100 — the router can no longer recommend Crash 500 (or any CB) to a small account; its advice now always points inside the certifiable Volatility family.
+- **CB presets deleted** (`MitemshubAI_BOOM1000_CB.set`, `MitemshubAI_CRASH1000_CB.set`) from the repo and all terminals; sync prunes them henceforth (24 orphans pruned on this deploy). CB *engine code* stays dormant for historical reference — nothing references it on Volatility charts.
+- **Banner rebranded** ("Volatility-Only | Standard Mode"); `APP_VERSION` → 26.33. Deploy gate passed (preset validator PASS, 12 instances synced, fresh `.ex5` newer than source). The v26.32 strategy config on the paper presets is untouched.
+
+## [Regime-gate study round 3 protocol] - 2026-09-04
+
+### Added — scripts/regime_gate_study_v3.py: pre-registered replication protocol for the near-miss separators, triggered by paper data
+- **Protocol** (fixed before any paper data exists): bucket edges FROZEN from the v2 calibration artifact (abort rather than re-fit if missing); sample gate ≥150 closed arm-A paper trades over ≥21 days; features attach to ledger trades by pairing OPENs to harness sig_t ≤120s (z/hour recomputed with identical definitions; unmatched counted as signal-drift indicator); criteria R1 mid-z paper gap ≥+0.10R, R2 hour-B1 gap ≥+0.10R, R3 AND-keep economics ≥+0.15R/trade over ≥40% of trades, R4 same-sign agreement on the harness companion sample over the paper window. Verdict: VALIDATED-CANDIDATE (→ EA-input design + dedicated walk-forward + paper A/B, never auto-deploy) or NO GATE. Interim mode reports the in-sample extension when run without paper data.
+- **Interim result already informative**: on all 440 harness PB trades (Feb–Sep) both gaps persist (mid-z +0.129, hour +0.212) — but the clean-OOS context (v2 validation folds only, n=90) splits them: **mid-z +0.316 (replicates, stronger than calibration), hour-B1 −0.281 (sign flips — calibration-window luck)**. Expectation for the paper round: the v2 AND-gate likely fails via R2, and the surviving candidate is a z-only gate, which would need its own pre-registered protocol — the v3 artifact preserves the evidence trail for that decision.
+- Still gated on the operator reload: no paper ledger exists yet.
+
+## [Weekly report tooling] - 2026-09-04
+
+### Added — scripts/paper_weekly.py: one command for ledger expectancy + watchdog verdict + preset drift
+- **[1] Ledger expectancy** — per terminal: n, days, total/mean R (vs the walk-forward tp18 reference +0.105R/trade), WR, $pnl, virtual-equity drawdown, worst streak, exit-reason split; explicitly exploratory below 30 closed trades. Prompts the A/B adjudicator + tick reconciler once n ≥ 30.
+- **[2] Watchdog** — reuses demo_watchdog's audit()/paper_audit() verbatim (same checks, same verdict).
+- **[3] Preset drift, three layers** — (a) chart-attached inputs (parsed from each terminal's UTF-16 `.chr` profile: the ground truth for what the EA would run with after a reload) vs the magic-matched deployed preset — catches the "preset updated, EA never reloaded" failure mode; (b) repo preset vs deployed Common\Presets copy; (c) terminal .ex5 mtime vs repo source. Also flags banner-version staleness, duplicate magics across charts, and V75 charts with InpLiveExecution=true. Read-only; writes weekly_report_YYYYMMDD.json.
+- **First live run caught two real findings**: chart01 runs v26.28-era inputs (InpTpMult 2.4 vs deployed 1.8 — the never-done reload, now machine-verified), and chart04 is a second V75 chart with **InpLiveExecution=true and the same magic 7788075** — on demo it contaminates the experiment (double signals, one magic); migrated to a funded terminal as-is it would trade real money on unvalidated settings. Both flagged with explicit NEXT ACTIONS.
+
+## [Paper↔tick reconciliation tooling] - 2026-09-04
+
+### Added — scripts/reconcile_paper_ticks.py: verifies the live paper engine against the tick-study baseline the first week data exists
+- **Purpose** — the fast-fail tick study validated the EA exit ladder offline against 1.5M real broker ticks; this tool checks the LIVE paper engine still matches that reality and catches drift early. Per closed ledger trade, re-simulates the identical ladder (constants imported from study_fastfail_ticks — single source of truth) through real broker ticks from the ledger's own fill, and measures: ladder delta (ledger R − tick R), fill shift vs the fair tick fill (quantifies the InpPaperSpreadMult conservatism), exit-reason agreement (STOP→SL / TARGET→TP), and exit-price sanity (≤3×median spread).
+- **Pre-registered verdicts**: KEEP COLLECTING (<7d coverage) / MATCHED (|mean ΔR| ≤ 0.10R, CI covers 0, mechanics pass) / OPTIMISTIC-DRIFT (ledger better than reality — dangerous) / CONSERVATIVE-DRIFT (ledger worse — cert numbers understate live) / REASON- or PRICE-DRIFT (mechanics diverged). Auto-pulls missing tick windows from the broker (pull_v75_ticks.py).
+- **Self-tested against the real 1.5M-tick file** with synthetic ledgers in the exact EA wire format: zero-bias → MATCHED (Δ −0.007R, CI[−0.057,+0.041]), +0.25R → OPTIMISTIC-DRIFT, −0.25R → CONSERVATIVE-DRIFT, short window and missing ledger → KEEP COLLECTING. All five verdicts correct; injected +4.0 fill shift recovered exactly.
+- **Ledger-format correction found on the way**: ledger epochs are SECONDS (TimeCurrent), not ms. Fixed a latent units bug in scripts/ab_adjudicate.py (pairing tolerance was 25h instead of 90s; days/ETA 1000× off); re-verified pairing at 60s offsets and sane ETA.
+
+## [A/B adjudicator tooling] - 2026-09-04
+
+### Added — scripts/ab_adjudicate.py: pre-registered decision rule for the TP 1.8 vs TP 2.4 paper arms
+- Fixes the verdict rule **before** any paper data exists: data gate (≥30 closed trades/arm, with ETA from observed rate), greedy pairing by OPEN epoch within 90s (arms share the signal engine and broker clock), then declare only if P1 |paired t| ≥ 1.0, P2 sign agreement between paired delta and total-R difference, P3 ledger integrity (dangling OPENs, veq discontinuity). Otherwise KEEP COLLECTING / INCONCLUSIVE. Scope note: adjudicates TP only — the veto/depth question was settled by the 210-day walk-forward and must not be resurrected on paper subsamples.
+- Self-tested on synthetic ledgers in the exact EA wire format, 5 scenarios (A wins, B wins, tie → INCONCLUSIVE, <30 trades → KEEP COLLECTING with ETA, missing arm → KEEP COLLECTING): PASS. Key validity detail: paired tests need shared per-pair market noise to have power (independent draws are unpairable) — real arms share signals, so this holds live.
+- One command the moment data flows: `python scripts/ab_adjudicate.py --a-dir "<terminalA>/MQL5/Files" --b-dir "<terminalB>/MQL5/Files"` → `artifacts/v75_replay/ab_adjudication.json`.
+
+## [VOL75 preset v26.32] - 2026-09-04
+
+### Changed — 210-day walk-forward (26 folds) overturns the August filter conclusions
+- **Data** — pulled 210 days of broker M15/H1 (2026-02-06 → 2026-09-04, 20,160 bars; 40-day snapshots preserved as `m15/h1_40d_snapshot_20260904.csv`). Round 3 of scripts/walkforward_v75.py: 26×8-day folds, 5 configs, pre-registered criteria (V1–V6), ~508 trades per config.
+- **Result** — the strategy family was never broken: legacy geometry scores **+51.4R (t=1.57)** over 7 months; August (the basis of rounds 1–2) was merely a drawdown stretch. **TP 1.8 alone is the best config: +52.4R, t=1.68, 15/26 folds positive** — the only candidate passing the edge criteria (V1 total>0, V4 beats legacy, V5 median>0, V6 t≥1.5). The v26.29 static stack (EMA-side veto + pb-min 0.60) measures **+18.3R — a ~33R drag** vs legacy on the long sample: curve-fit to August, now **OFF** (`InpPbEmaSideVeto=false`, `InpPullbackMin=0.30` in VOL75_FINAL.set; `InpTpMult=1.8` kept). The family throttle adds nothing over tp18 (+50.4R).
+- **Still honest** — every candidate failed the strict 60%-positive-folds bar (58% best). Modest, choppy edge on one instrument/broker/regime-stretch; the paper run remains the final gate before any live capital.
+- Note: 4-fold walk-forwards on 5 weeks of data are noise machines. Minimum viable validation from here on: 25+ folds or paper data, never both-datasets-from-August.
+
+## [v26.31 strategy round (harness-only, no EA change)] - 2026-09-04
+
+### Studied — adaptive regime gate: the honest answer is that no causal regime feature separates PB wins from losses
+- **Diagnostic** — characterized every walk-forward fold (ATR level/percentile, EMA separation, trend age, |z|, path efficiency): F3 (Aug 17–25) was the *most* trending fold (net +7.2%, highest path efficiency) yet PB's *worst* (−9.07R) — runaway markets don't retrace; churn happens in all measured regimes. Every causal feature split tested put BOTH buckets negative; vetoing "bad-regime" trades would mostly just delete trades (some good).
+- **Built anyway, as outcome-adaptation instead** — `certify_v75.py --family-throttle`: when the PB family's last 10 trades sum < −3R, PB-family signals need a probe (every 5th) until the window recovers. Zero fitted regime constants; the gate watches realized expectancy only. Full-period: −8.03R → −4.72R, DD 33.7% → 24.8% (on legacy entries, honest booking).
+- **Pre-registered gate round (scripts/walkforward_v75.py round 2, artifact walkforward_v2631_gate.json): NOT VALIDATED.** Throttle-on-legacy: +0.92R total vs legacy +1.36R (G1 ✗ — the legacy book's interleaved strategies blunt it end-to-end), positive folds 1/4 (G2 ✗). gate+stack: +7.35R vs stack +7.06R (G4 ✓, tiny gain), positive folds 1/4 (G5 ✗), worst fold −4.0R (G6 ✗). Conclusion: the static **tp18-only** config remains the only walk-forward-consistent improvement (+5.49R, positive 3/4 folds); throttle helps the full-period metric but not fold-consistency; the deployed v26.29 stack (veto+depth) is carried by F1–F2 luck per round 1. Standing decision unchanged: paper data adjudicates, not these folds.
+
+## [MITEMSHUB AI EA v26.30] - 2026-09-04
+
+### Added — Min-lot risk router: tiny accounts get truth, not silent ruin
+- **Why** — at $10 on V75 the broker minimum lot (0.01) risks the *full calibrated* $5.10 ≈ 51% of the account on one trade; the 20% cap then vetoes every signal, and before this version the EA did so **silently** — the operator had no way to know the instrument cannot fit the account.
+- **`RunFitRouter()` (init) + OnTick gate** — measures the chart symbol's smallest achievable stop-risk (broker min lot × calibrated tick value at the EA's real stop geometry, `InpRouterScanATR`×ATR): fits the 0.5% plan → good fit; exceeds plan but inside `InpMaxEffectiveRiskPct` → tolerated with loud per-trade risk warning; exceeds the cap → entries refused (`g_fit_ok=false`) and `ScanFitAlternatives()` prints which monitored instruments *do* fit. Auto re-checks when equity grows 50% (a grown account may unlock the symbol). Emits a `fit` telemetry event; both money paths use the v26.25 `CalibTickValue()` identity — the router must not inherit the broker's 100× tick-value lie (raw-broker math falsely "fits" V75 at $0.05/trade).
+- **Measured with live broker specs (calibrated)** — at $10 every monitored symbol is refused (cheapest honest fit: Crash 500 ≈ $2.23/min-lot trade → needs ≈ $12); V75 needs ≈ $26. At $50 all ten symbols fit (V75 = 10.2% per trade). Instrument choice cannot be defaulted any more: the EA states the minimum funding for each chart.
+- Inputs default ON (`InpFitRouter=true`, `InpRouterScanATR=1.7`), pinned in VOL75_FINAL.set; paper mode untouched.
+
+---
+
+## [MITEMSHUB AI EA v26.29] - 2026-09-04
+
+### Changed — VOL75 strategy: first positive certification (+0.85R, was −30.05R)
+- **Why** — cert200 forensics showed PB/MOM+PB's −29R was three stacked causes: (1) the cert harness booked every SL as −1.00R even after break-even had moved the stop (~23.5R accounting artifact, fixed in scripts/certify_v75.py with `--legacy-sl` preserving the old numbers exactly); (2) an asymmetric exit ladder (TP 2.4R vs −1R losses with winners PLOCK-capped ≤0.5R); (3) genuine entry-churn (26/34 losers went ≥0.25R in favor first, then rolled over).
+- **Fix (VOL75_FINAL preset)** — `InpTpMult` 2.4 → **1.8**; new input `InpPbEmaSideVeto=true` (veto the pullback leg when the close pierces EMA20 against the trend — the single biggest contributor, −30.05 → −3.17R); `InpPullbackMin` 0.30 → **0.60** (skip shallow chases). End-to-end through the full governor: **$200 → $213.24, +0.85R, WR 50%, max DD 20.2%** (n=56). At the paper scenario ($50): $50 → $52.09, −1.13R vs the old preset's $50 → $19.70.
+- **Caveat carried, not buried** — the EMA-side veto showed no separation on the independent 103-trade baseline (−0.62 vs −0.59 R/trade) and TP 1.8 partially contradicts the v26.27 OOS-validated 2.4. This stack is the paper run's candidate, not proven edge; walk-forward validation is the gate before any funded deployment. EA defaults stay OFF (`InpPbEmaSideVeto=false`) so other instruments are unaffected.
+- Also — fast-fail reflex (cut stalled trades early, re-enter) was tested and **rejected by the data** on M15 bars (−0.72R vs −0.13R on the filtered stack): BE already rescues the trades the reflex would convert into small losses. A tick-level version can be revisited once the paper ledger has data.
+- **Tick-level fast-fail follow-up: still rejected** — scripts/study_fastfail_ticks.py replayed the certified trade sets through 1.5M real broker V75 ticks (data/v75_ticks_cert_window.csv, COPY_TICKS_INFO, real-spread fills; note data/R_75_ticks.csv is a mislabeled non-V75 series, return corr 0.011 — do not reuse). Eight FF arms (giveback G0.3–0.8, stall 45–90m) vs the EA ladder, paired with bootstrap CIs: no arm significantly positive on both sets (best v2629 arm +0.085R/trade CI[−0.12,+0.29]; the one "significant" baseline-arm result +0.088 fails to replicate on v2629 and is the expected 1-in-16 multiple-comparison fluke). Tick-true ladder for v2629 = −1.30R vs −0.18R bar-sim → spread+intra-bar friction ≈ 0.02R/trade, well inside the paper engine's ×1.5 spread conservatism. WR inflation from FF arms (77% vs 48%) is an illusion — expectancy unchanged. The BE+trail ladder already captures what FF would.
+- **Walk-forward gate (same day): NOT VALIDATED** — scripts/walkforward_v75.py, 4 scored 8-day folds + tail, 7 pre-registered configs, criteria fixed before running. Totals F1–F4: v2629 +7.06R > legacy +1.36R (C1 ✓), TP-neighbor robustness ✓ (+11.7R combined), but consistency failed: positive in only 2/4 folds (C2 ✗), worst fold −4.29R (C3 ✗), and only the TP ablation beats legacy — the veto's contribution flips sign across folds (C5 ✗). Period effect dominates: every config printed its best numbers in F1 (Aug 1–9) and struggled after. The stack stays the PAPER candidate (zero-cost to test live-data), but funded promotion is now blocked on paper-first evidence, not on this backtest.
+
+## [MITEMSHUB AI EA v26.28] - 2026-09-04
+
+### Added — Real paper trading engine (the stub is gone)
+- **Why** — `InpLiveExecution=false` was a stub: it faked a ticket with a timestamp, the ticket was then zeroed by the position-search fallback, and virtual positions were **never managed or closed**. No exits, no learning, no data — useless for validating the system without a demo account.
+- **`PaperOpen/PaperManage/PaperClose`** — virtual fill at live bid/ask with a configurable conservatism multiplier (`InpPaperSpreadMult`); the position runs the **exact ManagePosition ladder** (STOP/TARGET/PLOCK/ECUT/TIME/BE/trailing + CB spike exits, same thresholds and reason strings); every close flows through `HandleTradeClose` so the governor, learning tables, cooldown, and pause logic all train on paper trades.
+- **Virtual equity** — `InpPaperEquity` (default **50.0**) drives `g_eq` in paper mode, so sizing, the 20% real-risk cap, loss-streak scaling, and compounding all validate the *funded* scenario instead of the real account balance. Paper equity persists across restarts via `MitemshubAI_paper_*.csv` (EQ/OPEN/CLOSE ledger, dangling-position restore).
+- **Instrumentation** — `paper_open`/`paper_close` telemetry events + a `PAPER:` dashboard row; the watchdog's [2]/[3] checks now work in paper mode via the `veq` field. Banner prints the paper-mode line at init.
+
+## [MITEMSHUB AI EA v26.27] - 2026-09-04
+
+### Fixed — VOL75_FINAL preset fidelity: TP 2.0 -> 2.4, BandFade disabled for the live-spread regime
+- **Why** — the 5-week certification backtest (103 trades, 17.5% WR, -62.6R) exposed two preset/source inconsistencies. The source default `InpTpMult=2.4` is OOS-validated (63-cell scalp sweep, artifacts/scalp_sweep_volatility_75_index.json, all tighter cells OOS-negative) but the preset carried 2.0. BandFade's geometry (~22-unit stops) can never pass the v26.23 spread gate against V75's ~18.5-unit live spread (18% of stop): **100% of BF entries were vetoed live**, and the 8 BF trades in the 5-week replay (stop-capped at 1.5% of price) all lost.
+- **Fix** — preset `InpTpMult=2.4`; preset `InpUseBandFade=false` on V75 (kept ON where spreads allow). Certification harness: scripts/certify_v75.py (full governor + v26.26 money layer on real bars). Watchdog for demo accounts: scripts/demo_watchdog.py.
+
 ## [MITEMSHUB AI EA v26.26] - 2026-09-03
 
 ### Added — Post-entry Risk Sentinel: the broker's fill is now audited, never trusted

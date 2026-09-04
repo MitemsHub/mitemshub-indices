@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                    CrashBoom/TickRecorder.mqh    |
+//|                                    Microstructure/TickRecorder.mqh    |
 //|  MITEMSHUB AI — ALWAYS-ON TICK RECORDER (v25.9)                  |
 //|                                                                  |
 //|  Persists every Boom/Crash tick to disk for offline              |
