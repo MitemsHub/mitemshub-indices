@@ -75,6 +75,7 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
             start=None, end=None,
             family_throttle: bool = False,
             mom_standalone: bool = False,
+            min_score_bonus: int = 0,
             pay_spread: bool = PAY_SPREAD_IN_PNL) -> dict:
     blocked_hours = blocked_hours or set()
     m15, h1 = load("m15.csv"), load("h1.csv")
@@ -268,7 +269,10 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
             funnel["paused"] += 1
             continue
 
-        min_eff = MIN_SCORE + (1 if day_pnl.get(day, 0.0) < 0 else 0)  # conviction
+        # v26.23 conviction throttle (+1 when the day is red). min_score_bonus
+        # is the cost-dilution study's registered bs17 arm ONLY (docs/
+        # V75_COST_DILUTION_STUDY.md) — a frequency lever, default 0 = inert.
+        min_eff = MIN_SCORE + min_score_bonus + (1 if day_pnl.get(day, 0.0) < 0 else 0)
         legs = []
         rng_ = b["h"] - b["l"]
         body = b["c"] - b["o"]
@@ -480,6 +484,8 @@ def main():
                     help="TP in R (2.4 = v26.27 preset)")
     ap.add_argument("--family-throttle", action="store_true",
                     help="v26.31 candidate: suspend PB-family on rolling -3R/10 window")
+    ap.add_argument("--min-score-bonus", type=int, default=0,
+                    help="registered bs17 arm only: raise MinScore bar (frequency lever)")
     ap.add_argument("--legacy-sl", action="store_true",
                     help="reproduce v26.27 accounting (SL always -1.0R even after BE)")
     ap.add_argument("--start", default="", help="window start (ISO date/time, e.g. 2026-08-09)")
@@ -493,7 +499,8 @@ def main():
                   tp_mult=args.tp_mult,
                   start=datetime.fromisoformat(args.start) if args.start else None,
                   end=datetime.fromisoformat(args.end) if args.end else None,
-                  family_throttle=args.family_throttle)
+                  family_throttle=args.family_throttle,
+                  min_score_bonus=args.min_score_bonus)
     rep["blocked_hours"] = sorted(blocks)
     path = os.path.join(DATA, f"cert_report_{args.tag}.json")
     with open(path, "w") as f:
