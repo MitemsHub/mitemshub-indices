@@ -46,12 +46,20 @@ it, but the cap is honored wherever it binds — no cap changes.
 
 ### Data window (fresh, to be pulled AT execution — no leakage)
 
-`python scripts/pull_v75_week.py --days 28 --outdir artifacts/v75_costdil/`
-— the 28 M15 days immediately preceding execution, pulled once, all six arms
+> **AMENDMENT 2026-09-05, recorded BEFORE the pull:** the original text
+> ("28 days yields 8 non-overlapping 8-day folds") was arithmetically wrong —
+> 28 days minus the ~5-day burn-in gives ~3 folds. The frozen POWER
+> requirement (≥ 8 fresh folds; "4-fold walks are noise machines") dominates
+> the window-length figure, so the window is corrected to **70 days**
+> (5-day burn-in + 8×8-day folds + remainder). No other design element
+> changes. Still one pull, all six arms on the SAME file.
+
+`python scripts/pull_v75_week.py --days 70 --outdir artifacts/v75_costdil/`
+— the ~70 M15 days immediately preceding execution, pulled once, all six arms
 run on the SAME file. Fresh data only: every prior V75 window (Feb–Sep,
 Aug-2025–Jan, the cert window) is burned for these variants by exposure to
 prior rounds' conclusions; the point of this study is an uncontaminated read.
-The 480-bar burn-in eats ~5 days; 28 days yields **8 non-overlapping 8-day
+The 480-bar burn-in eats ~5 days; 70 days yields **8 non-overlapping 8-day
 folds** (7 full + remainder fold), consistent with the minimum-viable-power
 rule (≥ 8 folds fresh; the round-3 lesson "4-fold walks are noise machines"
 is why 4 was rejected).
