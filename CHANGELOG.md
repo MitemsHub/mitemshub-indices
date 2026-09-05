@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [V75 cost-dilution study: NO-ADOPT 5/5 — geometry cannot outrun the spread] - 2026-09-05
+
+### Executed — frozen protocol (docs/V75_COST_DILUTION_STUDY.md), one pass, priors held exactly
+- **Amendment before the pull** (transparent, committed): the frozen "28 days yields 8 folds" was arithmetically wrong; the power requirement (≥8 fresh folds) dominates, window corrected to 70 days. One pull (Jun 27 → Sep 5, 6,719 bars), all six arms on the same file, cost-inclusive engine, 9×8-day folds.
+- **Result**: ws13 −5.42R/141tr, ws17 −4.27R/128tr, ws25 +1.51R/111tr, lf13 −2.65R/143tr, bs17 −4.27R/128tr vs ref −1.21R/158tr — best variant expectancy +0.014R/trade vs the frozen W4 bar of +0.08R. **All five NO-ADOPT, matching all five frozen priors; the cost-dilution thesis is dead on V75.**
+- **Reference-failure clause examined, NOT exercised**: ref printed 3/9 positive folds but worst −3.33R (inside its normal certified range) — choppy window, not a regime break; re-pulling after seeing the reference fail would be outcome-fishing.
+- **Descriptive finding**: bs17's folds are identical to ws17's — the MinScore+1 frequency lever never bound at current volatility; MinScore is not a live frequency lever on V75.
+- **Consequence**: no geometry lever exists on V75; the path forward is the paper A/B gate on the deployed config, and if a cost lever exists it is broker-side (spread tier), not geometry-side. EA and presets untouched.
+- Artifact: `artifacts/v75_costdil/costdil_results.json` (+ `walkforward` env block in the doc).
+
 ## [V100 net-edge study: NO EDGE + 2y artifact retracted] - 2026-09-05
 
 ### Executed — pre-registered study (docs/V100_NET_EDGE_STUDY.md): does the gross edge survive V100's 15x-lower spread cost? NO.

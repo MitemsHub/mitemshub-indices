@@ -121,12 +121,49 @@ primary TP A/B (arm A vs arm B) has adjudicated without contamination from
 this experiment. The deployed VOL75_FINAL and both current arms are untouched
 by this study regardless of outcome.
 
-## Execution log
+## Execution log (2026-09-05)
 
-- Pulled window: PENDING (at execution)
-- Folds: PENDING
-- Per-arm results: PENDING
-- Verdicts vs priors: PENDING
+- Pulled window: Jun 27 10:00 → Sep 5 09:30 UTC, 6,719 M15 bars (43,662 → 49,885,
+  a strong up-stretch), one pull, all arms on the same file (`artifacts/v75_costdil/`).
+- Folds: **9 × 8-day** (F01 07-02 … F09 remainder, zero trades).
+- Results (`costdil_results.json`, cost-inclusive engine, equity $200):
+
+| arm | total R | n | exp R/trade | pos folds | worst | t vs ref | verdict |
+|---|---|---|---|---|---|---|---|
+| ws13 | −5.42 | 141 | −0.038 | 3/9 | −4.50 | −0.45 | NO-ADOPT |
+| ws17 | −4.27 | 128 | −0.033 | 3/9 | −3.94 | −0.42 | NO-ADOPT |
+| ws25 | +1.51 | 111 | +0.014 | 3/9 | −2.31 | +0.52 | NO-ADOPT |
+| lf13 | −2.65 | 143 | −0.019 | 3/9 | −3.90 | −0.17 | NO-ADOPT |
+| bs17 | −4.27 | 128 | −0.033 | 3/9 | −3.94 | −0.42 | NO-ADOPT |
+| ref | −1.21 | 158 | −0.008 | 3/9 | −3.33 | — | comparator |
+
+## Verdicts vs priors — **5/5 NO-ADOPT, priors held**
+
+- ws13, ws17, lf13, ws25, bs17: all NO-ADOPT exactly as frozen. W1 was passed
+  only by ws25 (+1.51 vs −1.21R) but it failed W2 (3/9), W4 (+0.014R « +0.08R)
+  and W5 (t=+0.52). **No geometry comes close to doubling net expectancy; the
+  cost-dilution thesis is dead on V75 at every tested stop multiplier.**
+- **Reference-failure clause: examined, NOT exercised.** The clause was written
+  for a catastrophic window (worst fold far below −6R); the reference printed
+  −3.33R worst — inside its normal certified range — so this was a choppy
+  window, not a regime break. Re-pulling after seeing the reference fail would
+  be outcome-fishing, the exact behavior the freeze exists to prevent. The
+  honest read stands on this window: descriptives only, no re-roll.
+- **bs17 finding (descriptive): the frequency lever never bound.** bs17's folds
+  are IDENTICAL to ws17's (the +1 MinScore bonus filtered zero signals in this
+  window) — the frozen prior predicted W2/W5 failure for the right verdict but
+  the wrong reason (it assumed the gate would bind and flip; it simply never
+  engaged). MinScore is not a live frequency lever on V75 at current volatility.
+- **Window context:** the ref's −1.21R on a +14% up-trend window is consistent
+  with the known churn profile (runaway markets don't retrace; F31-equivalent
+  pattern from the v26.31 diagnostic). The window underlined that the deployed
+  config's fresh-window expectancy fluctuates around zero — the paper gate, not
+  backtests, decides live value.
+
+**Standing conclusion (unchanged):** V75 net edge is cost-dominated at every
+tested geometry. The path forward remains: (1) the paper A/B gate adjudicates
+the deployed config on live data; (2) if a cost lever exists, it is broker-side
+(spread tier), not geometry-side. EA and presets untouched by this study.
 
 ## Commit discipline
 
