@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Arm C paper-terminal template: built, validated, PARKED] - 2026-09-05
+
+### Added — docs/ARM_C_TEMPLATE.md: a third paper arm that can start collecting within minutes of an adoption decision
+- Clone of B's install at `%LOCALAPPDATA%\MitemshubMT5_C`, data folder `71BF6B2AB5548CFBA970FA2F38007C31`, magic **7788125** (verified unused), chart = arm A's validated paper chart (TP 1.8 placeholder), auto-login verified (`authorized '140778269' on DerivSVG-Server-03`), sync gate PASS, v26.35 banner + FIT ROUTER TOLERATED ($4.65 min-lot risk, 9.3%/trade at $50 virtual) + paper equity $50 initialized.
+- **Login gotcha recorded**: `accounts.dat` alone does not enable auto-login — the pointer lives in `config\common.ini` (`Login=`/`Server=`). Also: launch MT5 clones via PowerShell `Start-Process` (Bash `&` hangs on the child's handles), and never kill by image name (the 2026-09-04 terminal-A mishap) — kill by PID from the ExecutablePath.
+- **Parked by protocol**: the cost-dilution verdict was NO-ADOPT 5/5 and no study has ever returned VALIDATED-CANDIDATE, so C stays OFF until (a) a candidate exists and (b) the primary A/B adjudicates uncontaminated. A running C before adoption would trade an un-adopted config and mint unread data. Activation is a one-input edit + one Start-Process + a morning-status line.
+
 ## [V75 cost-dilution study: NO-ADOPT 5/5 — geometry cannot outrun the spread] - 2026-09-05
 
 ### Executed — frozen protocol (docs/V75_COST_DILUTION_STUDY.md), one pass, priors held exactly
