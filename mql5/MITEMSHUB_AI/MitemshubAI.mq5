@@ -139,7 +139,7 @@
 //|  - Entry/regime TF overrides, telemetry journal                  |
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
-#define APP_VERSION "26.34"
+#define APP_VERSION "26.35"
 
 //--- v25.2: single source of truth for the version string.
 //--- #property version, every log tag, and every order comment derive from
@@ -383,7 +383,7 @@ input int    InpGarchWarmupBars  = 50;       // Observations before the GARCH fo
 input group "=== Execution ==="
 input string InpEntryTFOverride  = "CURRENT"; // Entry timeframe: CURRENT,M1,M5,M15,M30,H1,H4,D1
 input string InpRegimeTFOverride = "CURRENT"; // Regime timeframe (default = one step above entry)
-input long   InpMagic            = 7788211;
+input long   InpMagic            = 7788075;   // v26.35 FIX: default was 7788211 (orphan magic: not in the fleet CSV, invisible to the fleet guard)
 input int    InpMaxSlippagePts   = 50;
 input int    InpWarmupBars       = 250;
 input bool   InpDrawDashboard    = true;
@@ -1559,7 +1559,7 @@ bool SelfTestFixedArrays()
    double vA=g_time_total_r[TIME_SLOTS-1];     g_time_total_r[TIME_SLOTS-1]=vA;
 
    PrintFormat(VTAG+"[SELFTEST] fixed arrays OK: strat %d/%d p=%+.1f | regime %d/%d p=%+.1f | time %d/%d p=%+.1f (walk+write proof, pre-load)",
-               STRAT_SLOTS,p1, REGIME_SLOTS,p2, TIME_SLOTS,p3);
+               STRAT_SLOTS,(int)p1, REGIME_SLOTS,(int)p2, TIME_SLOTS,(int)p3);
    return(true);
 }
 
@@ -1637,7 +1637,7 @@ double WilsonWinLB(double wins, double n)
 //--- earns reinstatement at the next review.
 bool StratEnabledOrProbe(int i)
 {
-   if(i < 0 || i >= STRAT_SLOTS) return true;
+   if(i < 0 || i >= STRAT_SLOTS) return false;   // v26.35 FIX: OOB = deny (was: silent pass, a governor bypass)
    if(g_strat_enabled[i]) return true;
    if(!InpProbeDisabled || InpProbeEveryN <= 0) return false;
    g_strat_probe_n[i]++;
@@ -2443,7 +2443,7 @@ void OpenTrade(int direction, string sig_type)
    // ACCOUNT-WIDE EXPOSURE GUARD
    int no_sl=0;
    double fleet_risk = FleetOpenRisk(no_sl);
-   double acct_eq    = AccountInfoDouble(ACCOUNT_EQUITY);
+   double acct_eq    = PaperActive() ? PaperEquity() : AccountInfoDouble(ACCOUNT_EQUITY);   // v26.35 FIX: same equity basis as sizing
    double total_cap  = acct_eq*InpMaxTotalRiskPct/100.0;
    if(fleet_risk + eff_risk > total_cap)
    {
@@ -3246,7 +3246,10 @@ void UpdateDashboard()
    {
       int nsl=0;
       double fr=FleetOpenRisk(nsl);
-      double cap=AccountInfoDouble(ACCOUNT_EQUITY)*InpMaxTotalRiskPct/100.0;
+   // v26.35 FIX: fleet guard must use the SAME equity basis as sizing (paper
+   // virtual equity in paper mode). Real-account equity here vetoed every
+   // paper entry when the live account was tiny (the v26.28 paper silence bug).
+   double cap=(PaperActive()?PaperEquity():AccountInfoDouble(ACCOUNT_EQUITY))*InpMaxTotalRiskPct/100.0;
       L[11]=StringFormat("Guard: fleet $%.2f / $%.2f cap%s",
                          fr,cap, nsl>0?StringFormat(" [%d no-SL!]",nsl):"");
    }

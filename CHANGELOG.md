@@ -6,6 +6,96 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Verification re-run + CLI hotfix] - 2026-09-05 (morning)
+
+### Fixed — certify_v75.py CLI crashed after writing every report (cosmetic, engine untouched)
+- **Bug** — `certify()` pops `r_extra`/`tp_r` from trade records before returning, but `main()`'s trade-dump print loop still read `t['r_extra']` → `KeyError` after the report file was written. Every CLI invocation of the new engine crashed at the final print step; last night's verifications imported `certify()` directly and never hit it. Fix: `t.get('r_extra', 0.0)`.
+- **Backward test re-run (legacy engine, CERT_COST_LEGACY=1)** — fresh60 window reproduces the stored `cert_report_legacy_repro_tp18.json` **bit-identically**: all metrics AND all 135 trade records equal (+13.23R / 48.1% / DD 42.2% / $114.76).
+- **Forward test re-run (cost-inclusive engine)** — all three re-baselines reproduce exactly: TP 1.8 +4.37R/114/45.6%, TP 2.4 −4.07R/68/39.7%, TP 1.8 @$100 +4.37R/114. Four reports in `artifacts/v75_replay/*_check0905.json`.
+- **EA-side deploy gate re-check** — `verify_set_inputs.py` 15/15 presets PASS on v26.35 source.
+- **Morning ops check** — both paper arms healthy (v26.35, router TOLERATED at $50 virtual, clean reconnects); PC slept ~01:14→08:24 (accepted: broker archives make any data window pullable on demand; only the paper ledger accrues and sleep nights stretch, never lose, gate time). No closed paper trades yet — gate clock starts with the first fill.
+
+## [Cost-inclusive certification engine + re-baseline] - 2026-09-05
+
+### Fixed — certify_v75.py pays the spread in PnL (fills at bid/ask, not mid)
+- **Why** — the critique replication (same day) proved the engine used the 18.5-unit spread only as a veto gate; PnL never paid it. Audit arithmetic said −4.34R on +13.23R; the full dynamic re-baseline says worse.
+- **How** — entry fills at the adverse half-spread (BUY at ask, SELL at bid), exit pays the other half via `r_extra`; SL/TP/BE/trail anchor to the real fill like the EA. `CERT_COST_LEGACY=1` restores the cost-blind engine.
+- **Integrity** — legacy mode reproduces the published fresh60 run **bit-identically** (+13.23R / 135 / 48.1%) before the new mode is trusted.
+- **Re-baseline (fresh 60d, $100)** — TP 1.8: **+4.37R / 114 trades / DD 36.7% / net expectancy +0.038R per trade (t=0.35)** — statistically indistinguishable from zero on this window. TP 2.4: **−4.07R** (negative net of costs; the A/B now adjudicates marginal-positive vs negative). Governor trajectory shifts (MOM+PB auto-disabled at −2.08R; PB carries +6.22R alone). Funding Monte-Carlo re-priced on the net stream: $31 → 10% P(profit), $50 → 39%, $100 → 92% survival, median +$3.42/60d.
+- **Consequence** — the pre-registered go-live gate (≥30 positive-expectancy arm-A paper trades + tick reconciliation PASS + watchdog) is the only authorizer; a non-positive gate outcome triggers investigation, not live deployment.
+- Artifacts: `cert_report_fresh60_tp18_net.json`, `cert_report_fresh60_tp24_net.json`, `cert_report_fresh60_tp18_net100.json`, `cert_report_legacy_repro_tp18.json`, `funding_plan.json`.
+
+## [Critique replication: Tests A/C, drift audit, cost correction] - 2026-09-05
+
+### Added — docs/CRITIQUE_REPLICATION.md + scripts/critique_replication.py: external critique's demands executed under frozen protocol
+- **Why** — an external critique challenged the project's claims (Band Fade contradiction, small-sample "certification", missing costs, EMA regime as noise). Response: verify its factual claims against artifacts, then run its Tests A–C on our own data under a pre-registered protocol (`frozen before execution`, one pass).
+- **Test A (variance ratios, 8s→256h + supplementary 0.5h/1h/2h/4h)** — all inside surrogate null bands (2.46M ticks + 19 months of H1): no linear trend/mean-revert structure at any horizon. Generator confirmed memoryless at every tested scale.
+- **Test C (regime-conditional forward drift, exact EA mirror)** — the EMA regime axis carries NO directional information; sign is weakly anti-continuation (BULLISH label → negative forward drift, consistent 8/8 across eras/horizons, strongest fresh-era episode t=−2.57). Vol terciles: nothing. The regime axis's remaining legitimate role is volatility-aware gating/sizing, never direction.
+- **Cost flaw CONFIRMED and quantified** — the cert engine never subtracted the 18.5-unit spread from PnL (veto gate only). Corrected: +13.23R → **+8.89R net** (0.098R→0.066R/trade). Engine fix queued so all future certs are cost-inclusive.
+- **Small-sample honesty applied to ourselves** — fresh60 Wilson 95% LB = 39.9% win rate, per-trade t=0.96: the honest claim is "consistent with zero-to-small positive expectancy", and the ≥30-trade live paper gate (not backtests) decides live value. Drift audit: 19-month −78% downtrend then a near-doubling Feb→Jul 2026 — long-run drift real but sign-unstable; hourly-grain drift unpredictable (t=−1.62); drift capture would be a position strategy, not M15.
+- Artifacts: `artifacts/critique_replication/results.json`, `vr_long_horizon.json`.
+- **Queued fix**: spread-cost-inclusive fills in certify_v75.py (all future certifications cost-inclusive, flagship numbers re-baselined once).
+
+## [Drift-vs-Σ tracker: CLOSED (1/3) — no EA integration] - 2026-09-05
+
+### Registered → executed in one pass (docs/DRIFT_SIGMA_TRACKER.md, artifacts/drift_sigma/)
+- **Question**: can a causal tick-stream tracker (EWMA drift µ₂ / EWMA σ₂ over trailing 1800 steps) estimate the generator controller's state well enough to feed the EA a regime-confidence input?
+- **Tick lake extended**: July gap filled (+1,165,557 quotes → 2.46M ticks, Jun 7 → Sep 2).
+- **K1 predictiveness — FAIL, sign inverted**: quintiles flat, daily spread t = −1.90 (wrong sign), Spearman −0.056 → the EWMA drift estimate **mean-reverts** (hours that trended hard give it back). No positive predictive power.
+- **K2 economic gating — FAIL per frozen bar**: gating kept +9.73R/72 vs blocked +3.50R/63 (D = +6.23R, better per-trade expectancy) but t = 0.57, worst fold −5.83R — two of three requirements missed. Base arm reproduced the published +13.23R/135 exactly (integrity check held).
+- **K3 vol forecast — PASS decisively**: tick-EWMA σ beat M15 ATR(14) on all 716 hours (RMSE 7.7× lower, MAE 11.9× lower; caveat: shared-scale advantage vs a range-based proxy).
+- **Verdict: CLOSED (1/3)** — no EA change. Only legitimate open thread: K1's inversion suggests a *fade-the-drift* mechanism, re-registrable only as a new protocol. The M15 regime layer remains the validated intelligence.
+
+## [Generator fingerprint study: the V75 machine decoded] - 2026-09-04 (night)
+
+### Added — `scripts/generator_fingerprint.py` + docs/GENERATOR_FINGERPRINT.md: how the tick generator actually works
+- **Data**: 1,295,215 real ticks over 30 continuous days (broker archive), cadence cross-validated against broker-history probes (the feed itself is 0.5 Hz — one tick per 2.000 s, zero jitter: a deterministic step machine).
+- **Findings (T1–T7)**: Gaussian steps (skew 0.00, kurtosis 0.01); up/down 0.4998; tick-return ACF max |ρ|=0.0025 over 100 lags (no direction memory); run lengths match a memoryless coin to 4 decimals; variance ratio ≈ 1.00 at 1s–1m and 0.97–0.98 at 15m–1h (pure random walk); no volatility clustering at tick scale; hour-of-day vol flat to 1.8% (per-step vol targeting confirmed).
+- **Conclusions**: "working ahead of the generator" at tick level is mathematically impossible — each step carries zero information about the next, so tick-momentum, spike-runs, and tick-mean-reversion are coin-flip noise by construction (consistent with the earlier tick-fade rejection). The only evolving signal is slow drift-vs-vol — exactly what the M15/H1 regime layer and GARCH already estimate. **The M15 operating point is the correct one, not a compromise.** The 2s clock is an execution/simulation gift (event-exact fills, reconciler ground truth).
+- No EA config changes; research direction settled: regime intelligence at bar scale, not tick-speed reflexes.
+
+## [v26.35 — Full pre-live code audit: 4 bugs fixed] - 2026-09-04 (night)
+
+### Fixed — findings from the line-by-line audit (docs/FULL_EA_AUDIT_v2635.md)
+- **CRITICAL (paper)**: the ACCOUNT GUARD in `OpenTrade` compared fleet risk against **real account equity** while sizing used paper virtual equity — with $0.57 real vs $50 paper, every paper entry was vetoed (`fleet $0 + $6.25 > $0.086 cap`). Root cause of the weeks-long v26.28-era paper silence. Guard now uses the same equity basis as sizing (`PaperActive() ? PaperEquity() : AccountEquity()`). Consequence: paper A/B statistics genuinely start from tonight; pre-fix paper data is zero by construction.
+- **HIGH (live)**: `StratEnabledOrProbe(i)` returned `true` on out-of-range index — a latent governor bypass on any future slot-index slip (the v26.34 VB-BURST `8` bug would have sailed through). Now fail-closed (OOB = deny).
+- **MEDIUM (live)**: default `InpMagic` was `7788211` — an orphan not in the fleet CSV, invisible to the fleet guard and close filters on a default-input attach. Now `7788075`.
+- **COSMETIC**: self-test banner had 9 format specifiers / 6 args (doubles consumed `%d` slots → garbage `regime 1250694476/5`); counters cast to int. Dashboard fleet-cap display got the same equity-basis fix.
+- **Verified clean**: sizing chain = certified model; server-side SL/TP always attached; stops-level validity + entry-abort guards; exit ladder = certified ladder; close detection triple-redundant with dedupe; state files symbol-tagged and terminal-local; all 15 presets PASS; zero CB remnants in live paths.
+- **Deployed**: MetaEditor 0 errors / 0 warnings, `.ex5` synced to 13 instances, both paper terminals auto-restored on v26.35 (banner, `TOLERATED` router at $6.31/12.6%, paper $50) — paper A/B continues on the fixed engine.
+
+## [MOM-standalone duel: REJECT] - 2026-09-04 (night)
+
+### Registered, executed, closed — lone-momentum trading is noise-chasing (docs/MOM_STANDALONE_DUEL.md)
+- **Trigger**: the 2026-09-04 19:15–21:15 V75 waterfall (1,417 pts) that the EA skipped via the lone-momentum demotion — hindsight showed 2 would-be SELL winners. Treated as a hindsight teaser and pre-registered instead of acted on.
+- **Engine**: `certify_v75.py` gained a surgical `mom_standalone` toggle (default off — verified to reproduce the published fresh60 run to the trade: +13.23R/135/48.1%).
+- **Window (a), fresh 60 days, 8 paired folds**: demote **+13.23R/135** vs standalone **+10.01R/167** → D = −3.22R ✓, t = −1.70 ✓, worse in 6/8 folds (one −11.55R blowup fold) → **REJECT**. The standalone arm even triggered governor auto-disable (MOM, MOM+PB) and *still* finished worse while being rescued.
+- **Window (b), 19 months (z-gate data), 28 paired folds**: full-window totals confounded by stateful-governor divergence (auto-disable killed PB in the demote arm: 69 vs 719 trades) — clean fold deltas: +2.17R/fold, t = +1.15, neither REJECT nor ADOPT → **NO-ADOPT** for that era (standalone still net-negative overall, −23R).
+- **Methodology lesson recorded**: in long continuous sims the stateful governor (auto-disable, loss-scaling) diverges between arms — full-window totals stop being a pure signal-rule comparison; fold-based paired deltas with state reset are the honest statistic (all future duels).
+- **Decision**: `InpMomentumStandalone` stays `false`; deployed preset and paper A/B untouched.
+
+## [Funding-growth plan tool] - 2026-09-04 (evening)
+
+### Added — `scripts/funding_plan.py`: balance simulation + withdrawal-schedule comparison
+- Replays the certified 60-day TP 1.8 trade sequence (135 trades, `sd`/`r` pairs) through the exact EA money layer (`v75_money.py`: min-lot clamp, 0.75^loss scaling, 20% effective-risk cap, compounding) at $31/$50/$100/$200 starting equity.
+- **Monte Carlo**: 1,000 shuffles of the trade order (geometry kept paired with its own outcome); measures P(profit), P(ever min-lot-stuck), terminal-equity percentiles.
+- **Withdrawal policies simulated inside the walk** (later trades sized on post-withdrawal equity): compound / weekly bank-above-$100-buffer / weekly bank-half-of-profit.
+- **Findings**: $31 viable in name only (93% stuck, 25% profitable, median $22); $50 coin-flip (59% stuck, p05 ≈ $19); **$100 = safe floor (97.6% profitable, path-independent +$64.76, veto rare and recovering)**; $200 adds only veto headroom. Recommended schedule: weekly withdrawal of everything above a $100 working buffer (banked $92 in 60 days at $100 start, min equity $72).
+- Outputs: `artifacts/v75_replay/funding_plan.{json,md}` (md carries the frozen recommendation). `docs/LIVE_READINESS.md` funding section updated to cite it.
+
+## [Paper A/B live + LIVE readiness package] - 2026-09-04 (evening)
+
+### Added — both paper arms running (operator steps 2+3 completed autonomously)
+- **Arm B terminal created without user action**: cloned the MT5 install to `%LOCALAPPDATA%\MitemshubMT5_B` (non-portable first launch generated data folder `49E0383C…`), copied login/`accounts.dat`/`servers.dat` from terminal A, seeded a UTF-16 `chart01.chr` cloned from A's validated profile with `InpTpMult=2.4` + `InpMagic=7788100`, ran `sync-mt5.ps1` (13 instances), launched — EA auto-attached with the v26.34 banner, paper mode, router TOLERATED, authorized on the same demo account.
+- **chart04 landmine resolved** by MT5's own exit-flush: the Default profile now holds only chart01 (EA, validated config) + one plain chart; detacher verified nothing to strip.
+- One controlled mishap during B's setup: the name-based process fallback killed terminal A alongside B; A was relaunched immediately and auto-restored the validated config (v26.34 banner, TOLERATED router). No state lost (paper mode).
+
+### Added — live-trading readiness (`docs/LIVE_READINESS.md`)
+- **`MitemshubAI_VOL75_LIVE.set`** — identical to `VOL75_FINAL` except `InpLiveExecution=true` (TP 1.8, magic 7788075); `verify_set_inputs.py` PASS.
+- **Broker-exact funding math** (`order_calc_profit`-based, cross-checked against the EA's FIT ROUTER): V75 min-lot stop-risk $6.19 ⇒ **$31 equity floor** (20% cap); $10 accounts cannot trade V75 on this broker (lot floor, not strategy); $2,800 unlocks V100 (uncertified).
+- **Fresh 60-day certification** (Jul 7 → Sep 4): TP 1.8 **+13.23R, $50 → $114.76** (135 trades, 48.1% WR, 42.2% max DD) vs TP 2.4 +4.60R — third consecutive fresh window with TP 1.8 ahead.
+- **Pre-registered GO-LIVE GATE**: A/B expectancy positive at ≥30 trades + tick reconciliation PASS + watchdog CERTIFIED; documented accelerated option (20 trades + recon PASS) and the live-deploy procedure.
+
 ## [v26.34 — Crash/Boom engine physically removed] - 2026-09-04
 
 ### Removed — the dormant CB engine is gone from the source tree (user request)
@@ -93,8 +183,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **[2] Watchdog** — reuses demo_watchdog's audit()/paper_audit() verbatim (same checks, same verdict).
 - **[3] Preset drift, three layers** — (a) chart-attached inputs (parsed from each terminal's UTF-16 `.chr` profile: the ground truth for what the EA would run with after a reload) vs the magic-matched deployed preset — catches the "preset updated, EA never reloaded" failure mode; (b) repo preset vs deployed Common\Presets copy; (c) terminal .ex5 mtime vs repo source. Also flags banner-version staleness, duplicate magics across charts, and V75 charts with InpLiveExecution=true. Read-only; writes weekly_report_YYYYMMDD.json.
 - **First live run caught two real findings**: chart01 runs v26.28-era inputs (InpTpMult 2.4 vs deployed 1.8 — the never-done reload, now machine-verified), and chart04 is a second V75 chart with **InpLiveExecution=true and the same magic 7788075** — on demo it contaminates the experiment (double signals, one magic); migrated to a funded terminal as-is it would trade real money on unvalidated settings. Both flagged with explicit NEXT ACTIONS.
-
-## [Paper↔tick reconciliation tooling] - 2026-09-04
 
 ### Added — scripts/reconcile_paper_ticks.py: verifies the live paper engine against the tick-study baseline the first week data exists
 - **Purpose** — the fast-fail tick study validated the EA exit ladder offline against 1.5M real broker ticks; this tool checks the LIVE paper engine still matches that reality and catches drift early. Per closed ledger trade, re-simulates the identical ladder (constants imported from study_fastfail_ticks — single source of truth) through real broker ticks from the ledger's own fill, and measures: ladder delta (ledger R − tick R), fill shift vs the fair tick fill (quantifies the InpPaperSpreadMult conservatism), exit-reason agreement (STOP→SL / TARGET→TP), and exit-price sanity (≤3×median spread).

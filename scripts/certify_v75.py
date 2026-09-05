@@ -46,6 +46,14 @@ SPREAD_V75 = float(os.environ.get("CERT_SPREAD", "18.5"))
                             # live measured spread, index units (env: CERT_SPREAD)
 SPREAD_GATE_FRAC = float(os.environ.get("CERT_SPREAD_GATE_FRAC", "0.18"))
                             # InpMaxSpreadATRFrac (env: CERT_SPREAD_GATE_FRAC)
+# ---- v26.36 cost model: fills pay the spread (default ON) ------------------
+# Bar prices are broker mids; a BUY fills at ask (mid + half), a SELL at bid
+# (mid - half); the exit pays the other half, so every round trip costs
+# exactly SPREAD_V75 index units. Stop/TP geometry anchors to the REAL fill
+# (same distances, same R multiples) like the EA's server-side stops.
+# CERT_COST_LEGACY=1 reproduces the pre-2026-09-05 cost-blind engine.
+PAY_SPREAD_IN_PNL = os.environ.get("CERT_COST_LEGACY", "0") != "1"
+HALF_SPREAD = 0.5 * SPREAD_V75
 USD_PER_UNIT_PER_LOT = float(os.environ.get("CERT_USD_PER_UNIT_PER_LOT", "1.009"))
 MIN_LOT = float(os.environ.get("CERT_MIN_LOT", "0.01"))
 LOT_STEP = float(os.environ.get("CERT_LOT_STEP", "0.01"))
@@ -65,7 +73,9 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
             pb_max: float | None = None, legacy_sl: bool = False,
             tp_mult: float = TP_MULT_CERT,
             start=None, end=None,
-            family_throttle: bool = False) -> dict:
+            family_throttle: bool = False,
+            mom_standalone: bool = False,
+            pay_spread: bool = PAY_SPREAD_IN_PNL) -> dict:
     blocked_hours = blocked_hours or set()
     m15, h1 = load("m15.csv"), load("h1.csv")
     closes = [b["c"] for b in m15]
@@ -316,10 +326,13 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
         sell = sum(s for _, d, s in legs if d < 0)
         nbuy = sum(1 for _, d, _ in legs if d > 0)
         nsell = sum(1 for _, d, _ in legs if d < 0)
-        if nbuy == 1 and any(n == "MOM" and d > 0 for n, d, _ in legs):
-            buy, nbuy = 0, 0
-        if nsell == 1 and any(n == "MOM" and d < 0 for n, d, _ in legs):
-            sell, nsell = 0, 0
+        # v26.23 lone-momentum demotion (deployed rule). mom_standalone=True
+        # (InpMomentumStandalone) disables it — registered duel arm only.
+        if not mom_standalone:
+            if nbuy == 1 and any(n == "MOM" and d > 0 for n, d, _ in legs):
+                buy, nbuy = 0, 0
+            if nsell == 1 and any(n == "MOM" and d < 0 for n, d, _ in legs):
+                sell, nsell = 0, 0
         reg_bonus = 2 if reg == BULL else (-2 if reg == BEAR else 0)
         buy += max(reg_bonus, 0) * (1 if any(d > 0 for _, d, _ in legs) else 0)
         sell += max(-reg_bonus, 0) * (1 if any(d < 0 for _, d, _ in legs) else 0)
@@ -353,6 +366,8 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
         # ---- stop geometry ----------------------------------------------------
         nb = m15[i + 1]
         entry = nb["o"]
+        if pay_spread:
+            entry = entry + HALF_SPREAD * ddir   # BUY fills at ask, SELL at bid
         if bf_geo_ok and any(n == "BF" for n, d, _ in legs if d == ddir):
             sd = bf_stop_f * entry
             td = bf_tgt_f * entry
@@ -401,13 +416,14 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
                        "sd": round(sd, 2), "reg": RNAME[reg], "z": round(z_dev, 2),
                        "exp": round(exp_ratio, 3), "atr_pct": round(_pct, 1),
                        "r": 0.0, "exit": "OPEN",
-                       "exit_t": "", "r_extra": 0.0, "win": False,
+                       "exit_t": "", "r_extra": (-SPREAD_V75 / sd) if pay_spread else 0.0,
+                       "win": False,
                        "vol": vol, "eff_risk": round(eff_risk, 2),
                        "risk_pct": round(eff_risk / eq * 100, 1)})
         trades[-1]["tp_r"] = td / sd
         pos = {"entry_i": i + 1, "entry": entry, "sd": sd, "dir": ddir,
                "sl": entry - sd * ddir, "tp": entry + td * ddir,
-               "hw": 0.0, "tp_r": td / sd, "r_extra": 0.0}
+               "hw": 0.0, "tp_r": td / sd, "r_extra": trades[-1]["r_extra"]}
 
     if pos:
         b = m15[i_hi]   # mark at the window's last evaluated bar, not the file end
@@ -488,7 +504,7 @@ def main():
     for t in rep["trades"]:
         print(f"{t['t']} {t['dir']:<4} {t['strat']:<8} entry={t['entry']:>9.2f} sd={t['sd']:>6.1f} "
               f"vol={t['vol']:.2f} risk={t['risk_pct']:>4.1f}% {t['exit']:<9} R={t['r']:+.2f} "
-              f"$={t['eff_risk']*t['r']:+7.2f}")
+              f"Rg={t['r']-t.get('r_extra',0.0):+.2f} $={t['eff_risk']*t['r']:+7.2f}")
 
 
 if __name__ == "__main__":
