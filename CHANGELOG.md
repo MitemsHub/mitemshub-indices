@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Operating summary: every question closed by protocol, the gate tree pre-declared] - 2026-09-05
+
+### Added — docs/OPERATING_SUMMARY.md, the single reference for what is and isn't open
+- **10 closed questions** with verdicts (engine honesty, generator memorylessness, regime axis, MOM duel, V100, cost-dilution, spread tiers, EA audit, data path, arm C) — each with its frozen protocol + artifact + commit, and the rule that nothing reopens by vibes.
+- **The one open gate**: TJ1 paper A/B (≥30 arm-A trades, positive expectancy, paired |t|≥1.0) + TJ2 tick reconciliation (self-arms 7d) + TJ3 watchdog — with the current status (clock not yet started, 0/30) and the pre-registered accelerated path (20 trades + 5d reconciliation).
+- **Decision tree for every gate outcome**, pre-declared: GO LIVE (all three green) · NO GO if any leg fails with the fix-first order · INCONCLUSIVE → keep collecting with 50/75-trade boarding · arm-A negative → re-baseline + protocol-ordered investigation, collection continues · TP-2.4-wins branch (re-certify on the 210-day window before any preset change, then arm-C paper test) · and the full arm-C candidate branch (new pre-registered rule, activation ≈1 min, teardown on loss).
+- Non-negotiables restated (live = A/chart01/7788075 only; no hand-tuning; funding floors; spec-stamped artifacts; data is the only judge) + the daily cadence.
+
 ## [V75 spread-tier study: the broker-side lever is dead on Deriv synthetics] - 2026-09-05
 
 ### Executed — frozen protocol (docs/V75_SPREAD_TIER_STUDY.md, committed `ded5e3a` before any measurement)
