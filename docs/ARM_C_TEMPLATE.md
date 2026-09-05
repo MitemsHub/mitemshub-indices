@@ -11,6 +11,7 @@
 | Credentials | auto-login verified: `authorized '140778269' on DerivSVG-Server-03` (the pointer lives in `config\common.ini` `Login=`/`Server=` — copying `accounts.dat` alone is NOT enough; that cost an hour on 2026-09-05) |
 | Build & presets | synced by `sync-mt5.ps1` (75 files, build gate PASS; auto-discovers the folder) |
 | Validation launch | 2026-09-05 11:10 UTC: v26.35 banner, FIT ROUTER TOLERATED ($4.65 min-lot risk = 9.3%/trade at $50 virtual), self-check clean, paper equity $50.00 initialized, state + telemetry written |
+| **Activation rehearsal** | 2026-09-05 12:22:46 local, supervised 10-minute run: launch → `authorized '140778269'` **T+6s** → full v26.35 banner + PAPER MODE + FIT ROUTER TOLERATED ($4.59, live spread varies) **T+8s** → EA evaluated bars (first `sig`/SKIP event in telemetry) → parked at T+23min by PID-from-ExecutablePath; A/B untouched and wrote telemetry at the next M15 close. Procedure worked verbatim; time-to-operational ≈ 1 minute. |
 | Current state | **PARKED — terminal OFF, 2 terminals running (A, B)** |
 
 ## The standing rule (from docs/V75_COST_DILUTION_STUDY.md)
@@ -44,6 +45,12 @@ mints data nobody reads — parked is the correct default state.
 - `scripts/paper_pipeline.discover_arm_dirs()` discovers A/B by magic; the
   candidate's adjudication must be a NEW pre-registered rule (candidate vs
   arm A reference), written before its 30th trade — not an A/B rerun.
+
+## Rehearsal learnings (2026-09-05)
+
+- **Telemetry cadence is event-driven, not periodic**: a fresh arm writes a burst at launch (banner + first `sig` evaluation, usually a SKIP) and then only at EA events. A 10–30 min quiet window after launch is **normal** — healthy arm B showed the identical cadence (quiet 12:15→12:45 while C ran). The 2h watchdog staleness threshold stands; do not misread quiet as dead. In quiet periods the state CSV's `DAILY` row (rewritten daily) is the better liveness check.
+- **MT5 config files are UTF-16** (`config/common.ini`, `logs/*.log`, chart profiles): POSIX `grep` silently reads nothing. Read them with `io.open(..., encoding="utf-16")` — this is why the `Login=` pointer appeared missing until decoded.
+- Launch/kill discipline re-validated: `Start-Process` never hangs, kill only by PID resolved from `ExecutablePath -like '*MitemshubMT5_C*'`.
 
 ## Teardown (if the candidate is rejected)
 

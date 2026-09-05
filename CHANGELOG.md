@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Arm C activation rehearsal: minutes-scale promise PROVEN] - 2026-09-05
+
+### Executed — supervised 10-minute run of docs/ARM_C_TEMPLATE.md, verbatim
+- **T0 12:22:46** → `authorized '140778269' on DerivSVG-Server-03` at **T+6s** → full v26.35 banner (SELFTEST OK, GARCH ready, 200-bar cold-start catch-up, `PAPER MODE: virtual equity $50.00`, tick value calibrated, `FIT ROUTER ... TOLERATED` $4.59 at live spread) at **T+8s**. Pre-flight had verified the `common.ini` login pointer (UTF-16 — plain grep reads nothing), chart magic 7788125, paper mode, and the fleet (2 running: A, B; C off).
+- **Steady state**: EA evaluated real bars (first `sig`/SKIP telemetry event), state CSV fresh; telemetry quiet-window behavior matched healthy arm B exactly (event-driven cadence — recorded in the template so nobody misreads quiet as dead).
+- **Parked** at T+23min — about 1 minute of procedure, the rest deliberate observation — via PID-from-ExecutablePath kill; A/B untouched, both wrote telemetry at the next M15 close. Time-to-operational ≈ **1 minute**; the doc's "minutes, not hours" promise is now measured, not assumed.
+
 ## [Spec-integrity guard: cross-instrument cert runs must STATE their specs] - 2026-09-05
 
 ### Added — the V100 0.01-lot lesson, made mechanical
