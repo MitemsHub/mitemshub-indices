@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [V75 spread-tier study: the broker-side lever is dead on Deriv synthetics] - 2026-09-05
+
+### Executed — frozen protocol (docs/V75_SPREAD_TIER_STUDY.md, committed `ded5e3a` before any measurement)
+- **Measurement, 2,460,772 ticks (Jul 7–Sep 2, both lake files)**: V75 effective spread is a step grid (levels ~16.0/17.0/17.9/18.5) **flat at 16.96 median for every hour of day** — no hour-gate exists to exploit. The live 18.5 calibration sits at the lake's p99: the standard account's spread IS the raw model spread (16.96 = −8.3% vs 18.5, under the 25% materiality threshold). Deriv's Zero Spread MT5 account cannot price below the generator's raw spread on synthetics.
+- **Net edge per tier (fresh60, deployed tp 1.8; integrity gate: t185 ledger bit-identical to stored)**: raw 16.96 → +0.048R/t, 14 → +0.054R/t, 9.25/4.6 → +0.031/+0.028R/t (non-monotonic — governor re-routing noise at 120 trades), spread 0 → +0.162R/t BUT that ceiling is a different strategy (band-fade reopens, 9 trades +11.1R) and structurally unpurchasable.
+- **Robustness (70d, 9 folds)**: near-linear cost response, **+0.0023R/t per unit of spread** (matches mean(1/sd) exactly) — the deliverable pricing slope for any future venue quote. Even the zero-spread ceiling fails fold consistency (3/9).
+- **Verdict**: NO tier clears the frozen +0.08R/t bar on either window; P1 and P2 both held. Hour-gate idea dead by measurement; broker-side lever dead on this platform; no EA change, no arm-C candidate. Cost structure remains the binding constraint — growth depends on the paper gate's verdict, not on hunting a cheaper toll.
+
 ## [Arm C activation rehearsal: minutes-scale promise PROVEN] - 2026-09-05
 
 ### Executed — supervised 10-minute run of docs/ARM_C_TEMPLATE.md, verbatim

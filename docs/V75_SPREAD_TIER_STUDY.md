@@ -79,10 +79,95 @@ trades incl. 2026-09-04). Comparator = stored `cert_report_net_tp18_check0905.js
   a genuine surprise and arm-C material; if P1 is wrong (lake ≪ 18.5) then P2
   becomes materially more likely to be wrong too.
 
-## Artifacts
+## RESULTS — adjudicated 2026-09-05, frozen criteria applied after all runs
 
-- `scripts/v75_spread_tiers.py` (measurement + engine harness, spec-stamped).
-- `artifacts/v75_replay/cert_report_spread_tier_<tier>.json` (fresh60, each tier).
-- `artifacts/v75_costdil/cert_report_spread_tier_<tier>_f<fold>.json` — robustness
-  fold runs (WF harness repeated per tier, `WF_OUT` per tier).
-- Results + verdicts written into this doc; changelog entry; committed.
+### 1. Measurement: V75 spread vs hour-of-day (2,460,772 ticks, Jul 7 – Sep 2)
+
+| stat | value |
+|---|---|
+| overall mean / median | 16.58 / **16.96** index units |
+| p90 / p99 | 17.89 / 18.53 |
+| hour-of-day range (median) | **16.96 at every hour** (mean wiggles 16.55–16.63) |
+
+- **No hour effect exists.** The spread is a coarse step grid (~0.95-unit levels:
+  16.01, 16.96, 17.89, 18.53) constant 24/7. An hour-gate strategy study would
+  be chasing noise — closed by measurement, not opinion.
+- The live-account calibration (18.5) sits at the lake's p99 (18.53): the lake
+  **is** the tier. Raw median 16.96 vs 18.5 = **−8.3%** — under the frozen 25%
+  materiality threshold, so **the broker-side lever is DEAD on Deriv MT5
+  synthetics**: the spread is the generator's pricing model, not account markup,
+  and the zero-spread account cannot price below raw. P1 CONFIRMED.
+
+### 2. Net edge per tier — fresh60 (certified window, deployed tp 1.8, net engine)
+
+Integrity gate: t185 reproduced the stored `net_tp18_check0905` ledger
+**bit-identically** before any tier read (+4.37R/114t).
+
+| tier | spread | n | total R | exp R/t | t (trade var) | max DD |
+|---|---|---|---|---|---|---|
+| t185 (baseline) | 18.50 | 114 | +4.37 | **+0.038** | +0.35 | 52.9% |
+| t_raw (zero-spread proxy) | 16.96 | 128 | +6.08 | **+0.048** | +0.46 | 44.6% |
+| t14 | 14.00 | 128 | +6.85 | **+0.054** | +0.52 | 44.2% |
+| t9 | 9.25 | 121 | +3.77 | **+0.031** | +0.30 | 53.1% |
+| t5 | 4.60 | 119 | +3.38 | **+0.028** | +0.27 | 49.8% |
+| t0c (spread=0 + ~0 commission) | 0.00 | 133 | +21.53 | **+0.162** | +1.13 | 38.1% |
+
+- Realistic tiers (raw, 14) improve expectancy +0.038 → +0.048/+0.054 — **below
+  the +0.08R/t materiality bar**. P2 CONFIRMED on fresh60.
+- **Non-monotonicity (t9/t5 < baseline) is real but understood**: cost cuts reroute
+  the governor (pause/auto-disable trajectories shift: paused 812→1,088,
+  auto-disable 44→23), so at 60–130 trades the response is noisy, not linear.
+- **The t0c ceiling is NOT the same engine cheaper**: at spread 0 the
+  band-fade leg reopens (BF 9 trades, +11.1R — unviable at real spread, its
+  ~5–15 unit stops would pay a 200–400% toll). Even so it is t=1.13 on 133
+  trades and, structurally, *unpurchasable*: raw spread is 16.96, not 0, and
+  the zero-spread account cannot go below raw.
+
+### 3. Robustness — 70-day cost-dilution window, 9 folds, tp18 (the clean read)
+
+| tier | total R | pos folds | worst fold | t (fold var) |
+|---|---|---|---|---|
+| t185 | −1.21 | 3/9 | −3.33 | −0.12 |
+| t_raw | +0.76 | 3/9 | −3.28 | +0.07 |
+| t14 | +1.74 | 3/9 | −3.18 | +0.16 |
+| t9 | +3.24 | 3/9 | −3.02 | +0.27 |
+| t5 | +3.78 | 3/9 | −2.87 | +0.32 |
+| t0c | +16.27 | 3/9 | −2.72 | +0.71 |
+
+- **Near-linear cost response here** (opposite of fresh60's noise): ≈ +0.36R
+  total per 1-unit spread cut over ~158 trades ≈ **+0.0023R/t per unit** —
+  matching mean(1/sd) theory within rounding. This is the deliverable slope:
+  any future venue quote (other broker, negotiated tier) is priced by
+  `Δ exp ≈ 0.0022 × Δspread` in seconds.
+- **Even the zero-spread ceiling fails the frozen materiality bar**: 3/9
+  positive folds (needs ≥50%). On both windows, **no tier changes the picture**.
+
+### 4. Final verdicts (frozen criteria, read-only)
+
+1. **Lever verdict: DEAD on Deriv MT5 synthetics.** Raw ≈ standard (medians
+   16.96 vs 18.5, −8.3% < 25%). The zero-spread account is a forex/CFD
+   instrument; on synthetics the spread is the pricing model itself.
+2. **Materiality: NO tier clears +0.08R/t + fold consistency** on either
+   window. P1 and P2 both CONFIRMED as frozen.
+3. **Genuinely useful outputs**: (a) the hour-flatness closes the time-gate
+   idea forever; (b) the sensitivity slope **+0.0022R/t per unit** lets any
+   future venue be priced in seconds; (c) gross edge ≈ +0.071R/t on fresh60
+   (net +0.038 + realized cost 0.032) — the W4 bar is gated by cost roughly
+   half, and by the edge's smallness the other half.
+4. **Consequences**: no EA change, no arm-C candidate, paper gate unaffected.
+   The two real levers remain: (i) wait for the paper A/B verdict on the
+   deployed config; (ii) if any venue shows a materially lower V75 spread
+   quote in future, price it with the slope — the bar is ~−25 units to clear
+   +0.08R/t, which no synthetic venue plausibly offers. Cost structure is the
+   binding constraint; the account grows or dies on expectancy, not on
+   hunting a cheaper toll.
+
+### Artifacts
+
+- Measurement: inline (2,460,772-tick scan, both lake files; second file uses
+  `ts` in seconds + `mid`, first uses `epoch_ms`).
+- `artifacts/v75_replay/cert_report_spread_tier_<tier>.json` (fresh60, each tier,
+  spec-stamped with geometry + spread).
+- `artifacts/v75_costdil/wf_tier_<tier>.json` (70d, 9 folds, tp18, spec-stamped
+  + config registry).
+- Fragments: integrity gate t185 == stored net artifact bit-identical (ledger).
