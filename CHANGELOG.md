@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Spec-integrity guard: cross-instrument cert runs must STATE their specs] - 2026-09-05
+
+### Added — the V100 0.01-lot lesson, made mechanical
+- `certify_v75.py`: `assert_spec_integrity()` runs inside `certify()` — if `CERT_DATA_DIR` is set, all four spec variables (`CERT_SPREAD`, `CERT_USD_PER_UNIT_PER_LOT`, `CERT_MIN_LOT`, `CERT_LOT_STEP`) must be explicit or the run **exits 1 before any data pull**, with the correct V75 truth printed in the error. Default V75 runs (no `CERT_DATA_DIR`) are exempt: the defaults ARE the V75 truth. Every caller (walkforward, study scripts) is covered transitively.
+- **Spec stamp in every artifact**: `spec_block()` — data_dir, spread, usd/unit/lot, min_lot, lot_step, cost model, geometry (`tp_mult`/`stop_mult`/`min_score_bonus`), which env vars were explicit, guard version — is written into every `cert_report_*.json` and every walk-forward artifact (which also stamps its full config registry). An artifact whose sizing implies a lot grid the instrument cannot trade is now self-identifying as invalid.
+- `z_gate_phaseA.py` declares its specs explicitly (its data IS V75, pulled via `pull_v75_week`) — custom-dir runs state them like anyone else.
+
+### Verified — four-point battery, all green
+- **T2 loud-fail**: non-V75 dir without specs → `SPEC-INTEGRITY FAIL`, exit 1, no artifact written. **T2b**: z_gate's import satisfies the guard via module-level setdefaults. **T3**: explicit specs run clean and the stamp reflects them.
+- **T1 bit-identity**: legacy fresh60 re-run at `--tp-mult 1.8` equals the stored 09:01 artifact on all 135 trades and every metric. Two footguns surfaced and were resolved honestly: (1) the CLI's default is `TP_MULT_CERT = 2.4` — omitting `--tp-mult 1.8` silently certifies the wrong geometry (now visible in the spec stamp's `geometry` block); (2) the stored artifact's `funnel.paused` is 947 vs 948 in every re-run — **including from a pristine worktree of the committing SHA**. A gap-aware reconstruction from the trade ledger independently computes 948, so the ledger-relevant contract reproduces exactly and the stored 947 is attributed to the transient pre-commit working tree (runs 08:58–09:01, commit 09:03). No engine issue.
+
 ## [Arm C paper-terminal template: built, validated, PARKED] - 2026-09-05
 
 ### Added — docs/ARM_C_TEMPLATE.md: a third paper arm that can start collecting within minutes of an adoption decision

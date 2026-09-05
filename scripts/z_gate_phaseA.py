@@ -21,6 +21,12 @@ import sys
 from datetime import datetime, timezone as _UTC
 
 os.environ.setdefault("CERT_DATA_DIR", os.path.join("artifacts", "z_gate"))
+# z_gate data IS V75 (pulled via pull_v75_week) — declared explicitly so the
+# spec-integrity guard (2026-09-05) passes: any custom data dir must state specs.
+os.environ.setdefault("CERT_SPREAD", "18.5")
+os.environ.setdefault("CERT_USD_PER_UNIT_PER_LOT", "1.009")
+os.environ.setdefault("CERT_MIN_LOT", "0.01")
+os.environ.setdefault("CERT_LOT_STEP", "0.01")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

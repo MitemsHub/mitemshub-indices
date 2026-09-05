@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from certify_v75 import certify, load  # noqa: E402
+from certify_v75 import certify, load, spec_block  # noqa: E402
 
 DATA = os.path.join(HERE, "..", "artifacts", "v75_replay")
 EQ = 200.0
@@ -141,6 +141,8 @@ def main():
     path = os.environ.get("WF_OUT", os.path.join(DATA, "walkforward_210d_r4_gate.json"))
     with open(path, "w") as f:
         json.dump({"round": 4, "fold_days": FOLD_DAYS, "equity": EQ,
+                   "spec": spec_block(),   # spec stamp (V100 lesson, 2026-09-05)
+                   "configs": CONFIGS,     # geometry registry: per-config kwargs
                    "results": results, "verdicts": verdicts}, f, indent=1)
     print(f"artifact: {path}")
 
