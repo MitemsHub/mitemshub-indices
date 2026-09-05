@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [V100 net-edge study: NO EDGE + 2y artifact retracted] - 2026-09-05
+
+### Executed — pre-registered study (docs/V100_NET_EDGE_STUDY.md): does the gross edge survive V100's 15x-lower spread cost? NO.
+- **Integrity gate caught a systemic confounder first**: the stored Sep-4 2y/210d "gross" V100 runs set spread+tick-value but left `CERT_MIN_LOT/CERT_LOT_STEP` at V75's 0.01 defaults — a broker-impossible lot grid for V100 (true floor 1.0). Every signal traded on negligible dollar size (`max_risk_pct: 0.5` gives it away). Old-code vs new-code on identical envs agree bit-exactly, so the cost refactor was not the cause.
+- **Q1 (survival) — the edge DIES.** True-spec net walk-forward, 53×14d folds, ~1,700 trades/config: legacy +29.21→**−20.06R**, v2629 +13.86→**−20.07R**, tp18 +23.09→**−24.55R**. Per-trade cost ≈0.028R (2–3× the naive arithmetic — the −62% price grind shrinks stops while the spread stays fixed, so cost share *rises* over time). Full-period cert at $200: $200→$17.61, DD 94.9% — the true 1.0-lot floor plus early-era wide stops risks up to 20%/trade.
+- **Q2 (gate) — nothing passes V1–V6**, matching the frozen prior. V100 stays uncertified; funding follows certification; EA unchanged.
+- **Retraction**: the Sep-4 "V100 personality flip" (stack +15.1R on 210d) was an artifact of the same fictional lot grid — under true specs the stack scores **−33.76R (t=−3.00)** on the same window. "No universal geometry" stands for a blunter reason: no validated geometry exists on V100 at all.
+- **Standing rule (fourth small-sample-lead-class death, now systemic)**: every cross-instrument cert run must set all five CERT_* spec variables explicitly; any artifact whose `max_risk_pct` implies sizing the instrument cannot trade is invalid on its face. V75 default-spec runs exempt (0.01 IS the V75 truth).
+- Artifacts: `artifacts/v100_replay/walkforward_v100_2y_gross_repro.json` (true-spec gross baseline), `walkforward_v100_2y_net.json`, `walkforward_v100_210d_truespec_net.json`, `artifacts/v75_replay/cert_report_v100_2y_net200.json`.
+
 ## [Morning status tool + first-trade drill + 2 adjudicator fixes] - 2026-09-05
 
 ### Added — scripts/morning_status.py: the one-command morning check (read-only)
@@ -168,6 +178,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Descriptive silver lining** (not a criterion): the tp18 base strategy scored +20.98R on the Aug 2025–Jan 2026 window — positive on two disjoint ~7-month spans now.
 
 ## [Cross-instrument certification: V100] - 2026-09-04
+
+> **SUPERSEDED 2026-09-05**: the V100 numbers below (and the "personality flip") used the V75 0.01-lot default — a broker-impossible grid for V100. See the 2026-09-05 net-edge study entry and docs/V100_NET_EDGE_STUDY.md. Kept for the audit trail.
 
 ### Studied — the harness now certifies any Volatility symbol; V100 measured, NOT VALIDATED, and the lesson is structural
 - **Capability (sharpening the Volatility mandate)**: `certify_v75.py` is now symbol-agnostic via env (`CERT_DATA_DIR/CERT_SPREAD/CERT_USD_PER_UNIT_PER_LOT/CERT_MIN_LOT/CERT_LOT_STEP/CERT_SPREAD_GATE_FRAC`), `pull_v75_week.py` takes `--symbol/--outdir`. V75 defaults byte-identical; all prior artifacts reproduce.
