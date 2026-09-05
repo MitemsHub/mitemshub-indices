@@ -31,6 +31,8 @@ import subprocess
 import sys
 from datetime import datetime
 
+from artifact_spec import assert_spec_integrity, spec_block
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DATA = os.path.join(ROOT, "artifacts", "v75_replay")
@@ -117,6 +119,7 @@ def main():
     ap.add_argument("--no-run", action="store_true", help="re-diff stored state only")
     args = ap.parse_args()
 
+    assert_spec_integrity()
     prev = {}
     if os.path.exists(STATE):
         prev = json.load(open(STATE)).get("verdicts", {})
@@ -175,6 +178,7 @@ def main():
 
     with open(STATE, "w") as f:
         json.dump({"generated": now.isoformat(timespec="seconds"),
+                   "spec": spec_block(artifact="paper_pipeline_state"),
                    "verdicts": current, "details": rows}, f, indent=1)
     print(f"\nstate: {STATE}")
 

@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Go-live checklist rehearsed: every artifact verified in place, abort criteria pre-written] - 2026-09-05
+
+### Added — docs/GO_LIVE_CHECKLIST.md, the exact $50 execution procedure (do NOT run until the gate passes)
+- **Everything verified in place on terminal A** (data folder `FB9A56D617EDDDFE29EE54EBEFFE96C1`): `MitemshubAI.ex5`/`.mq5` v26.35 present, `MitemshubAI_VOL75_LIVE.set` present and **byte-identical to repo** with `InpLiveExecution=true`, `InpMagic=7788075`, `InpTpMult=1.8`, fleet CSV covering A+B.
+- **Expected banner lines extracted from source**: LIVE attach shows `MITEMSHUB AI v26.35 ... Standard Mode` with **NO `PAPER MODE:` line** (the discriminator), `FIT ROUTER: instruments vs a $50.00 account` + `TOLERATED ... each trade risks ~9-13% of equity`, `RiskCap=20%` + tiny-account warning (expected at $50), `[SELFTEST] OK`. Live orders print `Executing BUY/SELL vol=.. SL=.. TP=..`; failures print `ORDER FAILED retcode=..`.
+- **$50 truth table**: ~$4.6-6.5 min-lot stop-risk ≈ 9-13%/trade (TOLERATED); $31 floor ≈ 20% (at cap); below $31 → `CANNOT FIT` vetoes everything; $100+ ≈ 5-7% (sane compounding size).
+- **Abort criteria pre-written**: PAPER MODE in banner / CANNOT FIT at funded balance / wrong magic or TP / dashboard MODE not LIVE / any ORDER FAILED / first fill wrong symbol or magic.
+- Also flagged: 2026-09-04 record said real account at $0.57 — funding to ≥$50 must be confirmed broker-side at attach (the FIT ROUTER banner prints the true balance).
+
 ## [Operating summary: every question closed by protocol, the gate tree pre-declared] - 2026-09-05
 
 ### Added — docs/OPERATING_SUMMARY.md, the single reference for what is and isn't open

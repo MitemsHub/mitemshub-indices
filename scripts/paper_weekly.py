@@ -33,6 +33,7 @@ from datetime import datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+from artifact_spec import assert_spec_integrity, spec_block  # noqa: E402
 from demo_watchdog import audit, paper_audit  # noqa: E402  (same checks as the watchdog)
 
 DATA = os.path.join(HERE, "..", "artifacts", "v75_replay")
@@ -153,8 +154,10 @@ def ledger_expectancy(path) -> dict:
 
 # ------------------------------------------------------------- main -------
 def main() -> None:
+    assert_spec_integrity()
     now = datetime.now()
     report = {"generated": now.isoformat(timespec="seconds"),
+              "spec": spec_block(artifact="paper_weekly"),
               "ref_expectancy": {"mean_r": REF_MEAN_R, "source": REF_SOURCE},
               "sections": {}}
 

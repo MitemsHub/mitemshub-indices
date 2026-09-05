@@ -39,6 +39,9 @@ from replay_v75_week import (  # noqa: E402
     BULL, BEAR, RANGE, HVOL, NOTRADE, RNAME,
 )
 from v75_money import run_money_replay  # noqa: E402  (kept for the pure money sim)
+from artifact_spec import (  # noqa: E402
+    SPEC_KEYS, assert_spec_integrity, spec_block as shared_spec_block,
+)
 
 TP_MULT_CERT = 2.4          # InpTpMult — v26.27 preset aligned to the OOS-validated value
 COOLDOWN_LOSS = 3           # InpCoolDownBars (win-rearm: 0 after winners)
@@ -66,51 +69,16 @@ THROTTLE_PROBE = 5          # family throttle: every Nth blocked signal probes
 START = 480                 # ~5 days indicator/GARCH burn-in
 
 
-# ---- spec-integrity guard (the V100 0.01-lot lesson, 2026-09-05) ------------
-# The V100 "2y gross edge" artifacts were fictional because CERT_SPREAD et al
-# defaulted to V75's values while CERT_DATA_DIR pointed at V100 data: the
-# harness cannot know an instrument's true specs, so cross-instrument runs
-# must STATE them. Rule: CERT_DATA_DIR set -> all five CERT_* variables must
-# be in the environment, even when the values equal V75's truth (a custom-dir
-# V75 run is also explicit — deliberateness over convenience). Default runs
-# (CERT_DATA_DIR unset) are exempt: the V75 defaults ARE the V75 truth.
-SPEC_KEYS = ("CERT_SPREAD", "CERT_USD_PER_UNIT_PER_LOT", "CERT_MIN_LOT",
-             "CERT_LOT_STEP")
-
-
-def assert_spec_integrity() -> None:
-    if "CERT_DATA_DIR" not in os.environ:
-        return  # V75 default path
-    missing = [k for k in SPEC_KEYS if k not in os.environ]
-    if missing:
-        raise SystemExit(
-            "SPEC-INTEGRITY FAIL: CERT_DATA_DIR is set to "
-            f"'{os.environ['CERT_DATA_DIR']}' but {', '.join(missing)} is/are not set "
-            "explicitly. Cross-instrument cert runs must set ALL four spec "
-            "variables (spread, usd_per_unit_per_lot, min_lot, lot_step) plus "
-            "CERT_DATA_DIR — five in total. If this really is V75 data, set them "
-            "to the V75 truth: "
-            "CERT_SPREAD=18.5 CERT_USD_PER_UNIT_PER_LOT=1.009 CERT_MIN_LOT=0.01 "
-            "CERT_LOT_STEP=0.01. An artifact whose sizing implies a lot grid the "
-            "instrument cannot trade is invalid on its face.")
-
-
 def spec_block(tp_mult: float = TP_MULT_CERT, stop_mult: float = 1.0,
                min_score_bonus: int = 0) -> dict:
-    """Effective spec for this run — stamped into every artifact this harness writes."""
-    return {
-        "data_dir": os.environ.get("CERT_DATA_DIR", DATA),
-        "spread": SPREAD_V75,
-        "usd_per_unit_per_lot": USD_PER_UNIT_PER_LOT,
-        "min_lot": MIN_LOT,
-        "lot_step": LOT_STEP,
-        "cost_model": ("spread-in-pnl (v26.36)" if PAY_SPREAD_IN_PNL
-                       else "legacy cost-blind (CERT_COST_LEGACY=1)"),
-        "geometry": {"tp_mult": tp_mult, "stop_mult": stop_mult,
-                     "min_score_bonus": min_score_bonus},
-        "explicit_env": {k: (k in os.environ) for k in ("CERT_DATA_DIR",) + SPEC_KEYS},
-        "guard": "assert_spec_integrity v1 (2026-09-05)",
-    }
+    """Compatibility wrapper for callers importing the historical helper."""
+    return shared_spec_block(
+        artifact="cert_report",
+        data_dir=os.environ.get("CERT_DATA_DIR", DATA),
+        tp_mult=tp_mult,
+        stop_mult=stop_mult,
+        min_score_bonus=min_score_bonus,
+    )
 
 
 def certify(equity0: float, blocked_hours: set[int] | None = None, *,

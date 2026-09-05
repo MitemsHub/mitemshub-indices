@@ -1,11 +1,11 @@
-# LIVE READINESS — v26.34 (2026-09-04, post operator-steps 2+3)
+# LIVE READINESS — v26.35 (2026-09-05, post operator-steps 2+3)
 
 ## State after today's setup (all machine-side DONE)
 
 | Component | Status |
 |---|---|
-| Terminal A (arm A) | **LIVE-RUNNING**: v26.34, paper, TP 1.8, magic 7788075, router TOLERATED (risk 12.5%/trade @ $50 virtual) |
-| Terminal B (arm B) | **LIVE-RUNNING**: v26.34, paper, TP 2.4, magic 7788100, router TOLERATED — installed via cloned instance at `%LOCALAPPDATA%\MitemshubMT5_B`, data folder `49E0383C…`, auto-attach verified in Experts log |
+| Terminal A (arm A) | **LIVE-RUNNING**: v26.35, paper, TP 1.8, magic 7788075, router TOLERATED (risk 12.5%/trade @ $50 virtual) |
+| Terminal B (arm B) | **LIVE-RUNNING**: v26.35, paper, TP 2.4, magic 7788100, router TOLERATED — installed via cloned instance at `%LOCALAPPDATA%\MitemshubMT5_B`, data folder `49E0383C…`, auto-attach verified in Experts log |
 | chart04 landmine | **GONE** (MT5 exit-flush dropped it; Default profile = chart01 with EA + one plain chart) |
 | Sunday 06:30 pipeline | Armed; discovers arms automatically at each arm's first closed trade |
 | `MitemshubAI_VOL75_LIVE.set` | **NEW, validated (PASS)**: identical to `VOL75_FINAL` except `InpLiveExecution=true` (TP 1.8, magic 7788075) |

@@ -1,7 +1,7 @@
-# Production Configurations — MITEMSHUB AI v26.34
+# Production Configurations — MITEMSHUB AI v26.35
 
-> Last updated: 2026-09-04
-> EA version: **v26.34** (`MitemshubAI.mq5` — `APP_VERSION` single source of truth)
+> Last updated: 2026-09-05
+> EA version: **v26.35** (`MitemshubAI.mq5` — `APP_VERSION` single source of truth)
 > Architecture: 5 Core Strategies + Governor v3.1 (enforcement + coordination) + 7 Intelligence Layers
 > Live lineup: **V75 M15 (trading) + V100 M5 (dormant until funding)** — Boom/Crash retired 2026-09-02; **v26.33 made it a hard VOLATILITY-ONLY mandate** (init refuses Crash/Boom symbols; fit-router recommends Volatility indices only); **v26.34 removed the dormant CB engine entirely**
 >
@@ -15,6 +15,7 @@
 | Version | Date | Key Changes |
 |---------|------|-------------|
 | **v26.33** | 2026-09-04 | VOLATILITY-ONLY MANDATE (owner decision: no Crash/Boom, ever): `OnInit` REFUSES Crash/Boom symbols (`INIT_FAILED` + loud log), fit-router universe trimmed to Volatility 10/25/50/75/100 (CB presets `BOOM1000_CB`/`CRASH1000_CB` deleted from repo + all terminals; sync prunes them henceforth), banner rebranded. Same day: chart04 landmine decision — DETACH (see Active Live Presets note) |
+| **v26.35** | 2026-09-05 | Paper/account equity guard aligned, out-of-range governor indices fail closed, default magic corrected to 7788075, fixed-array self-test formatting corrected; source and paper arms revalidated |
 | **v26.34** | 2026-09-04 | CB ENGINE REMOVED (user request): `CrashBoom/` include directory deleted (9 modules); all CB inputs, learned-gate + `cblearn` persistence, burst-guard policy self-check, CB signal/exit branches removed from the EA; TickRecorder relocated to `Microstructure/` (opt-in, default OFF); strategy table 9 → 6 slots (VB-BURST now slot 5, governor gate index fixed from 8); compile 0 errors / 0 warnings; synced to all 12 instances |
 | **v26.29** | 2026-09-04 | First positive certification: VOL75 filter stack `InpTpMult=1.8` + `InpPbEmaSideVeto=true` + `InpPullbackMin=0.60` → cert200 $200→$213.24 (+0.85R, WR 50%, DD 20.2%); $50 paper scenario $50→$52.09 (was $50→$19.70 under the old preset). Cert harness SL-booking fix (exit at actual moved stop; `--legacy-sl` reproduces old numbers). Caveat: EMA-side veto unproven OOS (103-trade baseline shows no separation) — paper run + walk-forward are the gate. Defaults OFF on other instruments |
 | **v26.28** | 2026-09-04 | REAL paper trading engine: `InpLiveExecution=false` is no longer a stub — virtual fills at live bid/ask (`InpPaperSpreadMult` conservatism), positions run the exact ManagePosition ladder, closes flow through `HandleTradeClose` so the governor/learning/pause logic trains on paper trades, and `InpPaperEquity` drives sizing/compounding on the funded scenario. Paper ledger persists via `MitemshubAI_paper_*.csv`; `paper_open`/`paper_close` telemetry events feed the watchdog's [2]/[3]/[6] checks. VOL75_FINAL switched to this mode 2026-09-04 (see Active Live Presets). v26.24–v26.27 (tick-value calibration, risk sentinel, governor bootstrap/cold-start fixes, preset TP/spread fidelity): see `CHANGELOG.md` |

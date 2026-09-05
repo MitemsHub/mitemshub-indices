@@ -50,6 +50,8 @@ import sys
 from bisect import bisect_left
 from datetime import datetime, timezone
 
+from artifact_spec import assert_spec_integrity, spec_block
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
@@ -149,6 +151,7 @@ def gap(trades, key, lo, hi) -> dict:
 
 
 def main():
+    assert_spec_integrity()
     ap = argparse.ArgumentParser()
     ap.add_argument("--min-n", type=int, default=150)
     ap.add_argument("--min-days", type=int, default=21)
@@ -255,6 +258,7 @@ def main():
 
 
 def _write(result):
+    result["spec"] = spec_block(artifact="regime_gate_study_v3")
     with open(OUT, "w") as f:
         json.dump(result, f, indent=1)
     print(f"artifact: {OUT}")

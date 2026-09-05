@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+from artifact_spec import assert_spec_integrity, spec_block  # noqa: E402
 from certify_v75 import certify  # noqa: E402
 from walkforward_v75 import build_folds  # noqa: E402
 
@@ -62,6 +63,7 @@ def sig_hour(t: str) -> int:
 
 
 def main() -> None:
+    assert_spec_integrity()
     folds = build_folds()
     cal_folds = folds[:SPLIT_FOLD - 1]        # F01..F16
     val_folds = folds[SPLIT_FOLD - 1:]        # F17..F26
@@ -208,6 +210,7 @@ def main() -> None:
               f"G3 kept >=60% of trades: {g3}")
         print(f"  VERDICT: {result['verdict']}")
 
+    result["spec"] = spec_block(artifact="regime_gate_study_v2")
     with open(OUT, "w") as f:
         json.dump(result, f, indent=1, default=str)
     print(f"artifact: {OUT}")

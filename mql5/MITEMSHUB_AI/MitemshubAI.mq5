@@ -1,11 +1,13 @@
 //+------------------------------------------------------------------+
 //|                                             MitemshubAI.mq5      |
-//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.34     |
+//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.35     |
 //|   Intelligent • Regime-Aware • Volatility-Only • Spike-Aware • Smart  |
 //|                                                                  |
 //| v26.x SERIES (2026-08-30) — see PRODUCTION_CONFIGS.md for full   |
 //| details. Volatility-only deploy line:                            |
-//|  v26.34 CB ENGINE REMOVED: the dormant Crash/Boom engine, its     |
+//| v26.35: paper/account equity guard aligned, OOB governor fail-closed,
+//|     default magic corrected, and fixed-array self-test formatting fixed.
+//| v26.34 CB ENGINE REMOVED: the dormant Crash/Boom engine, its     |
 //|     inputs, learned-gate files, burst-guard policy table, and     |
 //|     reject-accounting counters are physically deleted (every      |
 //|     historical CB strategy question was settled net-negative;     |
@@ -181,10 +183,27 @@ string SymbolTaggedFile(const string base, const string ext)
 //+------------------------------------------------------------------+
 enum ENUM_REGIME { REGIME_BULLISH, REGIME_BEARISH, REGIME_RANGING, REGIME_HIGH_VOL, REGIME_NO_TRADE };
 
+// v30: self-correcting engine modes
+enum ENUM_ENGINE_MODE { ENGINE_NEUTRAL, ENGINE_TREND, ENGINE_MEANREV };
+
+// v30: what pushed the engine into its current mode (for telemetry + recovery)
+enum ENUM_ENGINE_TRIGGER { ENG_TRIGGER_NONE, ENG_TRIGGER_REGIME_SHIFT, ENG_TRIGGER_CONSEC_LOSS, ENG_TRIGGER_VOL_SPIKE, ENG_TRIGGER_STABILIZE };
+
 //+------------------------------------------------------------------+
 //| INPUTS                                                             |
 //+------------------------------------------------------------------+
 input group "=== Strategy Selection ==="
+input bool   InpSelfCorrect       = true;   // v30: self-correcting engine (regime-shift + consecutive-loss response)
+input int    InpSelfCorrConsec    = 4;      // consecutive losses before the self-correct loop acts (v30)
+input double InpEngineConvFactor  = 0.35;   // v30: fractional-Kelly conservatism (0.25..0.50 recommended)
+input double InpEqCurveVolTarget  = 0.15;   // v30: target daily-equity-curve R-volatility (fractional de-lever above this)
+input int    InpEqCurveLookback   = 20;     // v30: rolling window for equity-curve vol estimate (trades)
+input double InpZEntryMin         = 1.6;    // v30: floor z-extension for fade/trend signals (sigma-space)
+input double InpZEntryMax         = 3.2;    // v30: cap z-extension considered (avoid extreme overshoot entries)
+input bool   InpUseTickVelocitySlippage = true;  // v30: dynamic slippage buffer from recent tick velocity
+input double InpTickVelDeviationMult  = 2.0;    // v30: deviation = this x recent max tick move (points)
+input int    InpTickVelLookback       = 20;     // v30: ticks to measure recent velocity
+input int    InpEngineReviewN     = 8;      // v30: re-evaluate engine mode every N closed trades
 input bool   InpUsePullback      = true;     // EMA Pullback (Trend)
 input bool   InpUseBreakout      = true;     // Breakout
 input bool   InpUseMomentum      = true;     // Momentum
@@ -448,6 +467,48 @@ input bool   InpAutoBlockTime    = false;    // Auto-block worst-performing time
 //| GLOBALS                                                            |
 //+------------------------------------------------------------------+
 ENUM_TIMEFRAMES g_tf_entry, g_tf_regime;
+
+// v30: sigma-space regime features (computed from EGARCH sigma + EMA mean)
+double g_z_ext       = 0.0;   // (price - ema_mean) / sigma_now  — extension in current conditional stddevs
+double g_z_ext_prev  = 0.0;   // previous bar's z_ext (for velocity)
+double g_z_ext_vel   = 0.0;   // delta z_ext per closed bar — is extension accelerating or reverting
+double g_sigma_accel = 0.0;   // (sigma_now - sigma_ema) / sigma_ema  — volatility expansion/compression
+int    g_commit_bars = 0;     // v30: recent closed bars where z_ext and z_ext_vel agree in sign (trend commitment)
+int    g_commit_window = 6;   // v30: lookback for commitment count
+
+// v30: tick-velocity state for dynamic slippage buffer
+double g_tick_vel_max = 0.0;  // max |tick move| over the lookback window (points)
+int    g_tick_buf_n   = 0;    // rings into g_tick_vel_buf
+double g_tick_vel_buf[];      // ring of recent |tick moves| (points)
+
+// v30: live fractional-Kelly + equity-curve-vol size state
+double g_kelly_mult    = 1.0;  // current live size multiplier from rolling (regime,dir) outcomes
+double g_eq_curve_vol  = 0.0;  // rolling daily R volatility estimate (R/trade scale)
+int    g_eq_curve_n    = 0;    // trades accumulated into the rolling eq-curve window
+double g_eq_curve_r[];         // ring of recent per-trade R (for eq-curve vol)
+
+// v30: self-correcting engine state machine
+ENUM_ENGINE_MODE g_engine_mode     = ENGINE_NEUTRAL;
+ENUM_ENGINE_TRIGGER g_engine_trigger = ENG_TRIGGER_NONE;
+int    g_engine_mode_since_trade   = 0;   // trades spent in current engine mode (for stabilization test)
+int    g_consec_loss_at_switch     = 0;   // consecutive-loss count at the time of the last engine switch
+bool   g_engine_dirty              = false; // set when a regime-shift is detected; consumed by GenerateSignal
+
+// v30: engine mode string helpers (hoisted so the stabilization block can call EngineModeToStr).
+string EngineModeToStr(ENUM_ENGINE_MODE m)
+{
+   if(m==ENGINE_TREND)    return "TREND";
+   if(m==ENGINE_MEANREV)  return "MEANREV";
+   return "NEUTRAL";
+}
+string EngineTriggerToStr(ENUM_ENGINE_TRIGGER t)
+{
+   if(t==ENG_TRIGGER_REGIME_SHIFT) return "REGIME_SHIFT";
+   if(t==ENG_TRIGGER_CONSEC_LOSS)  return "CONSECUTIVE_LOSS";
+   if(t==ENG_TRIGGER_VOL_SPIKE)   return "VOL_SPIKE";
+   if(t==ENG_TRIGGER_STABILIZE)   return "STABILIZE";
+   return "NONE";
+}
 int hEMA_Fast_R, hEMA_Mid_R, hEMA_Slow_R;
 int hEMA_Fast_E, hEMA_Mid_E, hEMA_Slow_E, hRSI_E, hATR_E, hBB_E;
 
@@ -737,6 +798,13 @@ int OnInit()
    SeedHistoryState();   // v26.24: warm ATR/sigma/GARCH from chart history — no blind window after restarts
    RecoverDetachedClose(); // v26.9: journal closes that happened while the EA was detached
    if(InpDrawDashboard) CreateDashboard();
+   // v30: initialize the sigma-space feature rings and the eq-curve ring.
+   ArrayResize(g_z_ext_history, g_commit_window);
+   ArrayResize(g_z_ext_vel_history, g_commit_window);
+   ArrayInitialize(g_z_ext_history, 0);
+   ArrayInitialize(g_z_ext_vel_history, 0);
+   if(InpEqCurveLookback > 0) ArrayResize(g_eq_curve_r, InpEqCurveLookback);
+   if(InpTickVelLookback > 0) ArrayResize(g_tick_vel_buf, InpTickVelLookback);
    // v25.1: tick recorder — degrades to no-op if the file can't be opened
    g_tick_rec.Init(_Symbol, InpTickRecordEnabled, InpTickFlushTicks, InpTickFlushSeconds);
 
@@ -952,6 +1020,8 @@ void OnTick()
    // v25.4: per-tick feeds run BEFORE the bar-guard — they must see every tick
    double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   // v30: feed tick velocity for the dynamic slippage buffer (every tick).
+   FeedTickVelocity(bid, ask);
    // v25.1: tick recorder captures EVERY tick
    if(InpTickRecordEnabled) g_tick_rec.OnTick(bid, ask);
    // v26.30 fit router: an instrument whose min lot cannot hold the risk cap
@@ -983,7 +1053,8 @@ void OnTick()
 
    static datetime last_bar=0;
    datetime cur = iTime(_Symbol, g_tf_entry, 0);
-   if(cur == last_bar) { if(InpDrawDashboard) UpdateDashboard(); return; }
+   bool new_bar = (cur != last_bar);
+   if(!new_bar) { if(InpDrawDashboard) UpdateDashboard(); return; }
    last_bar = cur;
 
    g_eq = PaperActive() ? PaperEquity() : AccountInfoDouble(ACCOUNT_EQUITY);   // v26.28: virtual equity in paper mode
@@ -1081,6 +1152,13 @@ void OnTick()
 
    UpdateSigmaBaseline();
    UpdateBandTelemetry();
+   // v30: sigma-space features + regime-shift detection once per new bar.
+   if(new_bar)
+   {
+      UpdateSigmaSpaceFeatures();
+      PushSigmaSpaceFeatures();
+      DetectRegimeShift();
+   }
 
    // v26.17: feed the burst-fade module the entry-TF ATR (last closed bar,
    // same series the classic strategies read) so its geometry stays current
@@ -1407,13 +1485,385 @@ void LoadMetaLabelTable()
 }
 
 // v26.14: risk multiplier for the current context; 1.0 when disabled/unknown.
+// v30: live fractional-Kelly + equity-curve-vol multiplier LAYERS ON TOP of the loaded table.
+// The loaded table (if any) is the base; the live multiplier refines it from recent outcomes.
 double MetaLabelMultiplier(int direction)
 {
-   if(!InpUseMetaLabel || g_ml_rows == 0) return 1.0;
-   for(int i=0;i<g_ml_rows;i++)
-      if(g_ml_dir[i]==direction && g_ml_regime[i]==RegimeToStr(g_regime))
-         return g_ml_mult[i];
-   return 1.0;   // unknown context: default base risk
+   double base = 1.0;
+   if(InpUseMetaLabel && g_ml_rows > 0)
+      for(int i=0;i<g_ml_rows;i++)
+         if(g_ml_dir[i]==direction && g_ml_regime[i]==RegimeToStr(g_regime))
+            { base = g_ml_mult[i]; break; }
+
+   // v30: live Kelly-derived multiplier from the rolling (regime,dir) outcome table.
+   // k = (win_rate*avg_win - loss_rate*avg_loss) / avg_win, capped, floored, scaled by InpEngineConvFactor.
+   // If there isn't enough data, k = 1.0 (no live refinement).
+   double k = LiveKellyMultiplier(direction);
+   // v30: equity-curve volatility targeter — de-lever when the recent R stream is too volatile.
+   double eq = EqCurveMultiplier();
+
+   double m = base * k * eq;
+   // hard bounds so a bad estimate can't blow up the account
+   if(m < 0.25) m = 0.25;
+   if(m > 2.0)  m = 2.0;
+   return m;
+}
+
+//+------------------------------------------------------------------+
+//| v30: LIVE KELLY + EQUITY-CURVE-VOL SIZE LAYER                    |
+//| A rolling (regime, direction) outcome table feeds a fractional   |
+//| Kelly multiplier and an equity-curve volatility targeter. Both   |
+//| layer on top of the loaded meta-label table. Hard-bounded so a   |
+//| bad estimate can't blow up the account.                           |
+//+------------------------------------------------------------------+
+#define KELLY_REGIME_SLOTS 5   // BULL, BEAR, RANGING, HIGH_VOL, NO_TRADE
+double g_kelly_n[KELLY_REGIME_SLOTS][2];
+double g_kelly_wins[KELLY_REGIME_SLOTS][2];
+double g_kelly_sumr[KELLY_REGIME_SLOTS][2];
+double g_kelly_sumwr[KELLY_REGIME_SLOTS][2];
+double g_kelly_sumlr[KELLY_REGIME_SLOTS][2];
+
+int KellyRegimeIndex(ENUM_REGIME r)
+{
+   if(r==REGIME_BULLISH) return 0;
+   if(r==REGIME_BEARISH) return 1;
+   if(r==REGIME_RANGING) return 2;
+   if(r==REGIME_HIGH_VOL) return 3;
+   return 4;
+}
+
+double LiveKellyMultiplier(int direction)
+{
+   if(!InpSelfCorrect) return 1.0;
+   int ri = KellyRegimeIndex(g_regime);
+   if(ri < 0 || ri >= KELLY_REGIME_SLOTS) return 1.0;
+   int d = (direction > 0) ? 1 : 0;
+   double n      = g_kelly_n[ri][d];
+   double wins   = g_kelly_wins[ri][d];
+   double sumr   = g_kelly_sumr[ri][d];
+   double sumwr  = g_kelly_sumwr[ri][d];
+   double sumlr  = g_kelly_sumlr[ri][d];
+   if(n < 10 || sumwr <= 0 || sumr == 0) return 1.0;
+   double wr   = wins / n;
+   double lr   = (n - wins) / n;
+   double avg_win = sumwr / MathMax(wins, 1);
+   double avg_loss = (sumlr / MathMax(n - wins, 1));
+   double edge = wr * avg_win - lr * avg_loss;
+   if(avg_win <= 0) return 1.0;
+   double k = edge / avg_win;
+   k = InpEngineConvFactor * k;
+   if(k < 0.0) k = 0.0;
+   if(k > 1.0) k = 1.0;
+   return 1.0 + k;
+}
+
+double EqCurveMultiplier()
+{
+   if(!InpSelfCorrect || InpEqCurveLookback <= 0) return 1.0;
+   int n = MathMin(g_eq_curve_n, InpEqCurveLookback);
+   if(n < 8) return 1.0;
+   double sum = 0, sum2 = 0;
+   for(int i=0;i<n;i++)
+   {
+      double r = g_eq_curve_r[i];
+      sum  += r;
+      sum2 += r*r;
+   }
+   double mean = sum / n;
+   double var  = (sum2 - n*mean*mean) / MathMax(n-1, 1);
+   if(var <= 0) return 1.0;
+   double vol = MathSqrt(var);
+   if(vol <= 0) return 1.0;
+   double m = 1.0;
+   if(vol > InpEqCurveVolTarget)
+      m = InpEqCurveVolTarget / vol;
+   if(m < 0.25) m = 0.25;
+   return m;
+}
+
+// v30: engine-mode stabilization — after enough positive trades in the current engine, drift back toward neutral.
+void EngineStabilizeOnPositive(double r, ENUM_REGIME regime)
+{
+   if(!InpSelfCorrect || InpEngineReviewN <= 0 || g_engine_mode == ENGINE_NEUTRAL) return;
+   g_engine_mode_since_trade++;
+   if(g_engine_mode_since_trade >= InpEngineReviewN && r > 0)
+   {
+      if(g_eq_curve_n >= 8 && g_eq_curve_vol <= InpEqCurveVolTarget * 1.2)
+      {
+         ENUM_ENGINE_MODE old = g_engine_mode;
+         g_engine_mode     = ENGINE_NEUTRAL;
+         g_engine_trigger  = ENG_TRIGGER_STABILIZE;
+         g_engine_mode_since_trade = 0;
+         g_consec_loss_at_switch   = g_consec_loss;
+         PrintFormat(VTAG+"v30 ENGINE STABILIZE: %s -> NEUTRAL (eq-vol %.3f <= target %.3f, recent R %+.2f)",
+                     EngineModeToStr(old), g_eq_curve_vol, InpEqCurveVolTarget, r);
+         Telem("engine", StringFormat("\"sym\":\"%s\",\"from\":\"%s\",\"to\":\"NEUTRAL\",\"trigger\":\"STABILIZE\",\"eq_vol\":%.3f,\"recent_r\":%.3f",
+                                      _Symbol, EngineModeToStr(old), g_eq_curve_vol, r));
+      }
+   }
+}
+
+// v30: record a closed trade's R into the Kelly + eq-curve state (called from HandleTradeClose / PostTradeReview).
+void RecordKellyEqCurve(int direction, double r, ENUM_REGIME regime)
+{
+   int ri = KellyRegimeIndex(regime);
+   if(ri < 0 || ri >= KELLY_REGIME_SLOTS) return;
+   int d = (direction > 0) ? 1 : 0;
+   g_kelly_n[ri][d]      += 1;
+   g_kelly_sumr[ri][d]   += r;
+   if(r > 0)
+   {
+      g_kelly_wins[ri][d]  += 1;
+      g_kelly_sumwr[ri][d] += r;
+   }
+   else
+      g_kelly_sumlr[ri][d] += MathAbs(r);
+   if(InpEqCurveLookback > 0)
+   {
+      ArrayResize(g_eq_curve_r, InpEqCurveLookback);
+      for(int i=0;i<InpEqCurveLookback-1;i++)
+         g_eq_curve_r[i] = g_eq_curve_r[i+1];
+      g_eq_curve_r[InpEqCurveLookback-1] = r;
+      g_eq_curve_n = (int)MathMin(g_eq_curve_n + 1, InpEqCurveLookback);
+   }
+   EngineStabilizeOnPositive(r, regime);
+}
+
+//+------------------------------------------------------------------+
+//| v30: SIGMA-SPACE REGIME FEATURES                                  |
+//| V75 is a continuous stochastic simulation indexed to vol curves. |
+//| The meaningful coordinates are: extension in conditional stddevs  |
+//| (z_ext), the velocity of that extension (z_ext_vel), and the      |
+//| volatility acceleration (sigma_accel). Price-relative EMA levels   |
+//| become informative only when expressed in sigma-space.            |
+//| Computed from the EGARCH sigma (or legacy stddev) + the entry-TF  |
+//| EMA mean. Updated once per closed bar, alongside UpdateSigmaBase. |
+//+------------------------------------------------------------------+
+void UpdateSigmaSpaceFeatures()
+{
+   double sig = ActiveBarSigma(20);
+   if(sig <= 0) { g_z_ext = 0; g_z_ext_vel = 0; g_sigma_accel = 0; return; }
+
+   double price = iClose(_Symbol, g_tf_entry, 1);   // last closed bar
+   double sma = 0;
+   for(int i=1;i<=20;i++) sma += iClose(_Symbol, g_tf_entry, i);
+   sma /= 20.0;
+   if(sma <= 0 || price <= 0) { g_z_ext = 0; g_z_ext_vel = 0; g_sigma_accel = 0; return; }
+
+   g_z_ext_prev = g_z_ext;
+   g_z_ext = MathLog(price / sma) / sig;            // extension in current conditional stddevs
+   g_z_ext_vel = g_z_ext - g_z_ext_prev;           // velocity (per closed bar)
+
+   if(g_sigma_init && g_sigma_ema > 0)
+      g_sigma_accel = (sig - g_sigma_ema) / g_sigma_ema;   // vol expansion/compression vs baseline
+   else
+      g_sigma_accel = 0;
+
+   // v30: trend-commitment count — how many of the last N closed bars had z_ext and z_ext_vel
+   // agreeing in sign (extension growing in its direction = committed; disagreeing = reverting/chop).
+   // A committed micro-trend is a real extension; an uncommitted one is usually a spike front.
+   g_commit_bars = 0;
+   for(int i=0;i<g_commit_window && i<g_tf_entry_bars_cached;i++)
+   {
+      double ze = g_z_ext_history[i];
+      double zv = g_z_ext_vel_history[i];
+      if(MathAbs(ze) >= InpZEntryMin && MathAbs(zv) > 0 && ((ze > 0 && zv > 0) || (ze < 0 && zv < 0)))
+         g_commit_bars++;
+   }
+}
+
+// v30: ring buffers for the sigma-space feature history (populated once per closed bar).
+double g_z_ext_history[];
+double g_z_ext_vel_history[];
+int    g_tf_entry_bars_cached = 0;   // how many closed bars are in the ring (capped at g_commit_window)
+
+// v30: push the latest sigma-space features into the ring (call once per closed bar).
+void PushSigmaSpaceFeatures()
+{
+   if(g_commit_window <= 0) return;
+   ArrayResize(g_z_ext_history, g_commit_window);
+   ArrayResize(g_z_ext_vel_history, g_commit_window);
+   // shift left, append newest at the end
+   for(int i=0;i<g_commit_window-1;i++)
+   {
+      g_z_ext_history[i]      = g_z_ext_history[i+1];
+      g_z_ext_vel_history[i]  = g_z_ext_vel_history[i+1];
+   }
+   g_z_ext_history[g_commit_window-1]      = g_z_ext;
+   g_z_ext_vel_history[g_commit_window-1]  = g_z_ext_vel;
+   g_tf_entry_bars_cached = MathMin(g_commit_window, g_tf_entry_bars_cached + 1);
+}
+
+//+------------------------------------------------------------------+
+//| v30: REGIME-SHIFT DETECTOR + ENGINE DECISION                      |
+//| V75 regime shifts are visible in sigma-space BEFORE they're       |
+//| visible in price structure: a sudden sigma acceleration + a       |
+//| reversal of z_ext_vel is the signature of a spike that has       |
+//| peaked and begun to revert; a persistent committed z_ext with     |
+//| calm sigma is the signature of a real micro-trend.                |
+//+------------------------------------------------------------------+
+ENUM_ENGINE_MODE RecommendedEngineMode()
+{
+   if(g_z_ext == 0 || g_sigma_now <= 0 || !g_sigma_init) return ENGINE_NEUTRAL;
+
+   bool committed = (g_commit_bars >= 2);
+   bool extending = (MathAbs(g_z_ext) >= InpZEntryMin);
+   bool reverting = (MathAbs(g_z_ext_vel) > 0.1 && ((g_z_ext > 0 && g_z_ext_vel < 0) || (g_z_ext < 0 && g_z_ext_vel > 0)));
+   bool vol_spike = (g_sigma_accel > 0.25);
+
+   if(committed && extending && !vol_spike && !reverting)
+      return ENGINE_TREND;
+   if(extending && reverting && (g_sigma_accel <= 0.1 || g_sigma_now > g_sigma_ema * 1.2))
+      return ENGINE_MEANREV;
+   if(vol_spike && !committed)
+      return ENGINE_NEUTRAL;
+   return ENGINE_NEUTRAL;
+}
+
+ENUM_REGIME g_last_stable_regime = REGIME_NO_TRADE;
+int        g_stable_bar_count    = 0;
+void DetectRegimeShift()
+{
+   if(g_regime == REGIME_NO_TRADE) { g_stable_bar_count = 0; return; }
+   if(g_last_stable_regime == REGIME_NO_TRADE)
+   { g_last_stable_regime = g_regime; g_stable_bar_count = 1; return; }
+   if(g_regime == g_last_stable_regime) { g_stable_bar_count++; return; }
+   if(g_stable_bar_count >= 3)
+   {
+      ENUM_REGIME old = g_last_stable_regime;
+      g_last_stable_regime = g_regime;
+      g_stable_bar_count   = 1;
+      g_engine_dirty = true;
+      PrintFormat(VTAG+"v30 REGIME SHIFT: %s -> %s (after %d stable bars) — recommend: %s",
+                  RegimeToStr(old), RegimeToStr(g_regime), g_stable_bar_count,
+                  EngineModeToStr(RecommendedEngineMode()));
+      Telem("regime_shift", StringFormat(
+         "\"sym\":\"%s\",\"from\":\"%s\",\"to\":\"%s\",\"stable_bars\":%d,\"z_ext\":%.3f,\"z_vel\":%.3f,\"sig_accel\":%.3f,\"commit\":%d",
+         _Symbol, RegimeToStr(old), RegimeToStr(g_regime), g_stable_bar_count,
+         g_z_ext, g_z_ext_vel, g_sigma_accel, g_commit_bars));
+   }
+   else
+      g_stable_bar_count++;
+}
+
+void EvaluateSelfCorrectionOnConsecLoss()
+{
+   if(!InpSelfCorrect || g_consec_loss < InpSelfCorrConsec) return;
+   if(g_engine_mode == ENGINE_NEUTRAL && g_consec_loss >= InpSelfCorrConsec)
+   {
+      ENUM_ENGINE_MODE rec = RecommendedEngineMode();
+      if(rec == ENGINE_MEANREV)
+      {
+         g_engine_mode     = ENGINE_MEANREV;
+         g_engine_trigger  = ENG_TRIGGER_CONSEC_LOSS;
+         g_engine_mode_since_trade = 0;
+         g_consec_loss_at_switch   = g_consec_loss;
+         PrintFormat(VTAG+"v30 SELF-CORRECT (CONSECUTIVE LOSS %d): -> MEAN-REVERSION engine", g_consec_loss);
+         Telem("engine", StringFormat(
+            "\"sym\":\"%s\",\"from\":\"NEUTRAL\",\"to\":\"MEANREV\",\
+            \"trigger\":\"CONSECUTIVE_LOSS\",\"consec\":%d,\"z_ext\":%.3f,\"z_vel\":%.3f,\"sig_accel\":%.3f",
+            _Symbol, g_consec_loss, g_z_ext, g_z_ext_vel, g_sigma_accel));
+      }
+      else if(rec == ENGINE_TREND)
+      {
+         g_engine_mode     = ENGINE_MEANREV;
+         g_engine_trigger  = ENG_TRIGGER_CONSEC_LOSS;
+         g_engine_mode_since_trade = 0;
+         g_consec_loss_at_switch   = g_consec_loss;
+         PrintFormat(VTAG+"v30 SELF-CORRECT (CONSECUTIVE LOSS %d): trend recommended but losses on trend — dissent to MEAN-REVERSION", g_consec_loss);
+         Telem("engine", StringFormat(
+            "\"sym\":\"%s\",\"from\":\"NEUTRAL\",\"to\":\"MEANREV\",\
+            \"trigger\":\"CONSECUTIVE_LOSS_DISSENT\",\"consec\":%d,\"z_ext\":%.3f,\"z_vel\":%.3f",
+            _Symbol, g_consec_loss, g_z_ext, g_z_ext_vel));
+      }
+      else
+      {
+         PrintFormat(VTAG+"v30 SELF-CORRECT (CONSECUTIVE LOSS %d): no regime shift — widen filters + reduce exposure (conservative sub-mode)", g_consec_loss);
+         Telem("engine", StringFormat(
+            "\"sym\":\"%s\",\"from\":\"NEUTRAL\",\"to\":\"NEUTRAL_CONSERVATIVE\",\
+            \"trigger\":\"CONSECUTIVE_LOSS_NOSHIELD\",\"consec\":%d,\"z_ext\":%.3f,\"commit\":%d",
+            _Symbol, g_consec_loss, g_z_ext, g_commit_bars));
+      }
+   }
+}
+
+bool EngineAllowsLeg(int strat_index, int direction, bool is_band)
+{
+   if(!InpSelfCorrect) return true;
+   if(g_engine_mode == ENGINE_NEUTRAL) return true;
+   if(is_band) return true;
+   if(g_engine_mode == ENGINE_TREND)
+   {
+      if(strat_index == 3)
+         return (g_z_ext != 0 && ((g_z_ext > 0 && g_z_ext_vel < 0) || (g_z_ext < 0 && g_z_ext_vel > 0)));
+      return true;
+   }
+   if(g_engine_mode == ENGINE_MEANREV)
+   {
+      if(strat_index == 0 || strat_index == 1 || strat_index == 2)
+      {
+         bool committed = (g_commit_bars >= 2);
+         bool extended  = (MathAbs(g_z_ext) >= InpZEntryMin);
+         return (committed && extended);
+      }
+      return true;
+   }
+   return true;
+}
+
+bool ConservativeSubMode()
+{
+   if(!InpSelfCorrect) return false;
+   if(g_engine_mode != ENGINE_NEUTRAL) return false;
+   if(g_consec_loss >= InpSelfCorrConsec) return true;
+   if(g_sigma_accel > 0.25 && g_commit_bars < 2) return true;
+   return false;
+}
+
+int EffectiveMinScore()
+{
+   int ms = InpMinScore;
+   if(ConservativeSubMode()) ms += 1;
+   if(InpAdaptiveConviction && g_daily_pnl < 0.0) ms += 1;
+   return ms;
+}
+
+int EffectiveMaxSlippagePts()
+{
+   int base = InpMaxSlippagePts;
+   if(!InpUseTickVelocitySlippage) return base;
+   if(g_tick_buf_n < InpTickVelLookback) return base;
+   double vel = g_tick_vel_max;
+   if(vel <= 0) return base;
+   int dyn = (int)MathRound(InpTickVelDeviationMult * vel);
+   int blended = (int)MathRound((base + dyn) / 2.0);
+   if(blended < base) blended = base;
+   return blended;
+}
+
+void FeedTickVelocity(double bid, double ask)
+{
+   if(!InpUseTickVelocitySlippage || InpTickVelLookback <= 0) return;
+   if(ArraySize(g_tick_vel_buf) != InpTickVelLookback)
+      ArrayResize(g_tick_vel_buf, InpTickVelLookback);
+   double mid = (bid + ask) / 2.0;
+   static double g_last_mid = 0;
+   if(g_last_mid != 0)
+   {
+      double move = MathAbs(mid - g_last_mid) / _Point;
+      if(move > 0)
+      {
+         for(int i=0;i<InpTickVelLookback-1;i++)
+            g_tick_vel_buf[i] = g_tick_vel_buf[i+1];
+         g_tick_vel_buf[InpTickVelLookback-1] = move;
+         double mx = 0;
+         for(int i=0;i<InpTickVelLookback;i++)
+            if(g_tick_vel_buf[i] > mx) mx = g_tick_vel_buf[i];
+         g_tick_vel_max = (double)mx;
+      }
+   }
+   g_last_mid = mid;
+   g_tick_buf_n++;
 }
 
 void SaveState()
@@ -1457,6 +1907,11 @@ void LoadState()
       g_paused=true;
       PrintFormat(VTAG+"Restored PAUSE state — %d consecutive losses from prior session", g_consec_loss);
    }
+   // v30: restore the engine state from the review file (persisted in SaveReviewState).
+   if(g_engine_mode != ENGINE_NEUTRAL)
+      PrintFormat(VTAG+"v30 engine state restored: %s (trigger %s, since_trade %d, consec_at_switch %d)",
+                  EngineModeToStr(g_engine_mode), EngineTriggerToStr(g_engine_trigger),
+                  g_engine_mode_since_trade, g_consec_loss_at_switch);
 
    double wr = g_trades>0 ? 100.0*g_wins/g_trades : 0;
    PrintFormat(VTAG+"Loaded state: Trades=%d WR=%.1f%% R=%+.2f ConsecLoss=%d",
@@ -1580,6 +2035,8 @@ void PostTradeReview(string strategy, double rMultiple, string exitType)
    g_regime_trades[ri]++;
    g_regime_wins[ri] += (rMultiple > 0) ? 1 : 0;
    g_regime_total_r[ri] += rMultiple;
+   // v30: record into the live Kelly + eq-curve outcome tables (learning the live size multiplier + eq-curve vol).
+   RecordKellyEqCurve((rMultiple > 0) ? 1 : -1, rMultiple, g_regime);
 
    // 3. Update time-block counters
    MqlDateTime dt; TimeCurrent(dt);
@@ -1611,6 +2068,8 @@ void PostTradeReview(string strategy, double rMultiple, string exitType)
    // 6. If on losing streak, diagnose root cause
    if(g_consec_loss >= 2)
       AnalyzeLosingStreak();
+   // v30: self-correcting engine — act on consecutive-loss breach.
+   EvaluateSelfCorrectionOnConsecLoss();
 
    // 7. Save review state
    SaveReviewState();
@@ -1798,6 +2257,9 @@ void SaveReviewState()
       FileWriteString(h, StringFormat("POSITION,%I64u,%I64d,%.5f,%.5f,%d,%.2f,%s\n",
                       g_ticket, (long)g_entry_time, g_entry, g_sl, g_dir,
                       g_position_volume, g_last_strategy));
+   // v30: persist the engine state so a restart doesn't lose the self-correct context.
+   FileWriteString(h, StringFormat("ENGINE,%d,%d,%d,%d\n",
+                   (int)g_engine_mode, (int)g_engine_trigger, g_engine_mode_since_trade, g_consec_loss_at_switch));
    FileClose(h);
 }
 
@@ -1911,6 +2373,18 @@ void LoadReviewState()
          g_position_volume = StringToDouble(rp[6]);
          g_last_strategy   = rp[7];
          g_orig_risk       = MathAbs(g_entry - g_sl);
+      }
+      else if(rp[0]=="ENGINE" && rn >= 4)
+      {
+         // v30: restore engine state.
+         int mode = (int)StringToInteger(rp[1]);
+         if(mode >= ENGINE_NEUTRAL && mode <= ENGINE_MEANREV)
+         {
+            g_engine_mode     = (ENUM_ENGINE_MODE)mode;
+            g_engine_trigger  = (ENUM_ENGINE_TRIGGER)StringToInteger(rp[2]);
+            g_engine_mode_since_trade = (int)StringToInteger(rp[3]);
+            g_consec_loss_at_switch   = (int)StringToInteger(rp[4]);
+         }
       }
    }
    FileClose(h);
@@ -2223,9 +2697,7 @@ int GenerateSignal(string &sig_type)
    // new entries rises by one score point; a flat/green day restores it. The
    // governor stops digging when the day is against us, without touching
    // geometry (the 63-cell sweep proved geometry is already optimal).
-   int min_score_eff = InpMinScore;
-   if(InpAdaptiveConviction && g_daily_pnl < 0.0)
-      min_score_eff += 1;
+   int min_score_eff = EffectiveMinScore();   // v30: self-correct + conviction throttle
 
    g_sig_is_band=false; g_last_band_dir=0; g_sig_sl_atr=0; g_sig_tp_atr=0;
 
@@ -2246,6 +2718,10 @@ int GenerateSignal(string &sig_type)
    // probe schedule lets this signal through (keeps their statistics alive).
    for(int i=0;i<5;i++)
       if(dirs[i]!=0 && !StratEnabledOrProbe(i))
+      { dirs[i]=0; scores[i]=0; }
+   // v30: engine-mode gate — the self-correcting engine may gate specific legs.
+   for(int i=0;i<5;i++)
+      if(dirs[i]!=0 && !EngineAllowsLeg(i, dirs[i], (i==4)))
       { dirs[i]=0; scores[i]=0; }
 
    const string LEGNAMES[5]={"PB","BO","MOM","MR","BF"};
@@ -2457,9 +2933,11 @@ void OpenTrade(int direction, string sig_type)
    }
 
    bool ok=false;
+   // v30: dynamic slippage buffer from recent tick velocity.
+   trade.SetDeviationInPoints(EffectiveMaxSlippagePts());
    if(InpLiveExecution)
    {
-      PrintFormat(VTAG+"Executing %s vol=%.2f SL=%.5f TP=%.5f", direction>0?"BUY":"SELL", vol, sl, tp);
+      PrintFormat(VTAG+"Executing %s vol=%.2f SL=%.5f TP=%.5f (dev=%d pts)", direction>0?"BUY":"SELL", vol, sl, tp, EffectiveMaxSlippagePts());
       if(direction>0) ok=trade.Buy(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v"+APP_VERSION);
       else            ok=trade.Sell(vol,_Symbol,0,NormalizeDouble(sl,_Digits),NormalizeDouble(tp,_Digits),"MITEM_v"+APP_VERSION);
       if(!ok)
@@ -2527,6 +3005,10 @@ bool OpenTradeLive(int direction, double entry, double sl, double tp, string rea
    double stop_dist = MathAbs(entry - sl);
    double tp_dist = MathAbs(tp - entry);
    if(stop_dist <= 0 || tp_dist <= 0) return(false);
+
+   // v26.35: VB-BURST can arrive between bars; refresh the same equity basis
+   // used by the classic opener before sizing or applying the fleet cap.
+   g_eq = PaperActive() ? PaperEquity() : AccountInfoDouble(ACCOUNT_EQUITY);
 
    double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
    double tick_value = CalibTickValue(_Symbol);   // v26.25: calibrated — see CalibTickValue()
@@ -3262,10 +3744,11 @@ void UpdateDashboard()
         g_stop_n, g_gap_loss_n,
         (g_gap_loss_n>0 ? g_gap_loss_r_sum/g_gap_loss_n : 0.0),
         g_slip_r_sum);
-   // v26.14: meta-labeling status
+   // v26.14 + v30: meta-labeling status (now live Kelly + eq-curve refined).
    L[15]=InpUseMetaLabel
-        ? StringFormat("MetaLabel: %s | rows=%d | next mult=%+.2fx",
-                       InpMetaLabelCSV, g_ml_rows, MetaLabelMultiplier(1))
+        ? StringFormat("MetaLabel: %s | rows=%d | kelly_mult=%+.2fx | eq_mult=%+.2fx",
+                       InpMetaLabelCSV, g_ml_rows,
+                       LiveKellyMultiplier(1), EqCurveMultiplier())
         : "MetaLabel: OFF";
 
    int line=16;   // v26.14: L[15] is the MetaLabel line now

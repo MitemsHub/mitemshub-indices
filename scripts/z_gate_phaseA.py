@@ -32,6 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from certify_v75 import certify  # noqa: E402
+from artifact_spec import spec_block  # noqa: E402
 
 OUT_DIR = os.path.join(HERE, "..", "artifacts", "z_gate")
 EQ = 200.0
@@ -67,6 +68,7 @@ def split_stats(trades, keep_fn):
 
 def main():
     result = {"protocol": "docs/Z_GATE_PROTOCOL.md (frozen 2026-09-04)",
+              "spec": spec_block(artifact="z_gate_phaseA", tp_mult=1.8),
               "calibration": {}, "validation": None, "verdict": None}
 
     print("== calibration run 2024-08-01 .. 2025-07-31 (tp18) ==")
@@ -142,12 +144,14 @@ def main():
     if ok:
         with open(os.path.join(OUT_DIR, "z_gate_edges.json"), "w") as f:
             json.dump({"form": name, "edges": edges,
+                       "spec": spec_block(artifact="z_gate_edges", tp_mult=1.8),
                        "frozen": "2026-09-04, Phase A calibration — see docs/Z_GATE_PROTOCOL.md"}, f, indent=1)
         print("frozen edges: artifacts/z_gate/z_gate_edges.json")
     _write(result)
 
 
 def _write(result):
+    result.setdefault("spec", spec_block(artifact="z_gate_phaseA", tp_mult=1.8))
     with open(os.path.join(OUT_DIR, "phaseA_result.json"), "w") as f:
         json.dump(result, f, indent=1)
     print("artifact: artifacts/z_gate/phaseA_result.json")

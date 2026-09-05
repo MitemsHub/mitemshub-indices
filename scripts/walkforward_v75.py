@@ -52,7 +52,8 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from certify_v75 import certify, load, spec_block  # noqa: E402
+from certify_v75 import certify, load  # noqa: E402
+from artifact_spec import spec_block  # noqa: E402
 
 DATA = os.path.join(HERE, "..", "artifacts", "v75_replay")
 EQ = 200.0

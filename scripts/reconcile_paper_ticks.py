@@ -59,6 +59,7 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+from artifact_spec import assert_spec_integrity, spec_block  # noqa: E402
 from study_fastfail_ticks import (  # noqa: E402  (single source of ladder truth)
     BAR, MAX_BARS, PLOCK_HW, PLOCK_Z, BE_TRIG, TRAIL_START, TRAIL_DIST,
     ECUT_BARS, ECUT_R, ECUT_HW, TIME_BARS, TIME_EXT_BARS, boot_ci,
@@ -268,7 +269,9 @@ def main():
     ts, bid, ask = load_ticks(ticks_path) if os.path.exists(ticks_path) else ([], [], [])
     spread_med = st.median([a - b for a, b in zip(ask[:20000], bid[:20000])]) if ts else 18.5
 
-    out = {"rule": "pre-registered 2026-09-04, see module docstring", "arms": {}}
+    assert_spec_integrity()
+    out = {"rule": "pre-registered 2026-09-04, see module docstring",
+           "spec": spec_block(artifact="paper_tick_reconciliation"), "arms": {}}
     overall = "KEEP COLLECTING"
     for name, d in [("A", args.a_dir)] + ([("B", args.b_dir)] if args.b_dir else []):
         path = os.path.join(d, LEDGER)

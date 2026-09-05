@@ -34,6 +34,8 @@ import math
 import os
 from datetime import datetime, timezone
 
+from artifact_spec import assert_spec_integrity, spec_block
+
 LEDGER = "MitemshubAI_paper_Volatility_75_Index.csv"
 OUT = os.path.join("artifacts", "v75_replay", "ab_adjudication.json")
 PAIR_TOL_S = 90           # pairing tolerance in SECONDS (ledger epochs are seconds)
@@ -141,7 +143,9 @@ def main():
     ap.add_argument("--b-dir", required=True, help="arm B (TP 2.4 TP24) terminal Files dir")
     args = ap.parse_args()
 
+    assert_spec_integrity()
     out = {"rule": "see module docstring; pre-registered 2026-09-04",
+           "spec": spec_block(artifact="ab_adjudication", tp_mult="A=1.8 / B=2.4"),
            "arms": {}, "pairs": None, "verdict": None}
     data = {}
     for name, d in (("A_tp18", args.a_dir), ("B_tp24", args.b_dir)):
@@ -162,6 +166,10 @@ def main():
 
     if not data.get("A_tp18") or not data.get("B_tp24"):
         print("\nVERDICT: KEEP COLLECTING (an arm has no data)")
+        out["verdict"] = "KEEP COLLECTING (an arm has no data)"
+        with open(OUT, "w") as f:
+            json.dump(out, f, indent=1)
+        print(f"artifact: {OUT}")
         return
 
     ta, ca, pa = data["A_tp18"]
