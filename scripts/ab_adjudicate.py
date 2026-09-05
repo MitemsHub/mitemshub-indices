@@ -100,16 +100,24 @@ def arm_stats(trades, curve):
 
 
 def pair(trades_a, trades_b):
-    """Greedy nearest-epoch pairing within tolerance."""
-    b = sorted(trades_b, key=lambda t: t["epoch"])
+    """Greedy nearest-epoch pairing within tolerance.
+
+    Pairs on the OPEN epoch (the pre-registered rule: arms share the signal
+    engine, so signals align; CLOSE epochs diverge because the arms hold for
+    different durations under different TP geometry). Falls back to the close
+    epoch only when a CLOSE row had no matching OPEN row."""
+    def oe(t):
+        return t["open_epoch"] if t.get("open_epoch") is not None else t["epoch"]
+    b = sorted(trades_b, key=oe)
     used = set()
     pairs = []
     for ta in trades_a:
+        ta_e = oe(ta)
         best, best_d = None, None
         for j, tb in enumerate(b):
             if j in used:
                 continue
-            d = abs(tb["epoch"] - ta["epoch"])
+            d = abs(oe(tb) - ta_e)
             if d <= PAIR_TOL_S and (best_d is None or d < best_d):
                 best, best_d = j, d
         if best is not None:
@@ -162,10 +170,15 @@ def main():
     deltas = [x["r"] - y["r"] for x, y in pairs]
     t = tstat(deltas)
     dR = sum(x["r"] for x in ta) - sum(y["r"] for y in tb)
-    out["pairs"] = {"n_pairs": len(pairs), "mean_delta_r": round(sum(deltas) / len(deltas), 3) if deltas else None,
+    mean_d = round(sum(deltas) / len(deltas), 3) if deltas else None
+    out["pairs"] = {"n_pairs": len(pairs), "mean_delta_r": mean_d,
                     "t": round(t, 2), "total_r_diff": round(dR, 2)}
-    print(f"\npaired: {len(pairs)} pairs, mean dR={out['pairs']['mean_delta_r']:+.3f} t={t:+.2f} "
-          f"| totalR diff (A-B)={dR:+.2f}")
+    if deltas:
+        print(f"\npaired: {len(pairs)} pairs, mean dR={mean_d:+.3f} t={t:+.2f} "
+              f"| totalR diff (A-B)={dR:+.2f}")
+    else:
+        print(f"\npaired: 0 pairs within {PAIR_TOL_S}s of OPEN epoch — the arms' "
+              f"signals did not align; check clocks/signal sharing")
 
     gate = []
     for name, tr in (("A_tp18", ta), ("B_tp24", tb)):

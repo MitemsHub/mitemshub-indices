@@ -51,7 +51,7 @@ Live trading is authorized when **all three** hold:
 1. Terminal A → chart01 → remove EA → re-attach **MitemshubAI** → Load **`MitemshubAI_VOL75_LIVE.set`** → confirm banner shows `LIVE` (not `PAPER MODE`) and magic 7788075 → OK.
 2. Same account, same chart, **one EA on V75 only** — never also load TP24/LIVE on a second chart in the same terminal.
 3. Start with broker equity ≥ $50 (floor $31). Withdraw profits on a schedule; the EA carries no deposit-protection, the 20% cap is the only brake.
-4. First week live: run `python scripts/paper_pipeline.py` daily; compare live fills against the paper ledger (same signals should print in both — any divergence means the live attach drifted from the preset).
+4. First week live: run `python scripts/morning_status.py` each morning (arm health, overnight connection gaps, closed-trade counts, gate progress X/30 — read-only) and `python scripts/paper_pipeline.py` daily; compare live fills against the paper ledger (same signals should print in both — any divergence means the live attach drifted from the preset).
 
 ## Non-negotiables
 
@@ -103,3 +103,10 @@ its artifact bit-identically (all 135 trades equal), all three net re-baselines 
 exactly (`*_check0905.json`). Found and fixed a CLI-only crash in the trade-dump print
 (`r_extra` popped from trades before `main()` printed them; reports were written before
 the crash — engine math untouched). Preset validator 15/15 PASS.
+
+**2026-09-05 pre-data drill**: the entire paper-data path (wire-format ledger → A/B
+adjudication → reconciler gate → status parsing) proven on synthetic ledgers
+(`scripts/first_trade_drill.py`, 10/10). Caught two adjudicator bugs before any real
+data: pairing used CLOSE epochs instead of the frozen OPEN-epoch rule, and zero pairs
+crashed the verdict. Both fixed. `scripts/morning_status.py` = the one-command morning
+check (arms, gaps, gate X/30).

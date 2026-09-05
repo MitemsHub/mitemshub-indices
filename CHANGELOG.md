@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Morning status tool + first-trade drill + 2 adjudicator fixes] - 2026-09-05
+
+### Added — scripts/morning_status.py: the one-command morning check (read-only)
+- Arm health per terminal (process count via tasklist, EA telemetry write age with a 2h staleness line, ledger veq + integrity), night-gap audit from the UTF-16 terminal journals ("connection lost → authorized" pairs, cross-midnight capable, sub-60s MT5 access-point flaps summarized instead of listed), and go-live gate progress X/30 per arm with days-to-30 at the observed rate. `--strict` exits 1 on unhealthy signals. Validated live: catches the 01:14→08:24 sleep exactly.
+
+### Added — scripts/first_trade_drill.py: prove the paper-data path BEFORE the first real fill (10/10 green)
+- Generates synthetic ledgers in the exact EA v26.35 wire format (OPEN/CLOSE/EQ, seconds epochs) in temp dirs and runs the real downstream tools: adjudicator verdicts for empty arms (KEEP COLLECTING), below-gate (ETA projection), clean A-win (P1/P2/P3 all hold), and symmetric-noise pairs (INCONCLUSIVE — the rule refuses to declare on noise); reconciler 7-day gate fires with no broker pull; morning-status ledger parser + cross-midnight journal pairing unit-checked. Ends by restoring truthful real-state artifacts (removes drill-written ones when no real ledger exists yet).
+- **Bug found by the drill #1 (HIGH): `ab_adjudicate.py` paired on CLOSE epochs, not the frozen OPEN-epoch rule** — the arms hold different durations under different TP geometry, so in production their CLOSE times would almost never align and the adjudication would starve. Fixed to pair on `open_epoch` (falls back to close epoch only for OPEN-less rows).
+- **Bug found by the drill #2 (MEDIUM): zero pairs crashed the adjudicator** (`None` mean formatted with `:+.3f` → TypeError, exit 1, no verdict line). Now prints an explicit zero-pair diagnostic.
+- Drill-design lesson recorded in-code: giving the B arm a different `tp_mult` in the "no signal" scenario embeds a REAL winner-pay effect (2.4 vs 1.8) that the paired test correctly catches — the noise arm must share A's outcomes plus symmetric noise.
+
+### Added — docs/MILESTONE_MEMO_v2635.md: one-page milestone memo
+- What was claimed (cost-blind +130%), what the re-baseline says (+4.37R net, t=0.35, TP 2.4 negative), the critique replication outcome (cost flaw confirmed; structure claims rejected), the four v26.35 EA fixes, the pre-registered gate as sole authorizer, and the honest standing risks.
+
 ## [Verification re-run + CLI hotfix] - 2026-09-05 (morning)
 
 ### Fixed — certify_v75.py CLI crashed after writing every report (cosmetic, engine untouched)
